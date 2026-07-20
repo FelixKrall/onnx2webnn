@@ -138,8 +138,12 @@ impl TensorData {
             // optional-input placeholders and have no payload.
             if empty {
                 return match data_type {
-                    x if x == TensorProto_DataType::Int64 as i32 => Ok(TensorData::Int64(Vec::new())),
-                    x if x == TensorProto_DataType::Int32 as i32 => Ok(TensorData::Int32(Vec::new())),
+                    x if x == TensorProto_DataType::Int64 as i32 => {
+                        Ok(TensorData::Int64(Vec::new()))
+                    }
+                    x if x == TensorProto_DataType::Int32 as i32 => {
+                        Ok(TensorData::Int32(Vec::new()))
+                    }
                     x if x == TensorProto_DataType::Float as i32
                         || x == TensorProto_DataType::Float16 as i32 =>
                     {
@@ -148,10 +152,14 @@ impl TensorData {
                     x if x == TensorProto_DataType::Double as i32 => {
                         Ok(TensorData::Float64(Vec::new()))
                     }
-                    x if x == TensorProto_DataType::Uint8 as i32 => Ok(TensorData::UInt8(Vec::new())),
+                    x if x == TensorProto_DataType::Uint8 as i32 => {
+                        Ok(TensorData::UInt8(Vec::new()))
+                    }
                     x if x == TensorProto_DataType::Int8 as i32 => Ok(TensorData::Int8(Vec::new())),
                     _ => Err(OnnxError::TypeConversion(
-                        webnn_onnx_utils::error::ConversionError::UnsupportedOnnxDataType(data_type),
+                        webnn_onnx_utils::error::ConversionError::UnsupportedOnnxDataType(
+                            data_type,
+                        ),
                     )),
                 };
             }

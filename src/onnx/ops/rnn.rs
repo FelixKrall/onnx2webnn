@@ -3,18 +3,20 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// Recurrent operators: GRU, LSTM
+// Recurrent and positional operators: GRU, LSTM, RotaryEmbedding
 
 use crate::onnx::builder::{map_ast_data_type, map_op_error, operand_index, OnnxBuilder};
 use crate::onnx::builder_helpers::{
-    map_op_result, output_label, record_node_output, slice_with_params,
+    i64_slice_to_mldim, map_op_result, output_label, record_node_output, reshape_with_shape,
+    slice_with_params,
 };
 use crate::onnx::convert::OnnxError;
 use crate::onnx::ops::{ConversionContext, ConversionResult, OpHandler};
 use crate::protos::onnx::NodeProto;
 use rustnn::mlcontext::MLOperand;
 use rustnn::operator_options::{
-    MLDimension, MLGruOptions, MLLstmOptions, MLSqueezeOptions, MLUnsqueezeOptions,
+    MLDimension, MLGatherOptions, MLGruOptions, MLLstmOptions, MLSliceOptions, MLSqueezeOptions,
+    MLTransposeOptions, MLUnsqueezeOptions,
 };
 use rustnn::DataType;
 
@@ -22,7 +24,7 @@ pub struct RnnHandler;
 
 impl OpHandler for RnnHandler {
     fn supports(&self, op_type: &str) -> bool {
-        matches!(op_type, "GRU" | "LSTM")
+        matches!(op_type, "GRU" | "LSTM" | "RotaryEmbedding")
     }
 
     fn convert(
@@ -41,12 +43,333 @@ impl OpHandler for RnnHandler {
         match op_type {
             "GRU" => self.convert_gru(node, &node_name, context, b),
             "LSTM" => self.convert_lstm(node, &node_name, context, b),
+            "RotaryEmbedding" => self.convert_rotary_embedding(node, &node_name, context, b),
             _ => Err(OnnxError::unsupported_op(op_type.to_string(), node_name)),
         }
     }
 }
 
 impl RnnHandler {
+    fn convert_rotary_embedding(
+        &self,
+        node: &NodeProto,
+        node_name: &str,
+        context: &ConversionContext,
+        b: &mut OnnxBuilder<'_, '_, '_>,
+    ) -> Result<ConversionResult, OnnxError> {
+        let inputs = node.input.as_slice();
+        if !(3..=4).contains(&inputs.len()) {
+            return Err(OnnxError::InvalidShape(format!(
+                "RotaryEmbedding expects 3 or 4 inputs, got {}",
+                inputs.len()
+            )));
+        }
+
+        let is_ms_domain = node.domain == "com.microsoft";
+        let (x_name, position_ids_name, cos_name, sin_name) = if is_ms_domain {
+            if inputs.len() != 4 {
+                return Err(OnnxError::InvalidShape(
+                    "com.microsoft.RotaryEmbedding expects \
+                     (input, position_ids, cos_cache, sin_cache)"
+                        .to_string(),
+                ));
+            }
+            (
+                inputs[0].as_str(),
+                Some(inputs[1].as_str()),
+                inputs[2].as_str(),
+                inputs[3].as_str(),
+            )
+        } else {
+            (
+                inputs[0].as_str(),
+                inputs
+                    .get(3)
+                    .filter(|name| !name.is_empty())
+                    .map(String::as_str),
+                inputs[1].as_str(),
+                inputs[2].as_str(),
+            )
+        };
+
+        let input_shape = context.resolve_shape(x_name).ok_or_else(|| {
+            OnnxError::InvalidShape("RotaryEmbedding requires a known input shape".to_string())
+        })?;
+        if input_shape.len() != 3 && input_shape.len() != 4 {
+            return Err(OnnxError::InvalidShape(format!(
+                "RotaryEmbedding input rank must be 3 or 4, got {}",
+                input_shape.len()
+            )));
+        }
+        if input_shape.iter().any(|&dim| dim <= 0) {
+            return Err(OnnxError::InvalidShape(format!(
+                "RotaryEmbedding requires concrete positive dimensions, got {input_shape:?}"
+            )));
+        }
+
+        let mut interleaved = false;
+        let mut num_heads_attr = 0i64;
+        let mut rotary_dim_attr = 0i64;
+        let mut scale = 1.0f32;
+        for attr in &node.attribute {
+            match attr.name.as_str() {
+                "interleaved" => interleaved = attr.i != 0,
+                "num_heads" => num_heads_attr = attr.i,
+                "rotary_embedding_dim" => rotary_dim_attr = attr.i,
+                "scale" => scale = attr.f,
+                _ => {}
+            }
+        }
+        if (scale - 1.0).abs() > f32::EPSILON {
+            return Err(OnnxError::unsupported_op(
+                format!("RotaryEmbedding(scale={scale})"),
+                node_name.to_string(),
+            ));
+        }
+
+        let cos_shape = context.resolve_shape(cos_name).ok_or_else(|| {
+            OnnxError::InvalidShape("RotaryEmbedding requires a known cos_cache shape".to_string())
+        })?;
+        let cache_half = *cos_shape.last().filter(|&&dim| dim > 0).ok_or_else(|| {
+            OnnxError::InvalidShape("RotaryEmbedding cos_cache has invalid shape".to_string())
+        })?;
+        let rotary_dim = if rotary_dim_attr > 0 {
+            rotary_dim_attr
+        } else {
+            cache_half.checked_mul(2).ok_or_else(|| {
+                OnnxError::InvalidShape("RotaryEmbedding dimension overflow".to_string())
+            })?
+        };
+        if rotary_dim % 2 != 0 || rotary_dim / 2 != cache_half {
+            return Err(OnnxError::InvalidShape(format!(
+                "RotaryEmbedding dimension {rotary_dim} does not match cache width {cache_half}"
+            )));
+        }
+
+        let (batch, sequence, num_heads, head_size, restore_4d) = if input_shape.len() == 4 {
+            (
+                input_shape[0],
+                input_shape[2],
+                input_shape[1],
+                input_shape[3],
+                true,
+            )
+        } else {
+            let hidden = input_shape[2];
+            let head_size = if num_heads_attr > 0 {
+                if hidden % num_heads_attr != 0 {
+                    return Err(OnnxError::InvalidShape(format!(
+                        "RotaryEmbedding hidden size {hidden} is not divisible by num_heads \
+                         {num_heads_attr}"
+                    )));
+                }
+                hidden / num_heads_attr
+            } else {
+                rotary_dim
+            };
+            if head_size <= 0 || hidden % head_size != 0 {
+                return Err(OnnxError::InvalidShape(format!(
+                    "RotaryEmbedding cannot derive heads from hidden size {hidden} and \
+                     head size {head_size}"
+                )));
+            }
+            (
+                input_shape[0],
+                input_shape[1],
+                hidden / head_size,
+                head_size,
+                false,
+            )
+        };
+        if rotary_dim > head_size {
+            return Err(OnnxError::InvalidShape(format!(
+                "RotaryEmbedding dimension {rotary_dim} exceeds head size {head_size}"
+            )));
+        }
+
+        let label = output_label(node, node_name);
+        let mut x = b.resolve_operand(x_name)?;
+        if restore_4d {
+            x = b
+                .builder
+                .transpose_with_options(
+                    x,
+                    MLTransposeOptions {
+                        label: format!("{label}__to_bsnh"),
+                        permutation: vec![0, 2, 1, 3],
+                    },
+                )
+                .map_err(map_op_error)?;
+        }
+        x = reshape_with_shape(
+            b,
+            x,
+            &format!("{label}__heads"),
+            i64_slice_to_mldim(&[batch, sequence, num_heads, head_size])?,
+        )?;
+
+        let mut cos = b.resolve_operand(cos_name)?;
+        let mut sin = b.resolve_operand(sin_name)?;
+        if let Some(position_ids_name) = position_ids_name {
+            let position_ids = b.resolve_operand(position_ids_name)?;
+            cos = b
+                .builder
+                .gather_with_options(
+                    cos,
+                    position_ids,
+                    MLGatherOptions {
+                        label: format!("{label}__cos_gather"),
+                        axis: 0,
+                    },
+                )
+                .map_err(map_op_error)?;
+            sin = b
+                .builder
+                .gather_with_options(
+                    sin,
+                    position_ids,
+                    MLGatherOptions {
+                        label: format!("{label}__sin_gather"),
+                        axis: 0,
+                    },
+                )
+                .map_err(map_op_error)?;
+        }
+        let cache_shape = i64_slice_to_mldim(&[batch, sequence, 1, cache_half])?;
+        cos = reshape_with_shape(b, cos, &format!("{label}__cos"), cache_shape.clone())?;
+        sin = reshape_with_shape(b, sin, &format!("{label}__sin"), cache_shape)?;
+
+        let full_shape = [batch, sequence, num_heads, head_size];
+        let rotate_shape = [batch, sequence, num_heads, rotary_dim];
+        let x_rotate = slice_operand(
+            b,
+            x,
+            &[0, 0, 0, 0],
+            &rotate_shape,
+            &[1, 1, 1, 1],
+            &format!("{label}__rotate"),
+        )?;
+        let half = rotary_dim / 2;
+        let half_shape = [batch, sequence, num_heads, half];
+        let (x1, x2) = if interleaved {
+            // WebNN slice `sizes` describe the input extent before applying strides.
+            let even_extent = [batch, sequence, num_heads, rotary_dim];
+            let odd_extent = [batch, sequence, num_heads, rotary_dim - 1];
+            (
+                slice_operand(
+                    b,
+                    x_rotate,
+                    &[0, 0, 0, 0],
+                    &even_extent,
+                    &[1, 1, 1, 2],
+                    &format!("{label}__even"),
+                )?,
+                slice_operand(
+                    b,
+                    x_rotate,
+                    &[0, 0, 0, 1],
+                    &odd_extent,
+                    &[1, 1, 1, 2],
+                    &format!("{label}__odd"),
+                )?,
+            )
+        } else {
+            (
+                slice_operand(
+                    b,
+                    x_rotate,
+                    &[0, 0, 0, 0],
+                    &half_shape,
+                    &[1, 1, 1, 1],
+                    &format!("{label}__first_half"),
+                )?,
+                slice_operand(
+                    b,
+                    x_rotate,
+                    &[0, 0, 0, half],
+                    &half_shape,
+                    &[1, 1, 1, 1],
+                    &format!("{label}__second_half"),
+                )?,
+            )
+        };
+
+        let cos_x1 = b.builder.mul(x1, cos).map_err(map_op_error)?;
+        let sin_x2 = b.builder.mul(x2, sin).map_err(map_op_error)?;
+        let real = b.builder.sub(cos_x1, sin_x2).map_err(map_op_error)?;
+        let sin_x1 = b.builder.mul(x1, sin).map_err(map_op_error)?;
+        let cos_x2 = b.builder.mul(x2, cos).map_err(map_op_error)?;
+        let imag = b.builder.add(sin_x1, cos_x2).map_err(map_op_error)?;
+
+        let rotated = if interleaved {
+            let component_shape = i64_slice_to_mldim(&[batch, sequence, num_heads, half, 1])?;
+            let real = reshape_with_shape(
+                b,
+                real,
+                &format!("{label}__real_component"),
+                component_shape.clone(),
+            )?;
+            let imag = reshape_with_shape(
+                b,
+                imag,
+                &format!("{label}__imag_component"),
+                component_shape,
+            )?;
+            let joined = b.builder.concat(&[real, imag], 4).map_err(map_op_error)?;
+            reshape_with_shape(
+                b,
+                joined,
+                &format!("{label}__interleaved"),
+                i64_slice_to_mldim(&rotate_shape)?,
+            )?
+        } else {
+            b.builder.concat(&[real, imag], 3).map_err(map_op_error)?
+        };
+
+        let mut out = if rotary_dim < head_size {
+            let tail_shape = [batch, sequence, num_heads, head_size - rotary_dim];
+            let tail = slice_operand(
+                b,
+                x,
+                &[0, 0, 0, rotary_dim],
+                &tail_shape,
+                &[1, 1, 1, 1],
+                &format!("{label}__tail"),
+            )?;
+            b.builder
+                .concat(&[rotated, tail], 3)
+                .map_err(map_op_error)?
+        } else {
+            rotated
+        };
+        debug_assert_eq!(full_shape[3], head_size);
+        if restore_4d {
+            out = b
+                .builder
+                .transpose_with_options(
+                    out,
+                    MLTransposeOptions {
+                        label: format!("{label}__restore_bnsd"),
+                        permutation: vec![0, 2, 1, 3],
+                    },
+                )
+                .map_err(map_op_error)?;
+        } else {
+            out = reshape_with_shape(b, out, &label, i64_slice_to_mldim(input_shape)?)?;
+        }
+
+        if let Some(name) = node.output.first().filter(|name| !name.is_empty()) {
+            record_node_output(b, name, &label, out);
+        }
+        let mut result = ConversionResult::default();
+        if let Some(name) = node.output.first().filter(|name| !name.is_empty()) {
+            result
+                .output_types
+                .insert(name.clone(), rnn_input_dtype(context, x_name));
+        }
+        Ok(result)
+    }
+
     fn convert_gru(
         &self,
         node: &NodeProto,
@@ -284,6 +607,37 @@ impl RnnHandler {
     }
 }
 
+fn slice_operand(
+    b: &mut OnnxBuilder<'_, '_, '_>,
+    input: MLOperand,
+    starts: &[i64],
+    sizes: &[i64],
+    strides: &[u32],
+    label: &str,
+) -> Result<MLOperand, OnnxError> {
+    let starts: Vec<u32> = starts
+        .iter()
+        .map(|&value| {
+            u32::try_from(value).map_err(|_| {
+                OnnxError::InvalidShape(format!(
+                    "RotaryEmbedding slice start {value} is out of range"
+                ))
+            })
+        })
+        .collect::<Result<_, _>>()?;
+    b.builder
+        .slice_with_options(
+            input,
+            &starts,
+            &i64_slice_to_mldim(sizes)?,
+            MLSliceOptions {
+                label: label.to_string(),
+                strides: strides.to_vec(),
+            },
+        )
+        .map_err(map_op_error)
+}
+
 fn require_hidden_size(node: &NodeProto, op: &str) -> Result<u32, OnnxError> {
     for attr in node.attribute.as_slice() {
         if attr.name.as_str() == "hidden_size" && attr.i > 0 {
@@ -468,4 +822,58 @@ fn maybe_cast_for_rnn(
             OnnxBuilder::labeled_options(label),
         )
         .map_err(map_op_error)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn converts_microsoft_interleaved_rotary_embedding() {
+        let handler = RnnHandler;
+        let node = NodeProto {
+            op_type: "RotaryEmbedding".to_string(),
+            domain: "com.microsoft".to_string(),
+            name: "rope".to_string(),
+            input: vec![
+                "x".to_string(),
+                "position_ids".to_string(),
+                "cos_cache".to_string(),
+                "sin_cache".to_string(),
+            ],
+            output: vec!["y".to_string()],
+            attribute: vec![crate::protos::onnx::AttributeProto {
+                name: "interleaved".to_string(),
+                i: 1,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let initializers = HashMap::new();
+        let value_shapes = HashMap::from([
+            ("x".to_string(), vec![1, 2, 128]),
+            ("position_ids".to_string(), vec![1, 2]),
+            ("cos_cache".to_string(), vec![16, 32]),
+            ("sin_cache".to_string(), vec![16, 32]),
+        ]);
+        let value_types = HashMap::from([
+            ("x".to_string(), DataType::Float32),
+            ("position_ids".to_string(), DataType::Int64),
+            ("cos_cache".to_string(), DataType::Float32),
+            ("sin_cache".to_string(), DataType::Float32),
+        ]);
+        let const_values = HashMap::new();
+        let value_ids = HashMap::new();
+        let context = ConversionContext {
+            initializers: &initializers,
+            value_shapes: &value_shapes,
+            value_shape_dims: crate::onnx::ops::empty_value_shape_dims(),
+            const_values: &const_values,
+            value_ids: &value_ids,
+            value_types: &value_types,
+        };
+
+        crate::onnx::ops::convert_handler_with_context(&handler, &node, &context).unwrap();
+    }
 }

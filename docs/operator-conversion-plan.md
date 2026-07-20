@@ -209,6 +209,9 @@ These appear in graphs but become constants or metadata during `--optimize` / co
 | ThresholdedRelu | `Relu` + comparison + `Where` | P3 |
 | GroupNormalization | Mean/var over group dims + `Sub`/`Div`/`Mul`/`Add` | P1 — common in vision |
 | RMSNormalization | L2 norm over axes + scale (new in opset 23) | P1 — common in LLMs |
+| SimplifiedLayerNormalization | Alias of RMSNormalization | Implemented — standard/exporter fusion |
+| SkipSimplifiedLayerNormalization | Residual/bias add + RMSNormalization | Implemented — com.microsoft fusion |
+| RotaryEmbedding | Gather caches + rotate pairs + concatenate | Implemented — standard and com.microsoft |
 | CumProd | `cumulativeSum` on log + `Exp`, or iterative multiply subgraph | P3 — new in opset 26 |
 
 #### 2c. Advanced single-entry WebNN ops (high attribute complexity)
@@ -316,7 +319,7 @@ vs inference export).
 | Operators | Reason |
 |-----------|--------|
 | **Attention** (opset 24) | Composite op; no single WebNN op — could be Stage 2 decomposition in future, but out of scope until spec stabilizes |
-| **RotaryEmbedding** (opset 23) | No WebNN op; decompose manually if needed |
+| **MoE** (com.microsoft) | Requires TopK expert routing and efficient sparse dispatch, neither available in WebNN |
 
 #### 3m. Miscellaneous
 

@@ -5,7 +5,8 @@
  */
 
 // Normalization operators: BatchNormalization, InstanceNormalization, LayerNormalization,
-// GroupNormalization, RMSNormalization, Softmax, LogSoftmax, Hardmax
+// GroupNormalization, RMSNormalization, SimplifiedLayerNormalization,
+// SkipSimplifiedLayerNormalization, Softmax, LogSoftmax, Hardmax
 
 use crate::onnx::builder::{map_ast_data_type, map_op_error, operand_index, OnnxBuilder};
 use crate::onnx::builder_helpers::{
@@ -35,6 +36,8 @@ impl OpHandler for NormalizationHandler {
                 | "LayerNormalization"
                 | "GroupNormalization"
                 | "RMSNormalization"
+                | "SimplifiedLayerNormalization"
+                | "SkipSimplifiedLayerNormalization"
                 | "Softmax"
                 | "LogSoftmax"
                 | "Hardmax"
@@ -62,6 +65,12 @@ impl OpHandler for NormalizationHandler {
             "LayerNormalization" => self.convert_layer_norm(node, &node_name, context, b),
             "GroupNormalization" => self.convert_group_normalization(node, &node_name, context, b),
             "RMSNormalization" => self.convert_rms_normalization(node, &node_name, context, b),
+            "SimplifiedLayerNormalization" => {
+                self.convert_rms_normalization(node, &node_name, context, b)
+            }
+            "SkipSimplifiedLayerNormalization" => {
+                self.convert_skip_simplified_layer_normalization(node, &node_name, context, b)
+            }
             "Softmax" => self.convert_softmax(node, &node_name, context, b),
             "LogSoftmax" => self.convert_log_softmax(node, &node_name, context, b),
             "Hardmax" => self.convert_hardmax(node, &node_name, context, b),
@@ -458,7 +467,6 @@ impl NormalizationHandler {
             }
         }
 
-        let output_name = output_label(node, node_name);
         let input = b.resolve_operand(&inputs[0])?;
         let scale = b.resolve_operand(&inputs[1])?;
         let axis = if let Some(rank) = context.input_rank(inputs[0].as_str()) {
@@ -467,58 +475,16 @@ impl NormalizationHandler {
             axis as u32
         };
 
-        let sq_label = format!("{output_name}__rms_sq");
-        let squared = b
-            .builder
-            .mul_with_options(input, input, OnnxBuilder::labeled_options(&sq_label))
-            .map_err(map_op_error)?;
-
-        let mean_label = format!("{output_name}__rms_mean");
-        let mean_sq = b
-            .builder
-            .reduce_mean_with_options(
-                squared,
-                MLReduceOptions {
-                    label: mean_label.clone(),
-                    axes: Some(vec![axis]),
-                    keep_dimensions: true,
-                },
-            )
-            .map_err(map_op_error)?;
-
-        let input_dtype = resolve_value_type(context, &inputs[0]).unwrap_or(DataType::Float32);
-        let eps_op = register_scalar_like(
+        let output_name = output_label(node, node_name);
+        let out = rms_normalize_operand(
             b,
-            &format!("{output_name}__rms_eps"),
-            epsilon as f32,
-            input_dtype,
+            input,
+            scale,
+            axis,
+            epsilon,
+            resolve_value_type(context, &inputs[0]).unwrap_or(DataType::Float32),
+            &output_name,
         )?;
-        let mean_eps_label = format!("{output_name}__rms_mean_eps");
-        let mean_eps = b
-            .builder
-            .add_with_options(
-                mean_sq,
-                eps_op,
-                OnnxBuilder::labeled_options(&mean_eps_label),
-            )
-            .map_err(map_op_error)?;
-
-        let rms_label = format!("{output_name}__rms_denom");
-        let rms = b
-            .builder
-            .sqrt_with_options(mean_eps, OnnxBuilder::labeled_options(&rms_label))
-            .map_err(map_op_error)?;
-
-        let normed_label = format!("{output_name}__rms_normed");
-        let normed = b
-            .builder
-            .div_with_options(input, rms, OnnxBuilder::labeled_options(&normed_label))
-            .map_err(map_op_error)?;
-
-        let out = b
-            .builder
-            .mul_with_options(normed, scale, OnnxBuilder::labeled_options(&output_name))
-            .map_err(map_op_error)?;
 
         if let Some(onnx_out) = node.output.first() {
             record_node_output(b, onnx_out, &output_name, out);
@@ -526,6 +492,77 @@ impl NormalizationHandler {
             b.record_operand(&[&output_name], out);
         }
         Ok(ConversionResult::default())
+    }
+
+    fn convert_skip_simplified_layer_normalization(
+        &self,
+        node: &NodeProto,
+        node_name: &str,
+        context: &ConversionContext,
+        b: &mut OnnxBuilder<'_, '_, '_>,
+    ) -> Result<ConversionResult, OnnxError> {
+        let inputs = node.input.as_slice();
+        if !(3..=4).contains(&inputs.len()) {
+            return Err(OnnxError::InvalidShape(format!(
+                "SkipSimplifiedLayerNormalization expects 3 or 4 inputs \
+                 (input, skip, gamma[, bias]), got {}",
+                inputs.len()
+            )));
+        }
+
+        let output_name = output_label(node, node_name);
+        let input = b.resolve_operand(&inputs[0])?;
+        let skip = b.resolve_operand(&inputs[1])?;
+        let gamma = b.resolve_operand(&inputs[2])?;
+        let mut sum = b
+            .builder
+            .add_with_options(
+                input,
+                skip,
+                OnnxBuilder::labeled_options(&format!("{output_name}__sum")),
+            )
+            .map_err(map_op_error)?;
+        if let Some(bias_name) = inputs.get(3).filter(|name| !name.is_empty()) {
+            let bias = b.resolve_operand(bias_name)?;
+            sum = b
+                .builder
+                .add_with_options(
+                    sum,
+                    bias,
+                    OnnxBuilder::labeled_options(&format!("{output_name}__sum_bias")),
+                )
+                .map_err(map_op_error)?;
+        }
+
+        let epsilon = node
+            .attribute
+            .iter()
+            .find(|attr| attr.name == "epsilon")
+            .map(|attr| attr.f as f64)
+            .unwrap_or(1e-5);
+        let rank = context.input_rank(&inputs[0]).ok_or_else(|| {
+            OnnxError::InvalidShape(
+                "SkipSimplifiedLayerNormalization requires a known input rank".to_string(),
+            )
+        })?;
+        let axis = u32::try_from(rank.saturating_sub(1)).map_err(|_| {
+            OnnxError::InvalidShape(
+                "SkipSimplifiedLayerNormalization input rank is out of range".to_string(),
+            )
+        })?;
+        let input_dtype = resolve_value_type(context, &inputs[0]).unwrap_or(DataType::Float32);
+        let out = rms_normalize_operand(b, sum, gamma, axis, epsilon, input_dtype, &output_name)?;
+
+        let mut result = ConversionResult::default();
+        if let Some(name) = node.output.first().filter(|name| !name.is_empty()) {
+            record_node_output(b, name, &output_name, out);
+            result.output_types.insert(name.clone(), input_dtype);
+        }
+        if let Some(name) = node.output.get(3).filter(|name| !name.is_empty()) {
+            record_node_output(b, name, &format!("{output_name}__residual_sum"), sum);
+            result.output_types.insert(name.clone(), input_dtype);
+        }
+        Ok(result)
     }
 
     fn convert_softmax(
@@ -727,6 +764,63 @@ impl NormalizationHandler {
     }
 }
 
+fn rms_normalize_operand(
+    b: &mut OnnxBuilder<'_, '_, '_>,
+    input: MLOperand,
+    scale: MLOperand,
+    axis: u32,
+    epsilon: f64,
+    input_dtype: DataType,
+    label: &str,
+) -> Result<MLOperand, OnnxError> {
+    let squared = b
+        .builder
+        .mul_with_options(
+            input,
+            input,
+            OnnxBuilder::labeled_options(&format!("{label}__rms_sq")),
+        )
+        .map_err(map_op_error)?;
+    let mean_sq = b
+        .builder
+        .reduce_mean_with_options(
+            squared,
+            MLReduceOptions {
+                label: format!("{label}__rms_mean"),
+                axes: Some(vec![axis]),
+                keep_dimensions: true,
+            },
+        )
+        .map_err(map_op_error)?;
+    let eps = register_scalar_like(b, &format!("{label}__rms_eps"), epsilon as f32, input_dtype)?;
+    let mean_eps = b
+        .builder
+        .add_with_options(
+            mean_sq,
+            eps,
+            OnnxBuilder::labeled_options(&format!("{label}__rms_mean_eps")),
+        )
+        .map_err(map_op_error)?;
+    let rms = b
+        .builder
+        .sqrt_with_options(
+            mean_eps,
+            OnnxBuilder::labeled_options(&format!("{label}__rms_denom")),
+        )
+        .map_err(map_op_error)?;
+    let normed = b
+        .builder
+        .div_with_options(
+            input,
+            rms,
+            OnnxBuilder::labeled_options(&format!("{label}__rms_normed")),
+        )
+        .map_err(map_op_error)?;
+    b.builder
+        .mul_with_options(normed, scale, OnnxBuilder::labeled_options(label))
+        .map_err(map_op_error)
+}
+
 fn register_f32_scalar(
     b: &mut OnnxBuilder<'_, '_, '_>,
     name: &str,
@@ -836,6 +930,8 @@ mod tests {
         assert!(handler.supports("Softmax"));
         assert!(handler.supports("GroupNormalization"));
         assert!(handler.supports("RMSNormalization"));
+        assert!(handler.supports("SimplifiedLayerNormalization"));
+        assert!(handler.supports("SkipSimplifiedLayerNormalization"));
         assert!(handler.supports("LogSoftmax"));
         assert!(handler.supports("Hardmax"));
     }
@@ -918,6 +1014,49 @@ mod tests {
             value_types: &value_types,
         };
         crate::onnx::ops::convert_handler_with_context(&handler, &node, &context).unwrap();
+    }
+
+    #[test]
+    fn test_convert_simplified_and_skip_simplified_layer_normalization() {
+        use std::collections::HashMap;
+
+        let handler = NormalizationHandler;
+        let initializers = HashMap::new();
+        let mut value_shapes = HashMap::new();
+        value_shapes.insert("x".to_string(), vec![1, 2, 4]);
+        value_shapes.insert("skip".to_string(), vec![1, 2, 4]);
+        value_shapes.insert("gamma".to_string(), vec![4]);
+        let const_values = HashMap::new();
+        let value_ids = HashMap::new();
+        let value_types = HashMap::new();
+        let context = crate::onnx::ops::ConversionContext {
+            initializers: &initializers,
+            value_shapes: &value_shapes,
+            value_shape_dims: crate::onnx::ops::empty_value_shape_dims(),
+            const_values: &const_values,
+            value_ids: &value_ids,
+            value_types: &value_types,
+        };
+
+        let mut simplified = create_test_node(
+            "SimplifiedLayerNormalization",
+            vec!["x", "gamma"],
+            vec!["y"],
+        );
+        add_float_attribute(&mut simplified, "epsilon", 1e-5);
+        add_int_attribute(&mut simplified, "axis", -1);
+        crate::onnx::ops::convert_handler_with_context(&handler, &simplified, &context).unwrap();
+
+        let mut skip = create_test_node(
+            "SkipSimplifiedLayerNormalization",
+            vec!["x", "skip", "gamma"],
+            vec!["y", "", "", "sum"],
+        );
+        add_float_attribute(&mut skip, "epsilon", 1e-5);
+        let result =
+            crate::onnx::ops::convert_handler_with_context(&handler, &skip, &context).unwrap();
+        assert_eq!(result.output_types.get("y"), Some(&DataType::Float32));
+        assert_eq!(result.output_types.get("sum"), Some(&DataType::Float32));
     }
 
     #[test]

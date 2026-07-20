@@ -315,6 +315,25 @@ fn propagate_node_shapes(
                 }
             }
 
+            if node.op_type.as_str() == "SkipSimplifiedLayerNormalization" {
+                if let Some(input_name) = node.input.first() {
+                    if let Some(input_shape) = result.value_shapes.get(input_name).cloned() {
+                        let input_type = result.value_types.get(input_name).copied();
+                        for output in outputs.iter().filter(|name| !name.is_empty()) {
+                            result
+                                .value_shapes
+                                .entry(output.clone())
+                                .or_insert_with(|| input_shape.clone());
+                            if let Some(dtype) = input_type {
+                                result.value_types.entry(output.clone()).or_insert(dtype);
+                            }
+                        }
+                        progress = true;
+                        continue;
+                    }
+                }
+            }
+
             if node.op_type.as_str() == "Split" {
                 if let Some(shapes) = infer_split_output_shapes(
                     node,
@@ -397,6 +416,10 @@ pub fn infer_node_output_shape(
         | "Neg"
         | "Sqrt"
         | "LayerNormalization"
+        | "RMSNormalization"
+        | "SimplifiedLayerNormalization"
+        | "SkipSimplifiedLayerNormalization"
+        | "RotaryEmbedding"
         | "BatchNormalization"
         | "InstanceNormalization"
         | "Trilu" => {
@@ -3537,5 +3560,49 @@ mod tests {
         );
 
         assert_eq!(const_values.get("shape"), Some(&vec![1, 3, 32, 32]));
+    }
+
+    #[test]
+    fn fused_llm_ops_propagate_output_shapes() {
+        for op_type in ["SimplifiedLayerNormalization", "RotaryEmbedding"] {
+            let node = shape_node(op_type, &["input"]);
+            assert_eq!(
+                infer_test_node(&node, &[2, 7, 640], &[]),
+                Some(vec![2, 7, 640])
+            );
+        }
+
+        let graph = GraphProto {
+            node: vec![NodeProto {
+                op_type: "SkipSimplifiedLayerNormalization".to_string(),
+                input: vec!["input".to_string(), "skip".to_string(), "gamma".to_string()],
+                output: vec![
+                    "normalized".to_string(),
+                    String::new(),
+                    String::new(),
+                    "residual_sum".to_string(),
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut result = InferenceResult {
+            value_shapes: HashMap::from([("input".to_string(), vec![2, 7, 640])]),
+            value_types: HashMap::from([("input".to_string(), DataType::Float32)]),
+            ..Default::default()
+        };
+        propagate_node_shapes(&graph, &HashMap::new(), &mut result).unwrap();
+        assert_eq!(
+            result.value_shapes.get("normalized"),
+            Some(&vec![2, 7, 640])
+        );
+        assert_eq!(
+            result.value_shapes.get("residual_sum"),
+            Some(&vec![2, 7, 640])
+        );
+        assert_eq!(
+            result.value_types.get("residual_sum"),
+            Some(&DataType::Float32)
+        );
     }
 }

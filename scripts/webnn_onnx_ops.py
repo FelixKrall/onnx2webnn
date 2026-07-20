@@ -50,6 +50,8 @@ WEBNN_SUPPORTED_ONNX_OPS: frozenset[str] = frozenset(
         "Softmax",
         "GroupNormalization",
         "RMSNormalization",
+        "SimplifiedLayerNormalization",
+        "SkipSimplifiedLayerNormalization",
         "LogSoftmax",
         "Hardmax",
         # reshape.rs
@@ -146,6 +148,7 @@ WEBNN_SUPPORTED_ONNX_OPS: frozenset[str] = frozenset(
         # rnn.rs
         "GRU",
         "LSTM",
+        "RotaryEmbedding",
     }
 )
 
