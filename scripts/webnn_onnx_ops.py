@@ -10,6 +10,7 @@ WEBNN_SUPPORTED_ONNX_OPS: frozenset[str] = frozenset(
         # matmul.rs
         "MatMul",
         "Gemm",
+        "MatMulNBits",
         # conv.rs
         "Conv",
         "ConvTranspose",

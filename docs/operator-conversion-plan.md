@@ -212,6 +212,7 @@ These appear in graphs but become constants or metadata during `--optimize` / co
 | SimplifiedLayerNormalization | Alias of RMSNormalization | Implemented — standard/exporter fusion |
 | SkipSimplifiedLayerNormalization | Residual/bias add + RMSNormalization | Implemented — com.microsoft fusion |
 | RotaryEmbedding | Gather caches + rotate pairs + concatenate | Implemented — standard and com.microsoft |
+| MatMulNBits | uint4 reinterpret + dequantizeLinear + transpose + matmul | Implemented — bits=4; reject g_idx/bits≠4 |
 | CumProd | `cumulativeSum` on log + `Exp`, or iterative multiply subgraph | P3 — new in opset 26 |
 
 #### 2c. Advanced single-entry WebNN ops (high attribute complexity)
@@ -291,9 +292,10 @@ vs inference export).
 |-----------|--------|
 | MatMulInteger, QLinearConv, QLinearMatMul | Integer matmul / fused quantized ops not in WebNN; use explicit float + quantization decomposition |
 
-`ConvInteger` is supported through centered float `conv2d` followed by an `int32` cast, and
+`ConvInteger` is supported through centered float `conv2d` followed by an `int32` cast,
 `DynamicQuantizeLinear` is decomposed into reductions, scale/zero-point arithmetic, and WebNN
-`quantizeLinear`.
+`quantizeLinear`, and `MatMulNBits` (bits=4) follows ORT's WebNN EP path:
+`dequantizeLinear` → reshape → transpose → `matmul` (+ optional bias).
 
 #### 3i. Bitwise and type reinterpretation
 

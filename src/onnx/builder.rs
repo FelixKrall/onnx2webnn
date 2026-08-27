@@ -198,8 +198,9 @@ impl<'a, 'ctx, 'bld> OnnxBuilder<'a, 'ctx, 'bld> {
                 bytemuck::try_cast_slice::<_, i64>(bytes)
                     .map_err(|e| OnnxError::InvalidShape(e.to_string()))?,
             ),
-            DataType::Uint8 => self.builder.constant_from_slice(&desc, bytes),
-            DataType::Int8 => self.builder.constant_from_slice(&desc, bytes),
+            DataType::Uint8 | DataType::Int8 | DataType::Uint4 | DataType::Int4 => {
+                self.builder.constant_from_slice(&desc, bytes)
+            }
             other => {
                 return Err(OnnxError::InvalidShape(format!(
                     "unsupported constant data type for builder: {other:?}"
@@ -270,11 +271,8 @@ pub fn map_ast_data_type(dt: DataType) -> Result<MLOperandDataType, OnnxError> {
         DataType::Uint64 => MLOperandDataType::Uint64,
         DataType::Int8 => MLOperandDataType::Int8,
         DataType::Uint8 => MLOperandDataType::Uint8,
-        DataType::Int4 | DataType::Uint4 => {
-            return Err(OnnxError::InvalidShape(
-                "int4/uint4 not supported on MLGraphBuilder path".to_string(),
-            ));
-        }
+        DataType::Int4 => MLOperandDataType::Int4,
+        DataType::Uint4 => MLOperandDataType::Uint4,
     })
 }
 

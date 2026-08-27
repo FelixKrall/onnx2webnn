@@ -492,6 +492,26 @@ pub fn infer_node_output_shape(
             None
         }
 
+        "MatMulNBits" => {
+            let ins = node.input.as_slice();
+            if ins.is_empty() {
+                return None;
+            }
+            let a_shape = value_shapes.get(ins[0].as_str())?;
+            if a_shape.is_empty() {
+                return None;
+            }
+            let n = node
+                .attribute
+                .iter()
+                .find(|attr| attr.name == "N")
+                .map(|attr| attr.i)
+                .filter(|&n| n > 0)?;
+            let mut out = a_shape.clone();
+            *out.last_mut()? = n;
+            Some(out)
+        }
+
         // Transpose preserves shape with permuted dimensions
         "Transpose" => {
             let ins = node.input.as_slice();
@@ -3560,6 +3580,25 @@ mod tests {
         );
 
         assert_eq!(const_values.get("shape"), Some(&vec![1, 3, 32, 32]));
+    }
+
+    #[test]
+    fn matmul_nbits_replaces_last_dim_with_n() {
+        let node = NodeProto {
+            op_type: "MatMulNBits".to_string(),
+            input: vec!["a".to_string(), "b".to_string(), "scales".to_string()],
+            output: vec!["y".to_string()],
+            attribute: vec![crate::protos::onnx::AttributeProto {
+                name: "N".to_string(),
+                i: 384,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            infer_test_node(&node, &[2, 8, 384], &[]),
+            Some(vec![2, 8, 384])
+        );
     }
 
     #[test]
