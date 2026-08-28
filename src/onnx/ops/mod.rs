@@ -28,6 +28,7 @@ pub mod comparison;
 pub mod conditional;
 pub mod conv;
 pub mod conversion;
+pub mod einsum;
 pub mod elementwise;
 pub mod matmul;
 pub mod misc;
@@ -46,6 +47,7 @@ use comparison::ComparisonHandler;
 use conditional::ConditionalHandler;
 use conv::ConvHandler;
 use conversion::ConversionHandler;
+use einsum::EinsumHandler;
 use elementwise::ElementwiseHandler;
 use matmul::MatMulHandler;
 use misc::MiscHandler;
@@ -165,6 +167,7 @@ impl OpRegistry {
     pub fn new() -> Self {
         let handlers: Vec<Box<dyn OpHandler>> = vec![
             Box::new(MatMulHandler),
+            Box::new(EinsumHandler),
             Box::new(ConvHandler),
             Box::new(PoolHandler),
             Box::new(ElementwiseHandler),

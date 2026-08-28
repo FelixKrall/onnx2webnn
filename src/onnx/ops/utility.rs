@@ -1259,6 +1259,16 @@ impl UtilityHandler {
                 "Slice requires static starts/sizes for MLGraphBuilder".to_string(),
             )
         })?;
+        // A zero-size slice (start == end, e.g. `q[..., rotary_dim:]` when the
+        // rotary dim spans the whole head) cannot exist as a WebNN operand.
+        // Propagate an empty placeholder so consumers such as Concat drop it.
+        if sizes.iter().any(|d| d.static_or_max() == 0) {
+            b.mark_empty_optional(&output_name);
+            if let Some(onnx_out) = node.output.as_slice().first() {
+                b.mark_empty_optional(onnx_out);
+            }
+            return Ok(ConversionResult::default());
+        }
         let input = b.resolve_operand(&inputs[0])?;
         let out = slice_with_params(b, input, &output_name, &starts, &sizes)?;
         if let Some(output) = node.output.as_slice().first() {

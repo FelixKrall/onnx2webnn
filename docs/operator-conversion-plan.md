@@ -213,6 +213,8 @@ These appear in graphs but become constants or metadata during `--optimize` / co
 | SkipSimplifiedLayerNormalization | Residual/bias add + RMSNormalization | Implemented — com.microsoft fusion |
 | RotaryEmbedding | Gather caches + rotate pairs + concatenate | Implemented — standard and com.microsoft |
 | MatMulNBits | uint4 reinterpret + dequantizeLinear + transpose + matmul | Implemented — bits=4; reject g_idx/bits≠4 |
+| MatMulInteger | centered float `matmul` + `int32` cast (mirrors ConvInteger) | Implemented — scalar or 1-D zero points |
+| Einsum | reduceSum + transpose/reshape + batched `matmul` | Implemented — ≤2 inputs; reject ellipsis/diagonals |
 | CumProd | `cumulativeSum` on log + `Exp`, or iterative multiply subgraph | P3 — new in opset 26 |
 
 #### 2c. Advanced single-entry WebNN ops (high attribute complexity)
@@ -290,7 +292,7 @@ vs inference export).
 
 | Operators | Reason |
 |-----------|--------|
-| MatMulInteger, QLinearConv, QLinearMatMul | Integer matmul / fused quantized ops not in WebNN; use explicit float + quantization decomposition |
+| QLinearConv, QLinearMatMul | Fused quantized ops not in WebNN; use explicit float + quantization decomposition. `MatMulInteger` is now implemented via centered float matmul |
 
 `ConvInteger` is supported through centered float `conv2d` followed by an `int32` cast,
 `DynamicQuantizeLinear` is decomposed into reductions, scale/zero-point arithmetic, and WebNN
@@ -307,7 +309,7 @@ vs inference export).
 
 | Operators | Reason |
 |-----------|--------|
-| Einsum, Det | No general contraction or determinant in WebNN |
+| Det | No determinant in WebNN. `Einsum` is now implemented for one/two-input equations without ellipsis or repeated per-term labels (lowered to reduceSum/transpose/reshape/matmul) |
 
 #### 3k. Indexing and sorting extras
 
@@ -336,7 +338,7 @@ vs inference export).
 
 | Strategy | When | Example |
 |----------|------|---------|
-| Reject | No WebNN op and not foldable | If, Loop, Einsum, Attention |
+| Reject | No WebNN op and not foldable | If, Loop, Attention |
 | Pre-fold / strip | Training artifact in inference export | Dropout → Identity |
 | Document workaround | Rare; manual graph rewrite | Replace TopK with external post-process |
 

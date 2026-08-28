@@ -11,9 +11,11 @@ use crate::onnx::builder_helpers::{
     i64_slice_to_mldim, output_label, record_node_output, reshape_with_shape,
 };
 use crate::onnx::convert::OnnxError;
+use crate::onnx::ops::conv::lookup_shape;
 use crate::onnx::ops::{ConversionContext, ConversionResult, OpHandler};
 use crate::protos::onnx::{NodeProto, TensorProto_DataType};
 use rustnn::mlcontext::MLOperand;
+use rustnn::operator_enums::MLOperandDataType;
 use rustnn::operator_options::{MLGemmOptions, MLTransposeOptions};
 use rustnn::DataType;
 
@@ -21,7 +23,7 @@ pub struct MatMulHandler;
 
 impl OpHandler for MatMulHandler {
     fn supports(&self, op_type: &str) -> bool {
-        matches!(op_type, "MatMul" | "Gemm" | "MatMulNBits")
+        matches!(op_type, "MatMul" | "Gemm" | "MatMulNBits" | "MatMulInteger")
     }
 
     fn convert(
@@ -41,6 +43,7 @@ impl OpHandler for MatMulHandler {
             "MatMul" => self.convert_matmul(node, &node_name, b),
             "Gemm" => self.convert_gemm(node, &node_name, context, b),
             "MatMulNBits" => self.convert_matmul_nbits(node, &node_name, context, b),
+            "MatMulInteger" => self.convert_matmul_integer(node, &node_name, context, b),
             _ => Err(OnnxError::unsupported_op(op_type.to_string(), node_name)),
         }
     }
@@ -134,6 +137,139 @@ impl MatMulHandler {
             b.record_operand(&[&output_name], out);
         }
         Ok(ConversionResult::default())
+    }
+
+    /// Lower `MatMulInteger` as centered float matmul, mirroring `ConvInteger`:
+    /// cast both operands to float32, subtract their zero points, `matmul`,
+    /// and cast the product back to `int32`.
+    fn convert_matmul_integer(
+        &self,
+        node: &NodeProto,
+        node_name: &str,
+        context: &ConversionContext,
+        b: &mut OnnxBuilder<'_, '_, '_>,
+    ) -> Result<ConversionResult, OnnxError> {
+        let inputs = node.input.as_slice();
+        if inputs.len() < 2 || inputs.len() > 4 {
+            return Err(OnnxError::InvalidShape(format!(
+                "MatMulInteger expects 2 to 4 inputs (A, B[, a_zero_point, b_zero_point]), got {}",
+                inputs.len()
+            )));
+        }
+
+        let output_name = output_label(node, node_name);
+        let a = self.centered_integer_operand(
+            b,
+            &inputs[0],
+            inputs
+                .get(2)
+                .filter(|name| !name.is_empty())
+                .map(String::as_str),
+            context,
+            // A per-row zero point [M] must become [M, 1] to broadcast over K.
+            Some(&[-1, 1]),
+            &format!("{output_name}_a"),
+        )?;
+        let b_in = self.centered_integer_operand(
+            b,
+            &inputs[1],
+            inputs
+                .get(3)
+                .filter(|name| !name.is_empty())
+                .map(String::as_str),
+            context,
+            // B per-column zero point [N] already aligns with the trailing dim.
+            None,
+            &format!("{output_name}_b"),
+        )?;
+
+        let product = b
+            .builder
+            .matmul_with_options(
+                a,
+                b_in,
+                OnnxBuilder::labeled_options(&format!("{output_name}_matmul")),
+            )
+            .map_err(map_op_error)?;
+        let out = b
+            .builder
+            .cast_with_options(
+                product,
+                MLOperandDataType::Int32,
+                OnnxBuilder::labeled_options(&output_name),
+            )
+            .map_err(map_op_error)?;
+
+        let mut result = ConversionResult::default();
+        if let Some(onnx_out) = node.output.first() {
+            record_node_output(b, onnx_out, &output_name, out);
+            result
+                .output_types
+                .insert(onnx_out.clone(), DataType::Int32);
+        } else {
+            b.record_operand(&[&output_name], out);
+        }
+        Ok(result)
+    }
+
+    /// Cast a quantized operand to float32 and subtract its (optional) zero
+    /// point. `vector_zp_shape` reshapes a 1-D zero point before subtraction;
+    /// `-1` stands for the zero point's own length.
+    fn centered_integer_operand(
+        &self,
+        b: &mut OnnxBuilder<'_, '_, '_>,
+        operand_name: &str,
+        zero_point_name: Option<&str>,
+        context: &ConversionContext,
+        vector_zp_shape: Option<&[i64]>,
+        label: &str,
+    ) -> Result<MLOperand, OnnxError> {
+        let operand = b.resolve_operand(operand_name)?;
+        let as_float = b
+            .builder
+            .cast_with_options(
+                operand,
+                MLOperandDataType::Float32,
+                OnnxBuilder::labeled_options(&format!("{label}_float")),
+            )
+            .map_err(map_op_error)?;
+        let Some(zero_point_name) = zero_point_name else {
+            return Ok(as_float);
+        };
+
+        let zero_point = b.resolve_operand(zero_point_name)?;
+        let mut zero_point_float = b
+            .builder
+            .cast_with_options(
+                zero_point,
+                MLOperandDataType::Float32,
+                OnnxBuilder::labeled_options(&format!("{label}_zero_point_float")),
+            )
+            .map_err(map_op_error)?;
+
+        if let Some(template) = vector_zp_shape {
+            let zp_shape = lookup_shape(zero_point_name, context);
+            if let Some(zp_shape) = zp_shape.filter(|s| s.len() == 1 && s[0] > 1) {
+                let target: Vec<i64> = template
+                    .iter()
+                    .map(|&d| if d == -1 { zp_shape[0] } else { d })
+                    .collect();
+                zero_point_float = reshape_with_shape(
+                    b,
+                    zero_point_float,
+                    &format!("{label}_zero_point_reshape"),
+                    i64_slice_to_mldim(&target)?,
+                )?;
+            }
+        }
+
+        b.builder
+            .sub_with_options(
+                as_float,
+                zero_point_float,
+                OnnxBuilder::labeled_options(&format!("{label}_centered")),
+            )
+            .map_err(map_op_error)
     }
 
     /// Lower `com.microsoft.MatMulNBits` the same way ORT's WebNN EP does:

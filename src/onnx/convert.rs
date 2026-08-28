@@ -1001,6 +1001,10 @@ Provide --override-dim {}=<value> or enable --experimental-dynamic-inputs.",
                             // carries the post-broadcast shape but const_values stores the compact payload.
                             // Keep shape/data internally consistent by using the compact shape.
                             shape = vec![values.len() as i64];
+                            // Repair value_shapes so downstream shape lookups (e.g. Einsum)
+                            // match the materialized operand instead of the inflated shape.
+                            value_shapes.insert(out.to_string(), shape.clone());
+                            value_shapes.insert(sanitize_identifier(out), shape.clone());
                         }
                         let dtype = value_types
                             .get(out.as_str())

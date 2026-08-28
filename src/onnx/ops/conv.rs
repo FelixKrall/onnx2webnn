@@ -138,7 +138,7 @@ fn parse_conv_attrs(node: &NodeProto) -> ConvAttrs {
     attrs
 }
 
-fn lookup_shape(name: &str, context: &ConversionContext) -> Option<Vec<i64>> {
+pub(crate) fn lookup_shape(name: &str, context: &ConversionContext) -> Option<Vec<i64>> {
     if let Some(s) = context.value_shapes.get(name) {
         return Some(s.clone());
     }

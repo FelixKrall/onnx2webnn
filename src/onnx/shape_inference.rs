@@ -370,7 +370,7 @@ fn propagate_node_shapes(
                 result.value_shapes.entry(out_name.clone()).or_insert(shape);
 
                 // Propagate dtype from first input if available.
-                if node.op_type.as_str() == "ConvInteger" {
+                if matches!(node.op_type.as_str(), "ConvInteger" | "MatMulInteger") {
                     result
                         .value_types
                         .entry(out_name.clone())
@@ -465,7 +465,7 @@ pub fn infer_node_output_shape(
         }
 
         // MatMul (2D matrix multiplication)
-        "MatMul" => {
+        "MatMul" | "MatMulInteger" => {
             let ins = node.input.as_slice();
             if ins.len() < 2 {
                 return None;
@@ -490,6 +490,20 @@ pub fn infer_node_output_shape(
                 }
             }
             None
+        }
+
+        "Einsum" => {
+            let equation = node
+                .attribute
+                .iter()
+                .find(|attr| attr.name == "equation")
+                .map(|attr| String::from_utf8_lossy(&attr.s).to_string())?;
+            let input_shapes: Vec<Vec<i64>> = node
+                .input
+                .iter()
+                .map(|name| value_shapes.get(name.as_str()).cloned())
+                .collect::<Option<_>>()?;
+            crate::onnx::ops::einsum::einsum_output_shape(&equation, &input_shapes)
         }
 
         "MatMulNBits" => {
@@ -1258,6 +1272,50 @@ pub fn infer_node_output_shape(
 
         _ => None,
     }
+}
+
+/// Decode a float16/float32/float64 tensor whose every element is integral
+/// (e.g. Range start/delta scalars in fp16 exports) into exact i64 values.
+fn integral_float_tensor_as_i64(tensor: &TensorProto) -> Option<Vec<i64>> {
+    if tensor.dims.as_slice().contains(&0) {
+        return None;
+    }
+    let raw = tensor.raw_data.as_slice();
+    let floats: Vec<f64> = if tensor.data_type == TensorProto_DataType::Float as i32 {
+        if !raw.is_empty() {
+            raw.chunks_exact(4)
+                .map(|c| f64::from(f32::from_le_bytes([c[0], c[1], c[2], c[3]])))
+                .collect()
+        } else {
+            tensor.float_data.iter().map(|&v| f64::from(v)).collect()
+        }
+    } else if tensor.data_type == TensorProto_DataType::Float16 as i32 {
+        if !raw.is_empty() {
+            raw.chunks_exact(2)
+                .map(|c| f64::from(half::f16::from_bits(u16::from_le_bytes([c[0], c[1]])).to_f32()))
+                .collect()
+        } else {
+            tensor
+                .int32_data
+                .iter()
+                .map(|&v| f64::from(half::f16::from_bits(v as u16).to_f32()))
+                .collect()
+        }
+    } else if tensor.data_type == TensorProto_DataType::Double as i32 {
+        if !raw.is_empty() {
+            raw.chunks_exact(8)
+                .map(|c| f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
+                .collect()
+        } else {
+            tensor.double_data.clone()
+        }
+    } else {
+        return None;
+    };
+    if floats.is_empty() || floats.iter().any(|v| v.fract() != 0.0 || !v.is_finite()) {
+        return None;
+    }
+    Some(floats.into_iter().map(|v| v as i64).collect())
 }
 
 fn read_int64_values_from_maps(
@@ -2528,8 +2586,22 @@ fn fold_shape_constants(
                     let to_int = to_type == TensorProto_DataType::Int64 as i64
                         || to_type == TensorProto_DataType::Int32 as i64
                         || to_type == 0; // missing attr: still allow int const passthrough
-                    if to_int {
-                        if let Some(vals) = const_values.get(inp).cloned() {
+                                         // Integer consts survive a cast to float exactly (e.g. a folded
+                                         // sequence length feeding a float Range limit).
+                    let to_float = to_type == TensorProto_DataType::Float as i64
+                        || to_type == TensorProto_DataType::Float16 as i64
+                        || to_type == TensorProto_DataType::Double as i64;
+                    if to_int || to_float {
+                        // fp16 exports route Range scalars through Cast(float16 init);
+                        // integral float initializers fold exactly.
+                        let folded = const_values.get(inp).cloned().or_else(|| {
+                            graph
+                                .initializer
+                                .iter()
+                                .find(|t| t.name == *inp)
+                                .and_then(|t| integral_float_tensor_as_i64(t))
+                        });
+                        if let Some(vals) = folded {
                             if options.experimental_dynamic_inputs {
                                 if let Some(dims) = value_shape_dims
                                     .get(inp)
@@ -2548,7 +2620,14 @@ fn fold_shape_constants(
                                 }
                             });
                             value_shapes.insert(out.to_string(), out_shape);
-                            value_types.insert(out.to_string(), DataType::Int64);
+                            let out_type = if to_type == TensorProto_DataType::Float16 as i64 {
+                                DataType::Float16
+                            } else if to_float {
+                                DataType::Float32
+                            } else {
+                                DataType::Int64
+                            };
+                            value_types.insert(out.to_string(), out_type);
                         }
                     }
                 }
@@ -3059,7 +3138,8 @@ pub fn propagate_shapes_and_fold_constants(
                         if let Some(output_name) = onnx_node.output.as_slice().first() {
                             // Force the correct shape - shape inference computes exact output shape
                             value_shapes.insert(output_name.to_string(), inferred);
-                            if onnx_node.op_type.as_str() == "ConvInteger" {
+                            if matches!(onnx_node.op_type.as_str(), "ConvInteger" | "MatMulInteger")
+                            {
                                 value_types.insert(output_name.to_string(), DataType::Int32);
                             }
                         }
@@ -3083,13 +3163,38 @@ pub fn propagate_shapes_and_fold_constants(
         // If we know the input_ids shape (batch, seq), upgrade any lone hidden-dim
         // tensors (length-1 shapes) to [batch, seq, hidden] to unblock downstream
         // matmul/reshape resolution in decoder graphs that lost batch/seq dims.
+        // Tensors whose rank the model declares (value_info/inputs/outputs) or
+        // that are initializers keep their genuine 1-D shapes (e.g. a rotary
+        // Range output) — only speculatively-shaped values are upgraded.
         if let Some(ids_shape) = value_shapes.get("input_ids") {
             if ids_shape.len() == 2 {
+                let declared_rank1: HashSet<&str> = graph
+                    .value_info
+                    .iter()
+                    .chain(graph.input.iter())
+                    .chain(graph.output.iter())
+                    .filter(|vi| {
+                        vi.r#type
+                            .as_ref()
+                            .and_then(|t| t.value.as_ref())
+                            .is_some_and(|v| match v {
+                                TypeProtoValue::TensorType(tt) => {
+                                    tt.shape.as_ref().is_some_and(|s| s.dim.len() == 1)
+                                }
+                                _ => false,
+                            })
+                    })
+                    .map(|vi| vi.name.as_str())
+                    .collect();
                 let (batch, seq) = (ids_shape[0], ids_shape[1]);
                 let upgrades: Vec<(String, Vec<i64>)> = value_shapes
                     .iter()
                     .filter_map(|(k, v)| {
-                        if v.len() == 1 && v[0] > 1 {
+                        if v.len() == 1
+                            && v[0] > 1
+                            && !declared_rank1.contains(k.as_str())
+                            && !initializers.contains_key(k)
+                        {
                             Some((k.clone(), vec![batch, seq, v[0]]))
                         } else {
                             None

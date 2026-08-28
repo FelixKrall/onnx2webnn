@@ -733,6 +733,42 @@ impl ReshapeHandler {
             }
         }
 
+        // ONNX Expand broadcasts bidirectionally: a target dim of 1 keeps the
+        // (larger) input dim. WebNN expand wants the literal output shape, so
+        // fold the input shape into the target before emitting.
+        let shape_values: Vec<i64> = match context.resolve_shape(&data_input_raw) {
+            Some(input_shape) if !shape_values.is_empty() && input_shape.iter().all(|&d| d > 0) => {
+                let rank = input_shape.len().max(shape_values.len());
+                let mut broadcast = Vec::with_capacity(rank);
+                let mut compatible = true;
+                for i in 0..rank {
+                    let in_dim = if i + input_shape.len() >= rank {
+                        input_shape[i + input_shape.len() - rank]
+                    } else {
+                        1
+                    };
+                    let tgt_dim = if i + shape_values.len() >= rank {
+                        shape_values[i + shape_values.len() - rank]
+                    } else {
+                        1
+                    };
+                    if in_dim != tgt_dim && in_dim != 1 && tgt_dim != 1 {
+                        compatible = false;
+                        break;
+                    }
+                    broadcast.push(in_dim.max(tgt_dim));
+                }
+                if compatible {
+                    broadcast
+                } else {
+                    // Leave incompatible targets untouched; the reshape
+                    // fallback below handles them.
+                    shape_values
+                }
+            }
+            _ => shape_values,
+        };
+
         let shape_u32: Vec<u32> = shape_values.iter().map(|&v| v as u32).collect();
 
         // Determine if this is a broadcast (WebNN expand) or reshape operation
@@ -870,8 +906,23 @@ impl ReshapeHandler {
         }
 
         let output_name = output_label(node, node_name);
-        let operands: Result<Vec<_>, _> = inputs.iter().map(|s| b.resolve_operand(s)).collect();
-        let axis = if let Some(rank) = context.input_rank(inputs[0].as_str()) {
+        // Zero-size operands (e.g. an empty Slice) contribute nothing to a
+        // concatenation and cannot be represented in WebNN — drop them.
+        let non_empty: Vec<&String> = inputs
+            .iter()
+            .filter(|name| !b.is_empty_optional(name))
+            .collect();
+        if non_empty.is_empty() {
+            return Err(OnnxError::InvalidShape(format!(
+                "Concat '{output_name}' has only zero-size inputs"
+            )));
+        }
+        if non_empty.len() == 1 {
+            let out = b.resolve_operand(non_empty[0])?;
+            return Self::record_output(b, node, &output_name, out, context, None);
+        }
+        let operands: Result<Vec<_>, _> = non_empty.iter().map(|s| b.resolve_operand(s)).collect();
+        let axis = if let Some(rank) = context.input_rank(non_empty[0].as_str()) {
             normalize_axis_best_effort(axis, rank)
         } else {
             axis
