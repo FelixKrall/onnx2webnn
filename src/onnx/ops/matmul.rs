@@ -6,15 +6,13 @@
 
 // MatMul, Gemm, and MatMulNBits (com.microsoft) operator handlers
 
-use crate::onnx::builder::{
-    map_op_error, operand_index, tensor_proto_to_bytes, OnnxBuilder,
-};
+use crate::onnx::builder::{map_op_error, operand_index, tensor_proto_to_bytes, OnnxBuilder};
 use crate::onnx::builder_helpers::{
     i64_slice_to_mldim, output_label, record_node_output, reshape_with_shape,
 };
 use crate::onnx::convert::OnnxError;
 use crate::onnx::ops::{ConversionContext, ConversionResult, OpHandler};
-use crate::protos::onnx::{TensorProto_DataType, NodeProto};
+use crate::protos::onnx::{NodeProto, TensorProto_DataType};
 use rustnn::mlcontext::MLOperand;
 use rustnn::operator_options::{MLGemmOptions, MLTransposeOptions};
 use rustnn::DataType;
@@ -177,7 +175,7 @@ impl MatMulHandler {
                 node_name.to_string(),
             ));
         }
-        if k <= 0 || n <= 0 || block_size < 16 || !block_size.is_power_of_two() {
+        if k <= 0 || n <= 0 || block_size < 16 || !(block_size as u64).is_power_of_two() {
             return Err(OnnxError::InvalidShape(format!(
                 "MatMulNBits requires positive K/N and power-of-two block_size≥16, \
                  got K={k} N={n} block_size={block_size}"
@@ -202,10 +200,7 @@ impl MatMulHandler {
             .map(String::as_str);
 
         let b_tensor = context.initializers.get(b_name).copied().ok_or_else(|| {
-            OnnxError::unsupported_op(
-                "MatMulNBits(non-constant B)",
-                node_name.to_string(),
-            )
+            OnnxError::unsupported_op("MatMulNBits(non-constant B)", node_name.to_string())
         })?;
         if b_tensor.data_type != TensorProto_DataType::Uint8 as i32 {
             return Err(OnnxError::InvalidShape(format!(
@@ -248,12 +243,7 @@ impl MatMulHandler {
         // Reinterpret packed uint8 blobs as uint4 with doubled last dim (= block_size).
         let uint4_shape = [n_attr, n_blocks, blob_size * 2];
         let b_uint4_name = format!("{label}__B_uint4");
-        b.register_constant_from_bytes(
-            &b_uint4_name,
-            DataType::Uint4,
-            &uint4_shape,
-            &packed,
-        )?;
+        b.register_constant_from_bytes(&b_uint4_name, DataType::Uint4, &uint4_shape, &packed)?;
         let b_uint4 = b.resolve_operand(&b_uint4_name)?;
 
         let scales = b.resolve_operand(scales_name)?;
@@ -334,10 +324,7 @@ fn register_matmul_nbits_zero_point(
 
     let packed = if let Some(name) = zero_points_name {
         let tensor = context.initializers.get(name).copied().ok_or_else(|| {
-            OnnxError::unsupported_op(
-                "MatMulNBits(non-constant zero_points)",
-                label.to_string(),
-            )
+            OnnxError::unsupported_op("MatMulNBits(non-constant zero_points)", label.to_string())
         })?;
         if tensor.data_type != TensorProto_DataType::Uint8 as i32 {
             return Err(OnnxError::InvalidShape(format!(
@@ -429,8 +416,8 @@ mod tests {
             },
         ];
 
-        // B: [N=16, n_blocks=1, blob_size=16] packed uint8 (= 256 uint4 values).
-        let values: Vec<u8> = (0..256).map(|v| (v % 16) as u8).collect();
+        // B: [N=16, n_blocks=1, blob_size=16] packed uint8 (= 512 uint4 values).
+        let values: Vec<u8> = (0..512).map(|v| (v % 16) as u8).collect();
         let packed = pack_uint4(&values);
         let b_tensor = TensorProto {
             name: "b_q4".to_string(),
@@ -439,9 +426,7 @@ mod tests {
             raw_data: packed,
             ..Default::default()
         };
-        let scale_bytes: Vec<u8> = (0..16)
-            .flat_map(|_| 0.5f32.to_le_bytes())
-            .collect();
+        let scale_bytes: Vec<u8> = (0..16).flat_map(|_| 0.5f32.to_le_bytes()).collect();
         let scales = TensorProto {
             name: "scales".to_string(),
             data_type: TensorProto_DataType::Float as i32,
@@ -480,8 +465,11 @@ mod tests {
     #[test]
     fn rejects_matmul_nbits_with_g_idx() {
         let handler = MatMulHandler;
-        let mut node =
-            create_test_node("MatMulNBits", vec!["a", "b", "scales", "", "g_idx"], vec!["y"]);
+        let mut node = create_test_node(
+            "MatMulNBits",
+            vec!["a", "b", "scales", "", "g_idx"],
+            vec!["y"],
+        );
         node.attribute = vec![
             AttributeProto {
                 name: "K".to_string(),
@@ -505,6 +493,6 @@ mod tests {
             },
         ];
         let err = crate::onnx::ops::convert_with_test_builder(&handler, &node).unwrap_err();
-        assert!(matches!(err, OnnxError::UnsupportedOp { .. }));
+        assert!(matches!(err, OnnxError::UnsupportedOps(_)));
     }
 }

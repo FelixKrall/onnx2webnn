@@ -3586,7 +3586,7 @@ mod tests {
     fn matmul_nbits_replaces_last_dim_with_n() {
         let node = NodeProto {
             op_type: "MatMulNBits".to_string(),
-            input: vec!["a".to_string(), "b".to_string(), "scales".to_string()],
+            input: vec!["input".to_string(), "b".to_string(), "scales".to_string()],
             output: vec!["y".to_string()],
             attribute: vec![crate::protos::onnx::AttributeProto {
                 name: "N".to_string(),

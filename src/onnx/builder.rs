@@ -223,6 +223,7 @@ impl<'a, 'ctx, 'bld> OnnxBuilder<'a, 'ctx, 'bld> {
         &mut self,
         outputs: HashMap<&str, MLOperand>,
     ) -> Result<MLGraph<'ctx>, OnnxError> {
+        let outputs: std::collections::BTreeMap<&str, MLOperand> = outputs.into_iter().collect();
         self.builder.build(&outputs).map_err(map_rustnn_error)
     }
 }

@@ -5,7 +5,7 @@
 
 //! Run ONNX Runtime reference inference and compare rustnn dispatch results.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use half::f16;
 use onnx2webnn::onnx::builder::OnnxBuilder;
@@ -518,7 +518,7 @@ fn dispatch_and_collect(
         owned_inputs.push(tensor);
         input_names.push(webnn_name);
     }
-    let mut input_bindings: HashMap<&str, &MLTensor> = HashMap::new();
+    let mut input_bindings: BTreeMap<&str, &MLTensor> = BTreeMap::new();
     for (name, tensor) in input_names.iter().zip(owned_inputs.iter()) {
         input_bindings.insert(name.as_str(), tensor);
     }
@@ -540,7 +540,7 @@ fn dispatch_and_collect(
         owned_outputs.push(tensor);
         output_keys.insert(out.name.clone(), webnn_key);
     }
-    let mut output_bindings: HashMap<&str, &MLTensor> = HashMap::new();
+    let mut output_bindings: BTreeMap<&str, &MLTensor> = BTreeMap::new();
     for (name, tensor) in output_names.iter().zip(owned_outputs.iter()) {
         output_bindings.insert(name.as_str(), tensor);
     }
