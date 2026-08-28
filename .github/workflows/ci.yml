@@ -4,7 +4,7 @@ on:
   push:
     branches: [main, transformers]
   pull_request:
-    branches: [main]
+    branches: [main, transformers]
 
 env:
   # Keep in sync with the `ort` crate version pinned by rustnn.
