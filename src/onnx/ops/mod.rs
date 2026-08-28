@@ -24,6 +24,7 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 
 pub mod activation;
+pub mod attention;
 pub mod comparison;
 pub mod conditional;
 pub mod conv;
@@ -43,6 +44,7 @@ pub mod scatter;
 pub mod utility;
 
 use activation::ActivationHandler;
+use attention::AttentionHandler;
 use comparison::ComparisonHandler;
 use conditional::ConditionalHandler;
 use conv::ConvHandler;
@@ -167,6 +169,7 @@ impl OpRegistry {
     pub fn new() -> Self {
         let handlers: Vec<Box<dyn OpHandler>> = vec![
             Box::new(MatMulHandler),
+            Box::new(AttentionHandler),
             Box::new(EinsumHandler),
             Box::new(ConvHandler),
             Box::new(PoolHandler),

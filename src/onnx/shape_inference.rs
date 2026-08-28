@@ -315,6 +315,28 @@ fn propagate_node_shapes(
                 }
             }
 
+            if node.op_type.as_str() == "GroupQueryAttention" {
+                if let Some(shapes) =
+                    crate::onnx::ops::attention::gqa_output_shapes(node, &result.value_shapes)
+                {
+                    let input_type = node
+                        .input
+                        .first()
+                        .and_then(|name| result.value_types.get(name).copied());
+                    for (output, shape) in outputs.iter().zip(shapes) {
+                        if output.is_empty() {
+                            continue;
+                        }
+                        result.value_shapes.entry(output.clone()).or_insert(shape);
+                        if let Some(dtype) = input_type {
+                            result.value_types.entry(output.clone()).or_insert(dtype);
+                        }
+                    }
+                    progress = true;
+                    continue;
+                }
+            }
+
             if node.op_type.as_str() == "SkipSimplifiedLayerNormalization" {
                 if let Some(input_name) = node.input.first() {
                     if let Some(input_shape) = result.value_shapes.get(input_name).cloned() {
@@ -506,7 +528,7 @@ pub fn infer_node_output_shape(
             crate::onnx::ops::einsum::einsum_output_shape(&equation, &input_shapes)
         }
 
-        "MatMulNBits" => {
+        "MatMulNBits" | "MatMulBnb4" => {
             let ins = node.input.as_slice();
             if ins.is_empty() {
                 return None;
@@ -865,7 +887,9 @@ pub fn infer_node_output_shape(
                 return None;
             }
 
-            let input_shape = value_shapes.get(ins[0].as_str())?;
+            // The data shape is only needed to resolve -1 / 0 target entries;
+            // a fully positive constant target stands on its own.
+            let input_shape_opt = value_shapes.get(ins[0].as_str());
             let shape_input = ins[1].as_str();
             let mut target: Vec<i64> = if let Some(values) = const_values.get(shape_input) {
                 values.clone()
@@ -908,7 +932,17 @@ pub fn infer_node_output_shape(
                 return None;
             }
 
+            // ONNX: a 0 entry copies the corresponding input dimension.
+            if target.contains(&0) {
+                let input_shape = input_shape_opt?;
+                for (idx, dim) in target.iter_mut().enumerate() {
+                    if *dim == 0 {
+                        *dim = *input_shape.get(idx)?;
+                    }
+                }
+            }
             if target.contains(&-1) {
+                let input_shape = input_shape_opt?;
                 let total_input: i64 = input_shape.iter().product();
                 let known: i64 = target.iter().filter(|&&d| d != -1).product();
                 if known == 0 || total_input % known != 0 {
@@ -2192,7 +2226,17 @@ fn fold_shape_constants(
             // chain instead of keeping stale values (e.g. Resize target sizes).
             let refresh_shape_value = matches!(
                 op_type,
-                "Shape" | "Gather" | "Unsqueeze" | "Squeeze" | "Slice" | "Concat" | "Cast"
+                "Shape"
+                    | "Gather"
+                    | "Unsqueeze"
+                    | "Squeeze"
+                    | "Slice"
+                    | "Concat"
+                    | "Cast"
+                    | "Add"
+                    | "Sub"
+                    | "Mul"
+                    | "Div"
             );
             if const_values.contains_key(outputs[0].as_str()) && !refresh_shape_value {
                 continue;
@@ -2917,6 +2961,35 @@ fn fold_shape_constants(
                         }
                     }
                 }
+            } else if matches!(op_type, "Add" | "Sub" | "Mul" | "Div") {
+                // Integer arithmetic over folded shape scalars/vectors (e.g.
+                // `Mul(Gather(Shape(x), 0), num_heads)` in attention reshape chains).
+                if node.input.as_slice().len() >= 2 {
+                    if let (Some(a_name), Some(b_name), Some(out)) = (
+                        node.input.as_slice().first(),
+                        node.input.as_slice().get(1),
+                        node.output.as_slice().first(),
+                    ) {
+                        if let (Some(a), Some(b)) =
+                            (const_values.get(a_name), const_values.get(b_name))
+                        {
+                            let a_shape = const_shape_for_folding(a_name, a, value_shapes);
+                            let b_shape = const_shape_for_folding(b_name, b, value_shapes);
+                            if let Some((result_vals, out_shape)) =
+                                fold_binary_const_i64(op_type, a, b, &a_shape, &b_shape)
+                            {
+                                const_values.insert(out.to_string(), result_vals);
+                                value_shapes.insert(out.to_string(), out_shape.clone());
+                                value_shapes.insert(sanitize_identifier(out), out_shape);
+                                let dtype = value_types
+                                    .get(a_name.as_str())
+                                    .copied()
+                                    .unwrap_or(DataType::Int64);
+                                value_types.insert(out.to_string(), dtype);
+                            }
+                        }
+                    }
+                }
             } else if op_type == "Where" {
                 if options.experimental_dynamic_inputs && node.input.as_slice().len() >= 3 {
                     if let Some(out) = node.output.as_slice().first() {
@@ -3115,6 +3188,19 @@ pub fn propagate_shapes_and_fold_constants(
                                     continue;
                                 }
                             }
+                        }
+                    }
+
+                    if onnx_node.op_type.as_str() == "GroupQueryAttention" {
+                        if let Some(shapes) =
+                            crate::onnx::ops::attention::gqa_output_shapes(onnx_node, value_shapes)
+                        {
+                            for (output, shape) in onnx_node.output.iter().zip(shapes) {
+                                if !output.is_empty() {
+                                    value_shapes.insert(output.to_string(), shape);
+                                }
+                            }
+                            continue;
                         }
                     }
 

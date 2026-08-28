@@ -215,6 +215,8 @@ These appear in graphs but become constants or metadata during `--optimize` / co
 | MatMulNBits | uint4 reinterpret + dequantizeLinear + transpose + matmul | Implemented — bits=4; reject g_idx/bits≠4 |
 | MatMulInteger | centered float `matmul` + `int32` cast (mirrors ConvInteger) | Implemented — scalar or 1-D zero points |
 | Einsum | reduceSum + transpose/reshape + batched `matmul` | Implemented — ≤2 inputs; reject ellipsis/diagonals |
+| MatMulBnb4 | conversion-time FP4/NF4 codebook dequantization → float constant + `matmul` | Implemented — trades 4-bit footprint for dense constants |
+| GroupQueryAttention | reshape/transpose + KV-cache concat + scaled matmul + static causal mask + softmax | Implemented — unpadded batch assumption; reject packed QKV/do_rotary/softcap/local window |
 | CumProd | `cumulativeSum` on log + `Exp`, or iterative multiply subgraph | P3 — new in opset 26 |
 
 #### 2c. Advanced single-entry WebNN ops (high attribute complexity)

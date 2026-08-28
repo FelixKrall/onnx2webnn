@@ -20,7 +20,7 @@
 
 use crate::onnx::builder::{map_op_error, OnnxBuilder};
 use crate::onnx::builder_helpers::{
-    ast_dims_to_mldim, expand_with_shape, merge_dims_with_i64_values,
+    ast_dims_to_mldim, expand_with_shape, i64_slice_to_mldim, merge_dims_with_i64_values,
     merge_dims_with_static_values, output_label, record_node_output, reshape_with_shape,
     u32_slice_to_mldim,
 };
@@ -921,7 +921,28 @@ impl ReshapeHandler {
             let out = b.resolve_operand(non_empty[0])?;
             return Self::record_output(b, node, &output_name, out, context, None);
         }
-        let operands: Result<Vec<_>, _> = non_empty.iter().map(|s| b.resolve_operand(s)).collect();
+        // Folded single-value constants are sometimes materialized as rank-0
+        // scalars while their siblings in a shape-vector concat are rank-1;
+        // promote them to [1] (ONNX Concat requires equal ranks anyway).
+        let operands: Result<Vec<_>, _> = non_empty
+            .iter()
+            .map(|s| {
+                let op = b.resolve_operand(s)?;
+                if context
+                    .resolve_shape(s)
+                    .is_some_and(|shape| shape.is_empty())
+                {
+                    reshape_with_shape(
+                        b,
+                        op,
+                        &format!("{output_name}__{}_vec", sanitize_identifier(s)),
+                        i64_slice_to_mldim(&[1])?,
+                    )
+                } else {
+                    Ok(op)
+                }
+            })
+            .collect();
         let axis = if let Some(rank) = context.input_rank(non_empty[0].as_str()) {
             normalize_axis_best_effort(axis, rank)
         } else {
