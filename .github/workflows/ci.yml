@@ -32,6 +32,12 @@ jobs:
         shell: bash
         working-directory: onnx2webnn
     steps:
+      # rustnn contains paths longer than Windows' 260-char MAX_PATH.
+      - name: Enable git long paths (Windows)
+        if: runner.os == 'Windows'
+        working-directory: ${{ github.workspace }}
+        run: git config --system core.longpaths true
+
       - name: Checkout onnx2webnn
         uses: actions/checkout@v4
         with:
