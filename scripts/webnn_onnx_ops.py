@@ -17,6 +17,7 @@ WEBNN_SUPPORTED_ONNX_OPS: frozenset[str] = frozenset(
         "GroupQueryAttention",
         # moe.rs
         "MoE",
+        "QMoE",
         # einsum.rs
         "Einsum",
         # conv.rs
@@ -83,6 +84,7 @@ WEBNN_SUPPORTED_ONNX_OPS: frozenset[str] = frozenset(
         # utility.rs
         "Shape",
         "Gather",
+        "GatherBlockQuantized",
         "GatherND",
         "GatherElements",
         "ReverseSequence",

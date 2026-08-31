@@ -397,6 +397,14 @@ fn propagate_node_shapes(
                         .value_types
                         .entry(out_name.clone())
                         .or_insert(DataType::Int32);
+                } else if node.op_type.as_str() == "GatherBlockQuantized" {
+                    // The dequantized output takes the scales' float type, not
+                    // the packed uint8 table's.
+                    if let Some(dtype) =
+                        gather_block_quantized_dtype(node, &result.value_types, initializers)
+                    {
+                        result.value_types.entry(out_name.clone()).or_insert(dtype);
+                    }
                 } else if let Some(first_in) = node.input.as_slice().first() {
                     if let Some(dtype) = result.value_types.get(first_in).cloned() {
                         result.value_types.entry(out_name.clone()).or_insert(dtype);
@@ -443,6 +451,7 @@ pub fn infer_node_output_shape(
         | "SkipSimplifiedLayerNormalization"
         | "RotaryEmbedding"
         | "MoE"
+        | "QMoE"
         | "BatchNormalization"
         | "InstanceNormalization"
         | "Trilu" => {
@@ -664,20 +673,46 @@ pub fn infer_node_output_shape(
             Some(vec![m, n])
         }
 
-        "Gather" => {
+        "Gather" | "GatherBlockQuantized" => {
             let ins = node.input.as_slice();
             if ins.len() < 2 {
                 return None;
             }
 
-            let data_shape = value_shapes.get(ins[0].as_str())?;
+            let mut data_shape = value_shapes
+                .get(ins[0].as_str())
+                .cloned()
+                .or_else(|| initializers.get(ins[0].as_str()).map(|t| t.dims.clone()))?;
+            // The quantized table packs 8/bits values per byte on its last axis.
+            if op == "GatherBlockQuantized" {
+                let bits = node
+                    .attribute
+                    .as_slice()
+                    .iter()
+                    .find(|a| a.name.as_str() == "bits")
+                    .map(|a| a.i)
+                    .unwrap_or(4);
+                if bits != 4 && bits != 8 {
+                    return None;
+                }
+                let last = data_shape.last_mut()?;
+                *last *= 8 / bits;
+            }
+            let data_shape = &data_shape;
             let indices_shape = value_shapes.get(ins[1].as_str())?;
 
             let mut axis = node
                 .attribute
                 .as_slice()
                 .iter()
-                .find(|a| a.name.as_str() == "axis")
+                .find(|a| {
+                    a.name.as_str()
+                        == if op == "GatherBlockQuantized" {
+                            "gather_axis"
+                        } else {
+                            "axis"
+                        }
+                })
                 .and_then(|a| if a.i != 0 { Some(a.i) } else { None })
                 .unwrap_or(0);
 
@@ -1351,6 +1386,26 @@ fn integral_float_tensor_as_i64(tensor: &TensorProto) -> Option<Vec<i64>> {
         return None;
     }
     Some(floats.into_iter().map(|v| v as i64).collect())
+}
+
+/// Output element type of a GatherBlockQuantized node: the scales' float type.
+fn gather_block_quantized_dtype(
+    node: &NodeProto,
+    value_types: &HashMap<String, DataType>,
+    initializers: &HashMap<String, &TensorProto>,
+) -> Option<DataType> {
+    let scales = node.input.as_slice().get(2)?;
+    if let Some(dtype) = value_types.get(scales.as_str()) {
+        return Some(*dtype);
+    }
+    let tensor = initializers.get(scales.as_str())?;
+    if tensor.data_type == TensorProto_DataType::Float16 as i32 {
+        Some(DataType::Float16)
+    } else if tensor.data_type == TensorProto_DataType::Float as i32 {
+        Some(DataType::Float32)
+    } else {
+        None
+    }
 }
 
 fn read_int64_values_from_maps(
@@ -3275,6 +3330,14 @@ pub fn propagate_shapes_and_fold_constants(
                             if matches!(onnx_node.op_type.as_str(), "ConvInteger" | "MatMulInteger")
                             {
                                 value_types.insert(output_name.to_string(), DataType::Int32);
+                            } else if onnx_node.op_type.as_str() == "GatherBlockQuantized" {
+                                if let Some(dtype) = gather_block_quantized_dtype(
+                                    onnx_node,
+                                    value_types,
+                                    initializers,
+                                ) {
+                                    value_types.insert(output_name.to_string(), dtype);
+                                }
                             }
                         }
                     }

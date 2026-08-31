@@ -212,12 +212,14 @@ These appear in graphs but become constants or metadata during `--optimize` / co
 | SimplifiedLayerNormalization | Alias of RMSNormalization | Implemented — standard/exporter fusion |
 | SkipSimplifiedLayerNormalization | Residual/bias add + RMSNormalization | Implemented — com.microsoft fusion |
 | RotaryEmbedding | Gather caches + rotate pairs + concatenate | Implemented — standard and com.microsoft |
-| MatMulNBits | uint4 reinterpret + dequantizeLinear + transpose + matmul | Implemented — bits=4; reject g_idx/bits≠4 |
+| MatMulNBits | uint4/uint8 reinterpret + dequantizeLinear + transpose + matmul | Implemented — bits=4/8; reject g_idx |
 | MatMulInteger | centered float `matmul` + `int32` cast (mirrors ConvInteger) | Implemented — scalar or 1-D zero points |
 | Einsum | reduceSum + transpose/reshape + batched `matmul` | Implemented — ≤2 inputs; reject ellipsis/diagonals |
 | MatMulBnb4 | conversion-time FP4/NF4 codebook dequantization → float constant + `matmul` | Implemented — trades 4-bit footprint for dense constants |
 | GroupQueryAttention | reshape/transpose + KV-cache concat + scaled matmul + static causal mask + softmax | Implemented — unpadded batch assumption; reject packed QKV/do_rotary/softcap/local window |
 | MoE | dense expert evaluation (batched matmul) + iterative top-k mask + masked softmax blend | Implemented — fused interleaved swiglu/relu/gelu/sigmoid; reject fc3/sparse mixer; num_experts/k× FLOP overhead |
+| QMoE | conversion-time 4/8-bit blockwise dequantization → MoE lowering | Implemented — same restrictions as MoE |
+| GatherBlockQuantized | conversion-time 4/8-bit table dequantization → gather | Implemented — quantize_axis must be the last axis |
 | CumProd | `cumulativeSum` on log + `Exp`, or iterative multiply subgraph | P3 — new in opset 26 |
 
 #### 2c. Advanced single-entry WebNN ops (high attribute complexity)

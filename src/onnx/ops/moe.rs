@@ -44,7 +44,7 @@ pub struct MoeHandler;
 
 impl OpHandler for MoeHandler {
     fn supports(&self, op_type: &str) -> bool {
-        op_type == "MoE"
+        matches!(op_type, "MoE" | "QMoE")
     }
 
     fn convert(
@@ -87,6 +87,112 @@ fn ml_float(dtype: DataType) -> MLOperandDataType {
     }
 }
 
+/// Dequantize QMoE expert weights (uint8; 4-bit packs two values per byte,
+/// low nibble first; symmetric zero point `1 << (bits-1)`) with blockwise
+/// scales `[E, out, in/block_size]` into a float constant `[E, out, in]`.
+#[allow(clippy::too_many_arguments)]
+fn dequantize_expert_weights(
+    b: &mut OnnxBuilder<'_, '_, '_>,
+    context: &ConversionContext,
+    weight_name: &str,
+    scales_name: &str,
+    block_size: i64,
+    bits: i64,
+    dtype: DataType,
+    const_name: &str,
+) -> Result<(String, Vec<i64>), OnnxError> {
+    let per_byte = (8 / bits) as usize;
+    let zero_point = f32::from(1u8 << (bits - 1));
+    let w_tensor = context
+        .initializers
+        .get(weight_name)
+        .copied()
+        .ok_or_else(|| {
+            OnnxError::InvalidShape(format!(
+                "QMoE weight '{weight_name}' must be an initializer"
+            ))
+        })?;
+    let s_tensor = context
+        .initializers
+        .get(scales_name)
+        .copied()
+        .ok_or_else(|| {
+            OnnxError::InvalidShape(format!(
+                "QMoE scales '{scales_name}' must be an initializer"
+            ))
+        })?;
+    if w_tensor.dims.len() != 3 || s_tensor.dims.len() != 3 {
+        return Err(OnnxError::InvalidShape(format!(
+            "QMoE expects 3-D weights/scales, got {:?} and {:?}",
+            w_tensor.dims, s_tensor.dims
+        )));
+    }
+    let (experts, out_rows, packed) = (w_tensor.dims[0], w_tensor.dims[1], w_tensor.dims[2]);
+    let in_cols = packed * per_byte as i64;
+    let blocks = (in_cols + block_size - 1) / block_size;
+    if s_tensor.dims != [experts, out_rows, blocks] {
+        return Err(OnnxError::InvalidShape(format!(
+            "QMoE scales {:?} do not match weights [E={experts}, out={out_rows}] with \
+             {blocks} blocks of {block_size}",
+            s_tensor.dims
+        )));
+    }
+
+    let bytes = crate::onnx::builder::tensor_proto_to_bytes(w_tensor)?;
+    let scales = crate::onnx::ops::matmul::decode_float_tensor_as_f32(s_tensor)?;
+    let (rows_total, packed_u, in_u, blocks_u) = (
+        (experts * out_rows) as usize,
+        packed as usize,
+        in_cols as usize,
+        blocks as usize,
+    );
+    if bytes.len() < rows_total * packed_u || scales.len() < rows_total * blocks_u {
+        return Err(OnnxError::InvalidShape(format!(
+            "QMoE weight/scale payloads too small for [E={experts}, out={out_rows}, in={in_cols}]"
+        )));
+    }
+
+    let mut values = vec![0f32; rows_total * in_u];
+    for row in 0..rows_total {
+        let row_bytes = &bytes[row * packed_u..(row + 1) * packed_u];
+        let row_scales = &scales[row * blocks_u..(row + 1) * blocks_u];
+        let row_out = &mut values[row * in_u..(row + 1) * in_u];
+        for (i, value) in row_out.iter_mut().enumerate() {
+            let q = if per_byte == 2 {
+                let byte = row_bytes[i / 2];
+                if i % 2 == 0 {
+                    byte & 0x0F
+                } else {
+                    byte >> 4
+                }
+            } else {
+                row_bytes[i]
+            };
+            *value = (f32::from(q) - zero_point) * row_scales[i / block_size as usize];
+        }
+    }
+
+    let shape_u32 = [experts as u32, out_rows as u32, in_cols as u32];
+    match dtype {
+        DataType::Float16 => {
+            let bytes: Vec<u8> = values
+                .iter()
+                .flat_map(|&v| half::f16::from_f32(v).to_le_bytes())
+                .collect();
+            b.register_constant_from_bytes(const_name, DataType::Float16, &shape_u32, &bytes)?;
+        }
+        _ => {
+            b.register_constant_from_bytes(
+                const_name,
+                DataType::Float32,
+                &shape_u32,
+                bytemuck::cast_slice(&values),
+            )?;
+        }
+    }
+    Ok((const_name.to_string(), vec![experts, out_rows, in_cols]))
+}
+
 #[allow(clippy::too_many_lines)]
 fn convert_moe(
     node: &NodeProto,
@@ -94,18 +200,31 @@ fn convert_moe(
     context: &ConversionContext,
     b: &mut OnnxBuilder<'_, '_, '_>,
 ) -> Result<ConversionResult, OnnxError> {
+    let op_type = node.op_type.as_str();
+    // QMoE interleaves scale inputs: X, logits, fc1_w, fc1_scales, fc1_b,
+    // fc2_w, fc2_scales, fc2_b, fc3... MoE: X, logits, fc1_w, fc1_b, fc2_w,
+    // fc2_b, fc3...
+    let is_quant = op_type == "QMoE";
+    let (w1_idx, b1_idx, w2_idx, b2_idx, fc3_start) = if is_quant {
+        (2usize, 4usize, 5usize, 7usize, 8usize)
+    } else {
+        (2usize, 3usize, 4usize, 5usize, 6usize)
+    };
+
     let inputs = node.input.as_slice();
-    if inputs.len() < 5 {
+    if inputs.len() <= w2_idx {
         return Err(OnnxError::InvalidShape(format!(
-            "MoE expects at least 5 inputs, got {}",
+            "{op_type} expects at least {} inputs, got {}",
+            w2_idx + 1,
             inputs.len()
         )));
     }
     // fc3 (separate gating projection) is only used by unfused swiglu exports.
-    if inputs.get(6).is_some_and(|name| !name.is_empty())
-        || inputs.get(7).is_some_and(|name| !name.is_empty())
-    {
-        return Err(OnnxError::unsupported_op("MoE(fc3)", node_name.to_string()));
+    if inputs.iter().skip(fc3_start).any(|name| !name.is_empty()) {
+        return Err(OnnxError::unsupported_op(
+            format!("{op_type}(fc3)"),
+            node_name.to_string(),
+        ));
     }
 
     let mut k = 1i64;
@@ -116,8 +235,12 @@ fn convert_moe(
     let mut alpha = 1.0f32;
     let mut beta = 0.0f32;
     let mut limit = f32::INFINITY;
+    let mut weight_bits = 4i64;
+    let mut block_size = 0i64;
     for attr in &node.attribute {
         match attr.name.as_str() {
+            "expert_weight_bits" => weight_bits = attr.i,
+            "block_size" => block_size = attr.i,
             "k" => k = attr.i,
             "normalize_routing_weights" => normalize = attr.i,
             "use_sparse_mixer" => use_sparse_mixer = attr.i,
@@ -154,18 +277,66 @@ fn convert_moe(
             inputs[0]
         ))
     })?;
-    let w1_shape = lookup_shape(&inputs[2], context).ok_or_else(|| {
-        OnnxError::InvalidShape(format!(
-            "MoE requires a static fc1 weight shape for '{}'",
-            inputs[2]
-        ))
-    })?;
-    let w2_shape = lookup_shape(&inputs[4], context).ok_or_else(|| {
-        OnnxError::InvalidShape(format!(
-            "MoE requires a static fc2 weight shape for '{}'",
-            inputs[4]
-        ))
-    })?;
+    if is_quant && weight_bits != 4 && weight_bits != 8 {
+        return Err(OnnxError::unsupported_op(
+            format!("QMoE(expert_weight_bits={weight_bits})"),
+            node_name.to_string(),
+        ));
+    }
+    if is_quant && block_size <= 0 {
+        return Err(OnnxError::InvalidShape(format!(
+            "QMoE requires a positive block_size, got {block_size}"
+        )));
+    }
+
+    let dtype = context
+        .value_types
+        .get(inputs[0].as_str())
+        .copied()
+        .unwrap_or(DataType::Float32);
+
+    // For QMoE, dequantize the packed expert weights into float constants and
+    // reuse the dense MoE lowering below (same trade-off as MatMulBnb4).
+    let (w1_name, w1_shape) = if is_quant {
+        dequantize_expert_weights(
+            b,
+            context,
+            &inputs[w1_idx],
+            &inputs[w1_idx + 1],
+            block_size,
+            weight_bits,
+            dtype,
+            &format!("{}__fc1_deq", output_label(node, node_name)),
+        )?
+    } else {
+        let shape = lookup_shape(&inputs[w1_idx], context).ok_or_else(|| {
+            OnnxError::InvalidShape(format!(
+                "MoE requires a static fc1 weight shape for '{}'",
+                inputs[w1_idx]
+            ))
+        })?;
+        (inputs[w1_idx].clone(), shape)
+    };
+    let (w2_name, w2_shape) = if is_quant {
+        dequantize_expert_weights(
+            b,
+            context,
+            &inputs[w2_idx],
+            &inputs[w2_idx + 1],
+            block_size,
+            weight_bits,
+            dtype,
+            &format!("{}__fc2_deq", output_label(node, node_name)),
+        )?
+    } else {
+        let shape = lookup_shape(&inputs[w2_idx], context).ok_or_else(|| {
+            OnnxError::InvalidShape(format!(
+                "MoE requires a static fc2 weight shape for '{}'",
+                inputs[w2_idx]
+            ))
+        })?;
+        (inputs[w2_idx].clone(), shape)
+    };
     if x_shape.is_empty() || w1_shape.len() != 3 || w2_shape.len() != 3 {
         return Err(OnnxError::InvalidShape(format!(
             "MoE expects input [.., hidden], fc1 [E,fc1_out,hidden], fc2 [E,hidden,inter], \
@@ -190,11 +361,6 @@ fn convert_moe(
     }
     let k = k.clamp(1, num_experts);
 
-    let dtype = context
-        .value_types
-        .get(inputs[0].as_str())
-        .copied()
-        .unwrap_or(DataType::Float32);
     let big = if matches!(dtype, DataType::Float16) {
         60000.0f32
     } else {
@@ -416,9 +582,15 @@ fn convert_moe(
         Ok(y)
     };
 
-    let fc1_bias = inputs.get(3).filter(|n| !n.is_empty()).map(String::as_str);
-    let fc2_bias = inputs.get(5).filter(|n| !n.is_empty()).map(String::as_str);
-    let fc1 = bmm_transposed(b, x_e, &inputs[2], fc1_bias, fc1_out, "fc1")?;
+    let fc1_bias = inputs
+        .get(b1_idx)
+        .filter(|n| !n.is_empty())
+        .map(String::as_str);
+    let fc2_bias = inputs
+        .get(b2_idx)
+        .filter(|n| !n.is_empty())
+        .map(String::as_str);
+    let fc1 = bmm_transposed(b, x_e, &w1_name, fc1_bias, fc1_out, "fc1")?;
 
     let activated = if activation == "swiglu" {
         // Interleaved fused layout: [g0, l0, g1, l1, ...] -> [.., inter, 2].
@@ -531,7 +703,7 @@ fn convert_moe(
         }
     };
 
-    let expert_out = bmm_transposed(b, activated, &inputs[4], fc2_bias, hidden, "fc2")?;
+    let expert_out = bmm_transposed(b, activated, &w2_name, fc2_bias, hidden, "fc2")?;
 
     // --- Blend with routing weights ---
     let w_t = b

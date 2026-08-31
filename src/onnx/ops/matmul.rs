@@ -60,8 +60,9 @@ const NF4_QUANT_MAP: [f32; 16] = [
     1.0,
 ];
 
-/// Decode a float32/float16 initializer into f32 values (MatMulBnb4 absmax).
-fn decode_float_tensor_as_f32(
+/// Decode a float32/float16 initializer into f32 values (MatMulBnb4 absmax,
+/// QMoE scales).
+pub(crate) fn decode_float_tensor_as_f32(
     tensor: &crate::protos::onnx::TensorProto,
 ) -> Result<Vec<f32>, OnnxError> {
     let bytes = tensor_proto_to_bytes(tensor)?;
@@ -518,7 +519,7 @@ impl MatMulHandler {
                 _ => {}
             }
         }
-        if bits != 4 {
+        if bits != 4 && bits != 8 {
             return Err(OnnxError::unsupported_op(
                 format!("MatMulNBits(bits={bits})"),
                 node_name.to_string(),
@@ -580,7 +581,7 @@ impl MatMulHandler {
                 "MatMulNBits n_blocks {n_blocks} != ceil(K/block_size)={expected_blocks}"
             )));
         }
-        let expected_blob = (block_size_u * 4).div_ceil(8);
+        let expected_blob = (block_size_u * bits as u32).div_ceil(8);
         if blob_size != expected_blob {
             return Err(OnnxError::InvalidShape(format!(
                 "MatMulNBits blob_size {blob_size} != block_size*bits/8={expected_blob}"
@@ -589,10 +590,15 @@ impl MatMulHandler {
 
         let label = output_label(node, node_name);
         let packed = tensor_proto_to_bytes(b_tensor)?;
-        // Reinterpret packed uint8 blobs as uint4 with doubled last dim (= block_size).
-        let uint4_shape = [n_attr, n_blocks, blob_size * 2];
-        let b_uint4_name = format!("{label}__B_uint4");
-        b.register_constant_from_bytes(&b_uint4_name, DataType::Uint4, &uint4_shape, &packed)?;
+        // 4-bit: reinterpret packed blobs as uint4 with doubled last dim
+        // (= block_size); 8-bit blobs are already one value per byte.
+        let (weight_dtype, weight_shape) = if bits == 4 {
+            (DataType::Uint4, [n_attr, n_blocks, blob_size * 2])
+        } else {
+            (DataType::Uint8, [n_attr, n_blocks, blob_size])
+        };
+        let b_uint4_name = format!("{label}__B_quant");
+        b.register_constant_from_bytes(&b_uint4_name, weight_dtype, &weight_shape, &packed)?;
         let b_uint4 = b.resolve_operand(&b_uint4_name)?;
 
         let scales = b.resolve_operand(scales_name)?;
@@ -609,6 +615,7 @@ impl MatMulHandler {
             zero_points_name,
             n_attr,
             n_blocks,
+            bits,
             &format!("{label}__zero_point"),
         )?;
 
@@ -663,13 +670,19 @@ fn register_matmul_nbits_zero_point(
     zero_points_name: Option<&str>,
     n: u32,
     n_blocks: u32,
+    bits: i64,
     label: &str,
 ) -> Result<MLOperand, OnnxError> {
     let zp_shape = [n, n_blocks, 1];
     let element_count = (n as usize)
         .checked_mul(n_blocks as usize)
         .ok_or_else(|| OnnxError::InvalidShape("MatMulNBits zero_point size overflow".into()))?;
-    let packed_len = element_count.div_ceil(2);
+    // 4-bit zero points are packed two per byte; 8-bit are one per byte.
+    let (packed_len, default_byte, zp_dtype) = if bits == 4 {
+        (element_count.div_ceil(2), 0x88u8, DataType::Uint4)
+    } else {
+        (element_count, 0x80u8, DataType::Uint8)
+    };
 
     let packed = if let Some(name) = zero_points_name {
         let tensor = context.initializers.get(name).copied().ok_or_else(|| {
@@ -690,11 +703,10 @@ fn register_matmul_nbits_zero_point(
         }
         bytes
     } else {
-        // Default uint4 zero point is 8 → packed nibbles 0x88.
-        vec![0x88u8; packed_len]
+        vec![default_byte; packed_len]
     };
 
-    b.register_constant_from_bytes(label, DataType::Uint4, &zp_shape, &packed)?;
+    b.register_constant_from_bytes(label, zp_dtype, &zp_shape, &packed)?;
     b.resolve_operand(label)
 }
 

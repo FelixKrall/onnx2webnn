@@ -199,6 +199,231 @@ fn moe_swiglu_matches_ort() {
     assert_op_matches_ort(build_moe(), ExpectConvertOp::Success, 17);
 }
 
+/// QMoE (blockwise 4- or 8-bit) with the same routing/activation
+/// configuration as build_moe. Validates the nibble order and
+/// (q - zero_point) * scale dequantization against ORT's kernel.
+fn build_qmoe(bits: i64) -> ModelProto {
+    use onnx2webnn::test_models::prelude::*;
+
+    let (num_experts, hidden, inter, rows, block_size) = (4i64, 32i64, 16i64, 3i64, 32i64);
+    let fc1_out = 2 * inter;
+    let per_byte = 8 / bits;
+
+    let packed = |seed: i64, rows: i64, cols: i64| -> Vec<u8> {
+        (0..rows * cols / per_byte)
+            .map(|i| (((i * 7 + seed * 13) % 256) as u8))
+            .collect()
+    };
+    // Normalize weight magnitudes across bit widths (|q - zp| <= 2^(bits-1))
+    // so outputs stay small enough for the runner's absolute tolerance.
+    let scale_norm = (1i64 << (bits - 1)) as f32 / 8.0;
+    let scales = |seed: i64, rows: i64, blocks: i64| -> Vec<f32> {
+        (0..rows * blocks)
+            .map(|i| (0.01 + ((i * 11 + seed * 3) % 17) as f32 * 0.005) / scale_norm)
+            .collect()
+    };
+
+    let fc1_blocks = hidden / block_size;
+    let fc2_blocks = (inter + block_size - 1) / block_size;
+
+    let mut qmoe = node(
+        "QMoE",
+        "test_qmoe",
+        &[
+            "X",
+            "router_logits",
+            "fc1_w",
+            "fc1_scales",
+            "fc1_b",
+            "fc2_w",
+            "fc2_scales",
+            "fc2_b",
+        ],
+        &["Y"],
+        &[
+            attr_int("k", 2),
+            attr_int("normalize_routing_weights", 1),
+            attr_int("swiglu_fusion", 1),
+            attr_int("use_sparse_mixer", 0),
+            attr_int("expert_weight_bits", bits),
+            attr_int("block_size", block_size),
+            attr_string("activation_type", "swiglu"),
+            attr_float("activation_alpha", 1.702),
+            attr_float("activation_beta", 1.0),
+            attr_float("swiglu_limit", 7.0),
+        ],
+    );
+    qmoe.domain = "com.microsoft".to_string();
+
+    let model = model(
+        17,
+        graph(
+            "test_QMoE_graph",
+            vec![
+                f32_input("X", &[rows, hidden]),
+                f32_input("router_logits", &[rows, num_experts]),
+            ],
+            vec![f32_output("Y", &[rows, hidden])],
+            vec![qmoe],
+            vec![
+                u8_init(
+                    "fc1_w",
+                    &[num_experts, fc1_out, hidden / per_byte],
+                    &packed(1, num_experts * fc1_out, hidden),
+                ),
+                f32_init(
+                    "fc1_scales",
+                    &[num_experts, fc1_out, fc1_blocks],
+                    &scales(2, num_experts * fc1_out, fc1_blocks),
+                ),
+                f32_init(
+                    "fc1_b",
+                    &[num_experts, fc1_out],
+                    &scales(3, num_experts, fc1_out),
+                ),
+                u8_init(
+                    "fc2_w",
+                    &[num_experts, hidden, inter / per_byte],
+                    &packed(4, num_experts * hidden, inter),
+                ),
+                f32_init(
+                    "fc2_scales",
+                    &[num_experts, hidden, fc2_blocks],
+                    &scales(5, num_experts * hidden, fc2_blocks),
+                ),
+                f32_init(
+                    "fc2_b",
+                    &[num_experts, hidden],
+                    &scales(6, num_experts, hidden),
+                ),
+            ],
+        ),
+    );
+    with_ms_domain(model, 1)
+}
+
+#[test]
+fn qmoe_swiglu_4bit_matches_ort() {
+    assert_op_matches_ort(build_qmoe(4), ExpectConvertOp::Success, 17);
+}
+
+#[test]
+fn qmoe_swiglu_8bit_matches_ort() {
+    assert_op_matches_ort(build_qmoe(8), ExpectConvertOp::Success, 17);
+}
+
+/// GatherBlockQuantized: 4- or 8-bit table with explicit packed zero points,
+/// constant indices, gather_axis 0.
+fn build_gather_block_quantized(bits: i64) -> ModelProto {
+    use onnx2webnn::test_models::prelude::*;
+
+    let (rows, cols, block_size) = (8i64, 32i64, 16i64);
+    let per_byte = 8 / bits;
+    let blocks = cols / block_size;
+
+    let data: Vec<u8> = (0..rows * cols / per_byte)
+        .map(|i| ((i * 5 + 3) % 256) as u8)
+        .collect();
+    let scales: Vec<f32> = (0..rows * blocks)
+        .map(|i| 0.02 + (i % 7) as f32 * 0.01)
+        .collect();
+    let zp: Vec<u8> = (0..(rows * blocks / per_byte).max(1))
+        .map(|i| ((i * 3 + 1) % 256) as u8)
+        .collect();
+
+    let mut gbq = node(
+        "GatherBlockQuantized",
+        "test_gbq",
+        &["data", "indices", "scales", "zero_points"],
+        &["Y"],
+        &[
+            attr_int("bits", bits),
+            attr_int("block_size", block_size),
+            attr_int("gather_axis", 0),
+            attr_int("quantize_axis", 1),
+        ],
+    );
+    gbq.domain = "com.microsoft".to_string();
+
+    let model = model(
+        21,
+        graph(
+            "test_GatherBlockQuantized_graph",
+            vec![],
+            vec![f32_output("Y", &[3, cols])],
+            vec![gbq],
+            vec![
+                u8_init("data", &[rows, cols / per_byte], &data),
+                i64_init("indices", &[3], &[0, 5, 2]),
+                f32_init("scales", &[rows, blocks], &scales),
+                u8_init("zero_points", &[rows, blocks / per_byte.min(blocks)], &zp),
+            ],
+        ),
+    );
+    with_ms_domain(model, 1)
+}
+
+#[test]
+fn gather_block_quantized_4bit_matches_ort() {
+    assert_op_matches_ort(
+        build_gather_block_quantized(4),
+        ExpectConvertOp::Success,
+        21,
+    );
+}
+
+#[test]
+fn gather_block_quantized_8bit_matches_ort() {
+    assert_op_matches_ort(
+        build_gather_block_quantized(8),
+        ExpectConvertOp::Success,
+        21,
+    );
+}
+
+/// MatMulNBits with bits=8: one byte per value, default zero point 128.
+fn build_matmul_nbits_8bit() -> ModelProto {
+    use onnx2webnn::test_models::prelude::*;
+
+    let (k, n, block_size) = (32i64, 4i64, 32i64);
+    let b_data: Vec<u8> = (0..n * k).map(|i| ((i * 11 + 7) % 256) as u8).collect();
+    let scales: Vec<f32> = (0..n).map(|i| 0.05 + i as f32 * 0.01).collect();
+
+    let mut nbits = node(
+        "MatMulNBits",
+        "test_matmul_nbits8",
+        &["A", "B", "scales"],
+        &["Y"],
+        &[
+            attr_int("K", k),
+            attr_int("N", n),
+            attr_int("bits", 8),
+            attr_int("block_size", block_size),
+        ],
+    );
+    nbits.domain = "com.microsoft".to_string();
+
+    let model = model(
+        17,
+        graph(
+            "test_MatMulNBits8_graph",
+            vec![f32_input("A", &[2, k])],
+            vec![f32_output("Y", &[2, n])],
+            vec![nbits],
+            vec![
+                u8_init("B", &[n, 1, block_size], &b_data),
+                f32_init("scales", &[n], &scales),
+            ],
+        ),
+    );
+    with_ms_domain(model, 1)
+}
+
+#[test]
+fn matmul_nbits_8bit_matches_ort() {
+    assert_op_matches_ort(build_matmul_nbits_8bit(), ExpectConvertOp::Success, 17);
+}
+
 #[test]
 fn group_query_attention_matches_ort() {
     assert_op_matches_ort(build_gqa(), ExpectConvertOp::Success, 17);

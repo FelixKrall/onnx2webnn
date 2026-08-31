@@ -42,6 +42,7 @@ impl OpHandler for UtilityHandler {
             op_type,
             "Shape"
                 | "Gather"
+                | "GatherBlockQuantized"
                 | "GatherND"
                 | "GatherElements"
                 | "ReverseSequence"
@@ -68,6 +69,9 @@ impl OpHandler for UtilityHandler {
         match op_type {
             "Shape" => self.convert_shape(node, &node_name, b),
             "Gather" => self.convert_gather(node, &node_name, context, b),
+            "GatherBlockQuantized" => {
+                self.convert_gather_block_quantized(node, &node_name, context, b)
+            }
             "GatherND" => self.convert_gather_nd(node, &node_name, context, b),
             "GatherElements" => self.convert_gather_elements(node, &node_name, context, b),
             "ReverseSequence" => self.convert_reverse_sequence(node, &node_name, context, b),
@@ -761,6 +765,215 @@ impl UtilityHandler {
             }
         }
 
+        Ok(result)
+    }
+
+    /// Lower `com.microsoft.GatherBlockQuantized` by dequantizing the packed
+    /// 4-bit table at conversion time and emitting a plain gather.
+    ///
+    /// Data is uint8 with two values per byte (low nibble first) packed along
+    /// `quantize_axis` (required to be the last axis); dequantization is
+    /// `(q - zero_point) * scale` with blockwise scales and optional packed
+    /// 4-bit zero points (default 8). The dense float table matches the
+    /// unquantized export's memory footprint.
+    fn convert_gather_block_quantized(
+        &self,
+        node: &NodeProto,
+        node_name: &str,
+        context: &ConversionContext,
+        b: &mut OnnxBuilder<'_, '_, '_>,
+    ) -> Result<ConversionResult, OnnxError> {
+        use crate::protos::onnx::TensorProto_DataType;
+
+        let inputs = node.input.as_slice();
+        if inputs.len() < 3 {
+            return Err(OnnxError::InvalidShape(format!(
+                "GatherBlockQuantized expects at least 3 inputs (data, indices, scales), got {}",
+                inputs.len()
+            )));
+        }
+
+        let mut gather_axis = 0i64;
+        let mut quantize_axis = 1i64;
+        let mut bits = 4i64;
+        let mut block_size = 128i64;
+        for attr in node.attribute.as_slice() {
+            match attr.name.as_str() {
+                "gather_axis" => gather_axis = attr.i,
+                "quantize_axis" => quantize_axis = attr.i,
+                "bits" => bits = attr.i,
+                "block_size" => block_size = attr.i,
+                _ => {}
+            }
+        }
+        if bits != 4 && bits != 8 {
+            return Err(OnnxError::unsupported_op(
+                format!("GatherBlockQuantized(bits={bits})"),
+                node_name.to_string(),
+            ));
+        }
+        let per_byte = (8 / bits) as usize;
+
+        let data = context
+            .initializers
+            .get(inputs[0].as_str())
+            .copied()
+            .ok_or_else(|| {
+                OnnxError::unsupported_op(
+                    "GatherBlockQuantized(non-constant data)",
+                    node_name.to_string(),
+                )
+            })?;
+        let scales_tensor = context
+            .initializers
+            .get(inputs[2].as_str())
+            .copied()
+            .ok_or_else(|| {
+                OnnxError::unsupported_op(
+                    "GatherBlockQuantized(non-constant scales)",
+                    node_name.to_string(),
+                )
+            })?;
+        if data.data_type != TensorProto_DataType::Uint8 as i32 {
+            return Err(OnnxError::InvalidShape(format!(
+                "GatherBlockQuantized data must be packed uint8, got data_type={}",
+                data.data_type
+            )));
+        }
+        let rank = data.dims.len() as i64;
+        let quantize_axis = if quantize_axis < 0 {
+            quantize_axis + rank
+        } else {
+            quantize_axis
+        };
+        if rank == 0 || quantize_axis != rank - 1 {
+            return Err(OnnxError::unsupported_op(
+                format!("GatherBlockQuantized(quantize_axis={quantize_axis}, rank={rank})"),
+                node_name.to_string(),
+            ));
+        }
+
+        let packed_cols = *data.dims.last().unwrap();
+        let cols = packed_cols * per_byte as i64;
+        let rows: i64 = data.dims[..data.dims.len() - 1].iter().product();
+        let blocks = (cols + block_size - 1) / block_size;
+        let expected_scales: i64 = rows * blocks;
+        let scales = crate::onnx::ops::matmul::decode_float_tensor_as_f32(scales_tensor)?;
+        if (scales.len() as i64) < expected_scales {
+            return Err(OnnxError::InvalidShape(format!(
+                "GatherBlockQuantized scales hold {} values, need {expected_scales}",
+                scales.len()
+            )));
+        }
+
+        // Zero points: packed 4-bit per block when present, otherwise 8.
+        let zp_packed: Option<Vec<u8>> = match inputs.get(3).filter(|n| !n.is_empty()) {
+            Some(zp_name) => {
+                let zp = context
+                    .initializers
+                    .get(zp_name.as_str())
+                    .copied()
+                    .ok_or_else(|| {
+                        OnnxError::unsupported_op(
+                            "GatherBlockQuantized(non-constant zero_points)",
+                            node_name.to_string(),
+                        )
+                    })?;
+                Some(crate::onnx::builder::tensor_proto_to_bytes(zp)?)
+            }
+            None => None,
+        };
+        let default_zp = f32::from(1u8 << (bits - 1));
+        let zp_at = |row: usize, block: usize| -> f32 {
+            match &zp_packed {
+                Some(bytes) => {
+                    let idx = row * blocks as usize + block;
+                    if per_byte == 2 {
+                        let byte = bytes.get(idx / 2).copied().unwrap_or(0x88);
+                        f32::from(if idx % 2 == 0 { byte & 0x0F } else { byte >> 4 })
+                    } else {
+                        f32::from(bytes.get(idx).copied().unwrap_or(128))
+                    }
+                }
+                None => default_zp,
+            }
+        };
+
+        let packed = crate::onnx::builder::tensor_proto_to_bytes(data)?;
+        let (rows_u, cols_u, packed_u) = (rows as usize, cols as usize, packed_cols as usize);
+        let mut values = vec![0f32; rows_u * cols_u];
+        for row in 0..rows_u {
+            let row_bytes = &packed[row * packed_u..(row + 1) * packed_u];
+            let row_out = &mut values[row * cols_u..(row + 1) * cols_u];
+            for (i, value) in row_out.iter_mut().enumerate() {
+                let q = if per_byte == 2 {
+                    let byte = row_bytes[i / 2];
+                    if i % 2 == 0 {
+                        byte & 0x0F
+                    } else {
+                        byte >> 4
+                    }
+                } else {
+                    row_bytes[i]
+                };
+                let block = i / block_size as usize;
+                *value = (f32::from(q) - zp_at(row, block)) * scales[row * blocks as usize + block];
+            }
+        }
+
+        let output_name = output_label(node, node_name);
+        let dtype = if scales_tensor.data_type == TensorProto_DataType::Float16 as i32 {
+            DataType::Float16
+        } else {
+            DataType::Float32
+        };
+        let mut table_shape: Vec<u32> = data.dims.iter().map(|&d| d as u32).collect();
+        *table_shape.last_mut().unwrap() = cols as u32;
+        let table_name = format!("{output_name}__dequant_table");
+        match dtype {
+            DataType::Float16 => {
+                let bytes: Vec<u8> = values
+                    .iter()
+                    .flat_map(|&v| half::f16::from_f32(v).to_le_bytes())
+                    .collect();
+                b.register_constant_from_bytes(
+                    &table_name,
+                    DataType::Float16,
+                    &table_shape,
+                    &bytes,
+                )?;
+            }
+            _ => {
+                b.register_constant_from_bytes(
+                    &table_name,
+                    DataType::Float32,
+                    &table_shape,
+                    bytemuck::cast_slice(&values),
+                )?;
+            }
+        }
+
+        let gather_axis = normalize_axis_best_effort(gather_axis, data.dims.len());
+        let table = b.resolve_operand(&table_name)?;
+        let indices = b.resolve_operand(&inputs[1])?;
+        let out = b
+            .builder
+            .gather_with_options(
+                table,
+                indices,
+                MLGatherOptions {
+                    label: output_name.clone(),
+                    axis: gather_axis as u32,
+                },
+            )
+            .map_err(map_op_error)?;
+        if let Some(output) = node.output.as_slice().first() {
+            record_node_output(b, output, &output_name, out);
+        }
+        let mut result = ConversionResult::default();
+        if let Some(output) = node.output.as_slice().first() {
+            result.output_types.insert(output.to_string(), dtype);
+        }
         Ok(result)
     }
 
