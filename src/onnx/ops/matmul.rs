@@ -11,7 +11,7 @@ use crate::onnx::builder::{map_op_error, operand_index, tensor_proto_to_bytes, O
 use crate::onnx::builder_helpers::{
     i64_slice_to_mldim, output_label, record_node_output, reshape_with_shape,
 };
-use crate::onnx::convert::OnnxError;
+use crate::onnx::convert::{map_onnx_data_type, OnnxError};
 use crate::onnx::ops::conv::lookup_shape;
 use crate::onnx::ops::{ConversionContext, ConversionResult, OpHandler};
 use crate::protos::onnx::{NodeProto, TensorProto_DataType};
@@ -489,8 +489,9 @@ impl MatMulHandler {
     /// Lower `com.microsoft.MatMulNBits` the same way ORT's WebNN EP does:
     /// `dequantizeLinear` → reshape `[N,K]` → transpose `[K,N]` → `matmul` (+ optional bias).
     ///
-    /// Supported: bits=4, constant packed `B`, optional constant zero_points, optional bias.
-    /// Rejected: bits≠4, `g_idx`, non-constant `B`/`zero_points`.
+    /// Supported: bits=4, constant packed `B`, constant `scales`, optional constant
+    /// zero_points, optional bias.
+    /// Rejected: bits≠4, `g_idx`, non-constant `B`/`scales`/`zero_points`.
     fn convert_matmul_nbits(
         &self,
         node: &NodeProto,
@@ -601,13 +602,23 @@ impl MatMulHandler {
         b.register_constant_from_bytes(&b_uint4_name, weight_dtype, &weight_shape, &packed)?;
         let b_uint4 = b.resolve_operand(&b_uint4_name)?;
 
-        let scales = b.resolve_operand(scales_name)?;
-        let scales = reshape_with_shape(
-            b,
-            scales,
-            &format!("{label}__scales"),
-            i64_slice_to_mldim(&[n, n_blocks as i64, 1])?,
+        let scales_tensor = context
+            .initializers
+            .get(scales_name)
+            .copied()
+            .ok_or_else(|| {
+                OnnxError::unsupported_op("MatMulNBits(non-constant scales)", node_name.to_string())
+            })?;
+        let scales_dtype = map_onnx_data_type(scales_tensor.data_type)?;
+        let scales_bytes = tensor_proto_to_bytes(scales_tensor)?;
+        let scales_shape_name = format!("{label}__scales");
+        b.register_constant_from_bytes(
+            &scales_shape_name,
+            scales_dtype,
+            &[n_attr, n_blocks, 1],
+            &scales_bytes,
         )?;
+        let scales = b.resolve_operand(&scales_shape_name)?;
 
         let zero_point = register_matmul_nbits_zero_point(
             b,
