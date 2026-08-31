@@ -382,6 +382,32 @@ impl ReshapeHandler {
                 .cloned()
         };
 
+        // ONNX Reshape: a 0 in the target copies the corresponding input
+        // dimension (unless allowzero=1, where it is a literal zero).
+        let allowzero = node
+            .attribute
+            .as_slice()
+            .iter()
+            .any(|a| a.name.as_str() == "allowzero" && a.i != 0);
+        let shape_values: Vec<i64> = if !allowzero && shape_values.contains(&0) {
+            match input_shape_opt.as_ref() {
+                Some(input_shape) => shape_values
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &d)| {
+                        if d == 0 {
+                            input_shape.get(i).copied().unwrap_or(0)
+                        } else {
+                            d
+                        }
+                    })
+                    .collect(),
+                None => shape_values,
+            }
+        } else {
+            shape_values
+        };
+
         let shape_values: Vec<u32> = if shape_values.contains(&-1) {
             // Prefer strict inference when we know the input shape; otherwise fall back to
             // best-effort by replacing -1 with 1 so conversion can proceed for fixed-step

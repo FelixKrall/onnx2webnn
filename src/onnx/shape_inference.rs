@@ -442,6 +442,7 @@ pub fn infer_node_output_shape(
         | "SimplifiedLayerNormalization"
         | "SkipSimplifiedLayerNormalization"
         | "RotaryEmbedding"
+        | "MoE"
         | "BatchNormalization"
         | "InstanceNormalization"
         | "Trilu" => {
@@ -2603,10 +2604,57 @@ fn fold_shape_constants(
                             }
                         }
                         const_values.insert(out.to_string(), vals.clone());
-                        let out_shape = if vals.len() == 1 {
-                            Vec::new()
+                        // Track the real rank change: consumers like Tile need
+                        // the unsqueezed shape, not a flattened vector.
+                        let base_shape = value_shapes.get(inp).cloned().unwrap_or_else(|| {
+                            if vals.len() == 1 {
+                                Vec::new()
+                            } else {
+                                vec![vals.len() as i64]
+                            }
+                        });
+                        let mut axes: Vec<i64> = node
+                            .attribute
+                            .as_slice()
+                            .iter()
+                            .find(|a| a.name.as_str() == "axes")
+                            .map(|a| a.ints.clone())
+                            .unwrap_or_default();
+                        if axes.is_empty() {
+                            if let Some(axes_name) = node.input.as_slice().get(1) {
+                                axes = const_values
+                                    .get(axes_name.as_str())
+                                    .cloned()
+                                    .unwrap_or_default();
+                            }
+                        }
+                        let out_shape = if op_type == "Unsqueeze" {
+                            let out_rank = base_shape.len() as i64 + axes.len() as i64;
+                            let mut norm: Vec<i64> = axes
+                                .iter()
+                                .map(|&a| if a < 0 { a + out_rank } else { a })
+                                .collect();
+                            norm.sort_unstable();
+                            let mut s = base_shape;
+                            for a in norm {
+                                let idx = a.clamp(0, s.len() as i64) as usize;
+                                s.insert(idx, 1);
+                            }
+                            s
+                        } else if axes.is_empty() {
+                            base_shape.into_iter().filter(|&d| d != 1).collect()
                         } else {
-                            vec![vals.len() as i64]
+                            let rank = base_shape.len() as i64;
+                            let norm: Vec<usize> = axes
+                                .iter()
+                                .map(|&a| (if a < 0 { a + rank } else { a }) as usize)
+                                .collect();
+                            base_shape
+                                .into_iter()
+                                .enumerate()
+                                .filter(|(i, _)| !norm.contains(i))
+                                .map(|(_, d)| d)
+                                .collect()
                         };
                         value_shapes.insert(out.to_string(), out_shape);
                         if let Some(dtype) = value_types.get(inp).cloned() {

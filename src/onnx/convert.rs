@@ -725,7 +725,15 @@ Provide --override-dim {}=<value> or enable --experimental-dynamic-inputs.",
                                 }
                             }
                         }
-                        if !dims.is_empty() {
+                        // Without the dynamic-inputs feature, rustnn rejects graphs
+                        // containing Dynamic dimensions — keep only fully static
+                        // metadata so unresolved composite dim_params (e.g.
+                        // "batch_size * sequence_length") never reach the builder.
+                        let keep_dims = options.experimental_dynamic_inputs
+                            || dims
+                                .iter()
+                                .all(|d| matches!(d, rustnn::graph::Dimension::Static(_)));
+                        if !dims.is_empty() && keep_dims {
                             value_shape_dims.insert(value_info.name.as_str().to_string(), dims);
                         }
                     }
@@ -1067,6 +1075,105 @@ Provide --override-dim {}=<value> or enable --experimental-dynamic-inputs.",
 }
 
 /// Convert an ONNX file and validate via rustnn ORT `MLGraphBuilder::build()`.
+/// Resolve `data_location = EXTERNAL` initializers by reading the referenced
+/// files (relative to the model) into `raw_data`. Hub exports split large
+/// weights across several chunk files (`model.onnx_data`, `model.onnx_data_1`,
+/// …); each tensor names its own `location`, so per-tensor reads handle the
+/// chunking naturally. Files are read once and cached across tensors.
+fn load_external_tensor_data(model: &mut ModelProto, onnx_path: &Path) -> Result<(), OnnxError> {
+    const EXTERNAL: i32 = 1; // TensorProto_DataLocation::External
+    let graph = match model.graph.as_mut() {
+        Some(g) => g,
+        None => return Ok(()),
+    };
+    if !graph
+        .initializer
+        .iter()
+        .any(|t| t.data_location == EXTERNAL)
+    {
+        return Ok(());
+    }
+    let base_dir = onnx_path.parent().unwrap_or_else(|| Path::new("."));
+    let mut file_cache: std::collections::HashMap<String, std::sync::Arc<Vec<u8>>> =
+        std::collections::HashMap::new();
+
+    for tensor in graph.initializer.iter_mut() {
+        if tensor.data_location != EXTERNAL {
+            continue;
+        }
+        let mut location = None;
+        let mut offset = 0usize;
+        let mut length = None;
+        for entry in tensor.external_data.as_slice() {
+            match entry.key.as_str() {
+                "location" => location = Some(entry.value.clone()),
+                "offset" => {
+                    offset = entry.value.trim().parse::<usize>().map_err(|_| {
+                        OnnxError::InvalidShape(format!(
+                            "invalid external data offset '{}' for tensor '{}'",
+                            entry.value, tensor.name
+                        ))
+                    })?;
+                }
+                "length" => {
+                    length = Some(entry.value.trim().parse::<usize>().map_err(|_| {
+                        OnnxError::InvalidShape(format!(
+                            "invalid external data length '{}' for tensor '{}'",
+                            entry.value, tensor.name
+                        ))
+                    })?);
+                }
+                _ => {}
+            }
+        }
+        let location = location.ok_or_else(|| {
+            OnnxError::InvalidShape(format!(
+                "external tensor '{}' has no data location",
+                tensor.name
+            ))
+        })?;
+        // The spec requires relative paths inside the model directory.
+        if Path::new(&location).is_absolute() || location.contains("..") {
+            return Err(OnnxError::InvalidShape(format!(
+                "external tensor '{}' references a non-relative location '{location}'",
+                tensor.name
+            )));
+        }
+        let bytes = match file_cache.get(&location) {
+            Some(bytes) => bytes.clone(),
+            None => {
+                let path = base_dir.join(&location);
+                let data = std::sync::Arc::new(fs::read(&path).map_err(|e| {
+                    OnnxError::InvalidShape(format!(
+                        "failed to read external data '{}' for tensor '{}': {e}",
+                        path.display(),
+                        tensor.name
+                    ))
+                })?);
+                file_cache.insert(location.clone(), data.clone());
+                data
+            }
+        };
+        let end = match length {
+            Some(len) => offset.checked_add(len),
+            None => Some(bytes.len()),
+        }
+        .filter(|&end| end <= bytes.len())
+        .ok_or_else(|| {
+            OnnxError::InvalidShape(format!(
+                "external tensor '{}' range {offset}+{:?} exceeds '{location}' ({} bytes)",
+                tensor.name,
+                length,
+                bytes.len()
+            ))
+        })?;
+        tensor.raw_data = bytes[offset..end].to_vec();
+        tensor.data_location = 0;
+        tensor.external_data.clear();
+    }
+    Ok(())
+}
+
 pub fn convert_onnx<P: AsRef<Path>>(
     onnx_path: P,
     mut options: ConvertOptions,
@@ -1078,6 +1185,8 @@ pub fn convert_onnx<P: AsRef<Path>>(
     // Parse protobuf
     let mut model: ModelProto =
         ModelProto::decode(&onnx_bytes[..]).map_err(|e| OnnxError::ProtobufError(e.to_string()))?;
+
+    load_external_tensor_data(&mut model, onnx_path_ref)?;
 
     // Apply constant folding if optimize flag is set
     if options.optimize {

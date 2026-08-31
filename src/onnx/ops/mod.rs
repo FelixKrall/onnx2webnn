@@ -33,6 +33,7 @@ pub mod einsum;
 pub mod elementwise;
 pub mod matmul;
 pub mod misc;
+pub mod moe;
 pub mod normalization;
 pub mod pad;
 pub mod pool;
@@ -53,6 +54,7 @@ use einsum::EinsumHandler;
 use elementwise::ElementwiseHandler;
 use matmul::MatMulHandler;
 use misc::MiscHandler;
+use moe::MoeHandler;
 use normalization::NormalizationHandler;
 use pad::PadHandler;
 use pool::PoolHandler;
@@ -170,6 +172,7 @@ impl OpRegistry {
         let handlers: Vec<Box<dyn OpHandler>> = vec![
             Box::new(MatMulHandler),
             Box::new(AttentionHandler),
+            Box::new(MoeHandler),
             Box::new(EinsumHandler),
             Box::new(ConvHandler),
             Box::new(PoolHandler),

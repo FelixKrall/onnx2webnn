@@ -15,6 +15,8 @@ WEBNN_SUPPORTED_ONNX_OPS: frozenset[str] = frozenset(
         "MatMulBnb4",
         # attention.rs
         "GroupQueryAttention",
+        # moe.rs
+        "MoE",
         # einsum.rs
         "Einsum",
         # conv.rs

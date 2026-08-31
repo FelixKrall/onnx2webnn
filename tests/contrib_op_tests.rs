@@ -123,6 +123,82 @@ fn build_gqa() -> ModelProto {
     with_ms_domain(model, 1)
 }
 
+/// MoE with fused interleaved SwiGLU (gpt-oss style): 4 experts, top-2
+/// routing with normalized weights, alpha/limit clamps in play. Weight
+/// layouts follow the ORT spec: fc1 [E, 2*inter, hidden], fc2 [E, hidden,
+/// inter], both applied as x @ w^T.
+fn build_moe() -> ModelProto {
+    use onnx2webnn::test_models::prelude::*;
+
+    let (num_experts, hidden, inter, rows) = (4i64, 8i64, 4i64, 3i64);
+    let fc1_out = 2 * inter;
+
+    let det = |seed: i64, len: i64| -> Vec<f32> {
+        (0..len)
+            .map(|i| (((i * 37 + seed * 101) % 19) as f32 - 9.0) * 0.11)
+            .collect()
+    };
+
+    let mut moe = node(
+        "MoE",
+        "test_moe",
+        &["X", "router_logits", "fc1_w", "fc1_b", "fc2_w", "fc2_b"],
+        &["Y"],
+        &[
+            attr_int("k", 2),
+            attr_int("normalize_routing_weights", 1),
+            attr_int("swiglu_fusion", 1),
+            attr_int("use_sparse_mixer", 0),
+            attr_string("activation_type", "swiglu"),
+            attr_float("activation_alpha", 1.702),
+            attr_float("activation_beta", 1.0),
+            attr_float("swiglu_limit", 7.0),
+        ],
+    );
+    moe.domain = "com.microsoft".to_string();
+
+    let model = model(
+        17,
+        graph(
+            "test_MoE_graph",
+            vec![
+                f32_input("X", &[rows, hidden]),
+                f32_input("router_logits", &[rows, num_experts]),
+            ],
+            vec![f32_output("Y", &[rows, hidden])],
+            vec![moe],
+            vec![
+                f32_init(
+                    "fc1_w",
+                    &[num_experts, fc1_out, hidden],
+                    &det(1, num_experts * fc1_out * hidden),
+                ),
+                f32_init(
+                    "fc1_b",
+                    &[num_experts, fc1_out],
+                    &det(2, num_experts * fc1_out),
+                ),
+                f32_init(
+                    "fc2_w",
+                    &[num_experts, hidden, inter],
+                    &det(3, num_experts * hidden * inter),
+                ),
+                f32_init(
+                    "fc2_b",
+                    &[num_experts, hidden],
+                    &det(4, num_experts * hidden),
+                ),
+            ],
+        ),
+    );
+    with_ms_domain(model, 1)
+}
+
+#[test]
+fn moe_swiglu_matches_ort() {
+    assert_op_matches_ort(build_moe(), ExpectConvertOp::Success, 17);
+}
+
 #[test]
 fn group_query_attention_matches_ort() {
     assert_op_matches_ort(build_gqa(), ExpectConvertOp::Success, 17);

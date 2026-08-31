@@ -217,6 +217,7 @@ These appear in graphs but become constants or metadata during `--optimize` / co
 | Einsum | reduceSum + transpose/reshape + batched `matmul` | Implemented — ≤2 inputs; reject ellipsis/diagonals |
 | MatMulBnb4 | conversion-time FP4/NF4 codebook dequantization → float constant + `matmul` | Implemented — trades 4-bit footprint for dense constants |
 | GroupQueryAttention | reshape/transpose + KV-cache concat + scaled matmul + static causal mask + softmax | Implemented — unpadded batch assumption; reject packed QKV/do_rotary/softcap/local window |
+| MoE | dense expert evaluation (batched matmul) + iterative top-k mask + masked softmax blend | Implemented — fused interleaved swiglu/relu/gelu/sigmoid; reject fc3/sparse mixer; num_experts/k× FLOP overhead |
 | CumProd | `cumulativeSum` on log + `Exp`, or iterative multiply subgraph | P3 — new in opset 26 |
 
 #### 2c. Advanced single-entry WebNN ops (high attribute complexity)
