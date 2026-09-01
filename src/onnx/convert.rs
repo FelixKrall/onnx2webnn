@@ -935,6 +935,23 @@ Provide --override-dim {}=<value> or enable --experimental-dynamic-inputs.",
         if let Some(val) = const_values.get("/model/rotary_emb/Where_output_0") {
             crate::debug_println!("[NODE CONV] /model/rotary_emb/Where_output_0 = {:?}", val);
         }
+        // O2W_PROBE=<substr>: dump post-propagation shape/const state for
+        // matching node outputs (diagnostics only).
+        if let Ok(probe) = std::env::var("O2W_PROBE") {
+            for onnx_node in onnx_graph.node.as_slice() {
+                for out in onnx_node.output.as_slice() {
+                    if out.contains(&probe) {
+                        eprintln!(
+                            "[probe] {} ({}) shape={:?} const={}",
+                            out,
+                            onnx_node.op_type,
+                            value_shapes.get(out.as_str()),
+                            const_values.contains_key(out.as_str()),
+                        );
+                    }
+                }
+            }
+        }
         for onnx_node in onnx_graph.node.as_slice() {
             // If all outputs are compile-time constants, emit them directly and skip conversion
             let outputs = onnx_node.output.as_slice();

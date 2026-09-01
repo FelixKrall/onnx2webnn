@@ -1369,8 +1369,10 @@ impl UtilityHandler {
                 ));
             } else {
                 return Err(OnnxError::InvalidShape(
-                    "Slice on unknown-rank tensors requires known input shape for WebNN"
-                        .to_string(),
+                    format!(
+                        "Slice '{node_name}' on unknown-rank tensor '{}' requires a known input shape for WebNN",
+                        inputs[0]
+                    ),
                 ));
             }
         } else {

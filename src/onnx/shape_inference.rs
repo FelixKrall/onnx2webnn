@@ -289,9 +289,14 @@ fn propagate_node_shapes(
             if outputs.is_empty() {
                 continue;
             }
-            if outputs
-                .iter()
-                .all(|o| result.value_shapes.contains_key(o.as_str()))
+            // Binary broadcast shapes may have been guessed from a single known
+            // input; keep refreshing them as more inputs resolve.
+            let refresh_binary =
+                matches!(node.op_type.as_str(), "Add" | "Sub" | "Mul" | "Div" | "Pow");
+            if !refresh_binary
+                && outputs
+                    .iter()
+                    .all(|o| result.value_shapes.contains_key(o.as_str()))
             {
                 continue;
             }
@@ -389,7 +394,15 @@ fn propagate_node_shapes(
                 &result.const_values,
             ) {
                 let out_name = outputs[0].to_string();
-                result.value_shapes.entry(out_name.clone()).or_insert(shape);
+                if refresh_binary {
+                    let changed = result.value_shapes.get(&out_name) != Some(&shape);
+                    result.value_shapes.insert(out_name.clone(), shape);
+                    if changed {
+                        progress = true;
+                    }
+                } else {
+                    result.value_shapes.entry(out_name.clone()).or_insert(shape);
+                }
 
                 // Propagate dtype from first input if available.
                 if matches!(node.op_type.as_str(), "ConvInteger" | "MatMulInteger") {
@@ -452,6 +465,35 @@ pub fn infer_node_output_shape(
         | "RotaryEmbedding"
         | "MoE"
         | "QMoE"
+        | "CumSum"
+        | "CumProd"
+        | "Sin"
+        | "Cos"
+        | "Tan"
+        | "Asin"
+        | "Acos"
+        | "Atan"
+        | "Sinh"
+        | "Cosh"
+        | "Asinh"
+        | "Acosh"
+        | "Atanh"
+        | "Floor"
+        | "Ceil"
+        | "Round"
+        | "Sign"
+        | "Reciprocal"
+        | "Identity"
+        | "LeakyRelu"
+        | "Elu"
+        | "Selu"
+        | "Celu"
+        | "Softplus"
+        | "Softsign"
+        | "HardSigmoid"
+        | "HardSwish"
+        | "Mish"
+        | "Clip"
         | "BatchNormalization"
         | "InstanceNormalization"
         | "Trilu" => {
@@ -575,7 +617,11 @@ pub fn infer_node_output_shape(
                 .map(|a| a.ints.iter().map(|&i| i as usize).collect::<Vec<usize>>())
                 .unwrap_or_else(|| (0..input_shape.len()).rev().collect());
 
-            // Apply permutation
+            // A tracked shape whose rank disagrees with the permutation is a
+            // stale guess from partial propagation — refuse rather than panic.
+            if perm.len() != input_shape.len() || perm.iter().any(|&i| i >= input_shape.len()) {
+                return None;
+            }
             Some(perm.iter().map(|&i| input_shape[i]).collect())
         }
 
@@ -1308,7 +1354,7 @@ pub fn infer_node_output_shape(
                 }
 
                 let step = steps[i];
-                if step != 1 {
+                if step <= 0 {
                     return None;
                 }
 
@@ -1329,7 +1375,8 @@ pub fn infer_node_output_shape(
                 if end < start {
                     output[axis] = 0;
                 } else {
-                    output[axis] = end - start;
+                    // Strided slices (e.g. sin/cos interleave `[..., 0::2]`).
+                    output[axis] = (end - start + step - 1) / step;
                 }
             }
 
@@ -3274,7 +3321,30 @@ pub fn propagate_shapes_and_fold_constants(
                         .as_slice()
                         .iter()
                         .all(|out| value_shapes.contains_key(out.as_str()));
-                    if all_outputs_known {
+                    // Shapes recorded from partial information (e.g. the
+                    // binary-broadcast single-input guess) go stale once more
+                    // inputs resolve. Keep recomputing shape-plumbing ops:
+                    // their inference is exact given resolved inputs and
+                    // returns None otherwise, so overwriting is idempotent.
+                    let refresh = matches!(
+                        onnx_node.op_type.as_str(),
+                        "Add"
+                            | "Sub"
+                            | "Mul"
+                            | "Div"
+                            | "Pow"
+                            | "Unsqueeze"
+                            | "Squeeze"
+                            | "Slice"
+                            | "Concat"
+                            | "Transpose"
+                            | "Reshape"
+                            | "Expand"
+                            | "Cast"
+                            | "Gather"
+                            | "Shape"
+                    );
+                    if all_outputs_known && !refresh {
                         continue;
                     }
 

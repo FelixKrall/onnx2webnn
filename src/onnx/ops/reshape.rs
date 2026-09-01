@@ -1186,6 +1186,33 @@ impl ReshapeHandler {
             axes_values
         };
 
+        // Prefer an explicit reshape when the static shape is known: rustnn's
+        // ONNX exporter currently drops the axes input on Squeeze, making ORT
+        // squeeze every unit dim (e.g. batch=1) instead of only the requested
+        // ones. A reshape encodes the exact output shape and sidesteps that.
+        if let Some(input_shape) = context.resolve_shape(inputs[0].as_str()) {
+            if !axes_values.is_empty()
+                && input_shape.iter().all(|&d| d > 0)
+                && axes_values
+                    .iter()
+                    .all(|&a| input_shape.get(a as usize) == Some(&1))
+            {
+                let squeezed: Vec<i64> = input_shape
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| !axes_values.contains(&(*i as i64)))
+                    .map(|(_, &d)| d)
+                    .collect();
+                let out = reshape_with_shape(
+                    b,
+                    input0,
+                    &output_name,
+                    crate::onnx::builder_helpers::i64_slice_to_mldim(&squeezed)?,
+                )?;
+                return Self::record_output(b, node, &output_name, out, context, None);
+            }
+        }
+
         let opts = MLSqueezeOptions {
             label: output_name.clone(),
             axes: axes_values.into_iter().map(|a| a as u32).collect(),
