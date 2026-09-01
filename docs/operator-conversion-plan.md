@@ -220,6 +220,7 @@ These appear in graphs but become constants or metadata during `--optimize` / co
 | MoE | dense expert evaluation (batched matmul) + iterative top-k mask + masked softmax blend | Implemented — fused interleaved swiglu/relu/gelu/sigmoid; reject fc3/sparse mixer; num_experts/k× FLOP overhead |
 | QMoE | conversion-time 4/8-bit blockwise dequantization → MoE lowering | Implemented — same restrictions as MoE |
 | GatherBlockQuantized | conversion-time 4/8-bit table dequantization → gather | Implemented — quantize_axis must be the last axis |
+| SplitToSequence + SequenceAt | per-element slices registered as pseudo-operands, SequenceAt aliases by constant index | Implemented — torch split() export pattern; sequence graph outputs rejected |
 | CumProd | `cumulativeSum` on log + `Exp`, or iterative multiply subgraph | P3 — new in opset 26 |
 
 #### 2c. Advanced single-entry WebNN ops (high attribute complexity)

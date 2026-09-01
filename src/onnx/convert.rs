@@ -1312,6 +1312,17 @@ pub(crate) fn convert_model(
 
     let mut outputs: HashMap<String, MLOperand> = HashMap::new();
     for output in onnx_graph.output.as_slice() {
+        // Sequences only exist as lowered elements; one escaping to a graph
+        // output has no WebNN representation.
+        if onnx_builder
+            .sequence_element_count(output.name.as_str())
+            .is_some()
+        {
+            return Err(OnnxError::unsupported_op(
+                "SplitToSequence(sequence graph output)",
+                output.name.clone(),
+            ));
+        }
         let op = onnx_builder.output_operand(output.name.as_str())?;
         let output_key = onnx_builder.build_output_key(output.name.as_str());
         outputs.insert(output_key, op);

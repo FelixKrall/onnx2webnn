@@ -22,7 +22,7 @@ use crate::onnx::builder::{map_op_error, OnnxBuilder};
 use crate::onnx::builder_helpers::{
     ast_dims_to_mldim, expand_with_shape, i64_slice_to_mldim, merge_dims_with_i64_values,
     merge_dims_with_static_values, output_label, record_node_output, reshape_with_shape,
-    u32_slice_to_mldim,
+    slice_with_params, u32_slice_to_mldim,
 };
 use crate::onnx::convert::{sanitize_identifier, OnnxError};
 use crate::onnx::ops::{
@@ -45,6 +45,8 @@ impl OpHandler for ReshapeHandler {
                 | "Transpose"
                 | "Concat"
                 | "Split"
+                | "SplitToSequence"
+                | "SequenceAt"
                 | "Unsqueeze"
                 | "Squeeze"
                 | "Tile"
@@ -71,6 +73,8 @@ impl OpHandler for ReshapeHandler {
             "Transpose" => self.convert_transpose(node, &node_name, context, b),
             "Concat" => self.convert_concat(node, &node_name, context, b),
             "Split" => self.convert_split(node, &node_name, context, b),
+            "SplitToSequence" => self.convert_split_to_sequence(node, &node_name, context, b),
+            "SequenceAt" => self.convert_sequence_at(node, &node_name, context, b),
             "Unsqueeze" => self.convert_unsqueeze(node, &node_name, context, b),
             "Squeeze" => self.convert_squeeze(node, &node_name, context, b),
             "Tile" => self.convert_tile(node, &node_name, context, b),
@@ -1224,6 +1228,183 @@ impl ReshapeHandler {
             .squeeze_with_options(input0, opts)
             .map_err(map_op_error)?;
         Self::record_output(b, node, &output_name, out, context, None)
+    }
+
+    /// Lower `SplitToSequence` with constant split sizes by emitting one WebNN
+    /// slice per element, registered as `{output}__seq{i}`. `SequenceAt` with
+    /// a constant index then aliases the selected element, so the torch
+    /// `split()` export pattern converts without sequence support in WebNN.
+    fn convert_split_to_sequence(
+        &self,
+        node: &NodeProto,
+        node_name: &str,
+        context: &ConversionContext,
+        b: &mut OnnxBuilder<'_, '_, '_>,
+    ) -> Result<ConversionResult, OnnxError> {
+        let inputs = node.input.as_slice();
+        if inputs.is_empty() {
+            return Err(OnnxError::InvalidShape(
+                "SplitToSequence expects at least 1 input".to_string(),
+            ));
+        }
+        let mut axis = 0i64;
+        let mut keepdims = 1i64;
+        for attr in node.attribute.as_slice() {
+            match attr.name.as_str() {
+                "axis" => axis = attr.i,
+                "keepdims" => keepdims = attr.i,
+                _ => {}
+            }
+        }
+
+        let input_shape = context
+            .resolve_shape(inputs[0].as_str())
+            .cloned()
+            .ok_or_else(|| {
+                OnnxError::InvalidShape(format!(
+                    "SplitToSequence '{node_name}' requires a static shape for '{}'",
+                    inputs[0]
+                ))
+            })?;
+        let rank = input_shape.len();
+        let axis = normalize_axis_best_effort(axis, rank) as usize;
+        if axis >= rank {
+            return Err(OnnxError::InvalidShape(format!(
+                "SplitToSequence '{node_name}' axis {axis} out of bounds for rank {rank}"
+            )));
+        }
+        let dim = input_shape[axis];
+
+        // Constant split sizes (1-D) or scalar chunk length; absent means
+        // per-element splitting (which requires keepdims=0 semantics we skip).
+        let split_name = inputs.get(1).filter(|n| !n.is_empty());
+        let sizes: Vec<i64> = match split_name {
+            Some(name) => {
+                let values = context
+                    .const_values
+                    .get(name.as_str())
+                    .cloned()
+                    .or_else(|| {
+                        context
+                            .initializers
+                            .get(name.as_str())
+                            .map(|t| crate::onnx::shape_inference::read_int_tensor(t))
+                    })
+                    .filter(|v| !v.is_empty())
+                    .ok_or_else(|| {
+                        OnnxError::unsupported_op(
+                            "SplitToSequence(non-constant split)",
+                            node_name.to_string(),
+                        )
+                    })?;
+                let is_scalar = context
+                    .resolve_shape(name.as_str())
+                    .map(|s| s.is_empty())
+                    .unwrap_or(values.len() == 1);
+                if is_scalar && values.len() == 1 {
+                    // Scalar chunk length: dim split into ceil(dim/len) chunks.
+                    let chunk = values[0].max(1);
+                    let mut sizes = vec![chunk; (dim / chunk) as usize];
+                    if dim % chunk != 0 {
+                        sizes.push(dim % chunk);
+                    }
+                    sizes
+                } else {
+                    values
+                }
+            }
+            None => {
+                if keepdims == 0 {
+                    return Err(OnnxError::unsupported_op(
+                        "SplitToSequence(keepdims=0)",
+                        node_name.to_string(),
+                    ));
+                }
+                vec![1; dim as usize]
+            }
+        };
+        if sizes.iter().sum::<i64>() != dim || sizes.iter().any(|&s| s <= 0) {
+            return Err(OnnxError::InvalidShape(format!(
+                "SplitToSequence '{node_name}' sizes {sizes:?} do not partition dim {dim}"
+            )));
+        }
+
+        let seq_name = node.output.first().cloned().unwrap_or_default();
+        let input = b.resolve_operand(&inputs[0])?;
+        let mut start = 0i64;
+        for (i, &size) in sizes.iter().enumerate() {
+            let mut starts = vec![0u32; rank];
+            starts[axis] = start as u32;
+            let mut chunk_shape = input_shape.clone();
+            chunk_shape[axis] = size;
+            let elem_name = OnnxBuilder::sequence_element_key(&seq_name, i);
+            let out = slice_with_params(
+                b,
+                input,
+                &elem_name,
+                &starts,
+                &i64_slice_to_mldim(&chunk_shape)?,
+            )?;
+            b.record_operand(&[&elem_name], out);
+            start += size;
+        }
+        b.record_sequence(&seq_name, sizes.len());
+        Ok(ConversionResult::default())
+    }
+
+    /// Alias a `SequenceAt(sequence, const index)` to the pre-registered
+    /// sequence element operand.
+    fn convert_sequence_at(
+        &self,
+        node: &NodeProto,
+        node_name: &str,
+        context: &ConversionContext,
+        b: &mut OnnxBuilder<'_, '_, '_>,
+    ) -> Result<ConversionResult, OnnxError> {
+        let inputs = node.input.as_slice();
+        if inputs.len() < 2 {
+            return Err(OnnxError::InvalidShape(format!(
+                "SequenceAt expects 2 inputs, got {}",
+                inputs.len()
+            )));
+        }
+        let count = b.sequence_element_count(&inputs[0]).ok_or_else(|| {
+            OnnxError::unsupported_op(
+                "SequenceAt(sequence not produced by a supported SplitToSequence)",
+                node_name.to_string(),
+            )
+        })?;
+        let index = context
+            .const_values
+            .get(inputs[1].as_str())
+            .and_then(|v| v.first().copied())
+            .or_else(|| {
+                context.initializers.get(inputs[1].as_str()).and_then(|t| {
+                    crate::onnx::shape_inference::read_int_tensor(t)
+                        .first()
+                        .copied()
+                })
+            })
+            .ok_or_else(|| {
+                OnnxError::unsupported_op("SequenceAt(non-constant index)", node_name.to_string())
+            })?;
+        let index = if index < 0 {
+            index + count as i64
+        } else {
+            index
+        };
+        if index < 0 || index as usize >= count {
+            return Err(OnnxError::InvalidShape(format!(
+                "SequenceAt '{node_name}' index {index} out of bounds for {count} elements"
+            )));
+        }
+        let elem_name = OnnxBuilder::sequence_element_key(&inputs[0], index as usize);
+        let out = b.resolve_operand(&elem_name)?;
+        let output_name = output_label(node, node_name);
+        if let Some(onnx_out) = node.output.first() {
+            record_node_output(b, onnx_out, &output_name, out);
+        }
+        Ok(ConversionResult::default())
     }
 
     /// Convert ONNX Tile to WebNN tile

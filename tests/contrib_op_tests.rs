@@ -424,6 +424,42 @@ fn matmul_nbits_8bit_matches_ort() {
     assert_op_matches_ort(build_matmul_nbits_8bit(), ExpectConvertOp::Success, 17);
 }
 
+/// SplitToSequence + SequenceAt with constant sizes/indices (the torch
+/// `split()` export pattern) lower to slices; negative index exercised.
+fn build_split_to_sequence() -> ModelProto {
+    use onnx2webnn::test_models::prelude::*;
+
+    let split = node(
+        "SplitToSequence",
+        "test_sts",
+        &["X", "sizes"],
+        &["seq"],
+        &[attr_int("axis", -2)],
+    );
+    let at0 = node("SequenceAt", "test_at0", &["seq", "idx0"], &["Y0"], &[]);
+    let at1 = node("SequenceAt", "test_at1", &["seq", "idx_neg"], &["Y1"], &[]);
+
+    model(
+        17,
+        graph(
+            "test_SplitToSequence_graph",
+            vec![f32_input("X", &[2, 7, 4])],
+            vec![f32_output("Y0", &[2, 3, 4]), f32_output("Y1", &[2, 4, 4])],
+            vec![split, at0, at1],
+            vec![
+                i64_init("sizes", &[2], &[3, 4]),
+                i64_init("idx0", &[], &[0]),
+                i64_init("idx_neg", &[], &[-1]),
+            ],
+        ),
+    )
+}
+
+#[test]
+fn split_to_sequence_matches_ort() {
+    assert_op_matches_ort(build_split_to_sequence(), ExpectConvertOp::Success, 17);
+}
+
 #[test]
 fn group_query_attention_matches_ort() {
     assert_op_matches_ort(build_gqa(), ExpectConvertOp::Success, 17);

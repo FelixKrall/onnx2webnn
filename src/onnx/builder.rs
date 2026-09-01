@@ -29,6 +29,9 @@ pub struct OnnxBuilder<'a, 'ctx, 'bld> {
     /// Zero-element optional-input placeholders (e.g. empty `Resize` roi/scales).
     /// These are not materialized as WebNN constants because 0-sized dims are invalid.
     empty_optional_values: HashSet<String>,
+    /// ONNX sequence values (SplitToSequence outputs) -> element count. The
+    /// elements themselves are registered as `{name}__seq{i}` operands.
+    sequences: HashMap<String, usize>,
 }
 
 /// Operand index inside the builder graph (`MLOperand::id` is `pub(crate)` in rustnn).
@@ -51,7 +54,25 @@ impl<'a, 'ctx, 'bld> OnnxBuilder<'a, 'ctx, 'bld> {
             constant_operands: HashSet::new(),
             input_names: HashSet::new(),
             empty_optional_values: HashSet::new(),
+            sequences: HashMap::new(),
         }
+    }
+
+    /// Name under which sequence element `i` of sequence `name` is registered.
+    pub fn sequence_element_key(name: &str, index: usize) -> String {
+        format!("{}__seq{index}", sanitize_identifier(name))
+    }
+
+    pub fn record_sequence(&mut self, name: &str, count: usize) {
+        self.sequences.insert(name.to_string(), count);
+        self.sequences.insert(sanitize_identifier(name), count);
+    }
+
+    pub fn sequence_element_count(&self, name: &str) -> Option<usize> {
+        self.sequences
+            .get(name)
+            .or_else(|| self.sequences.get(&sanitize_identifier(name)))
+            .copied()
     }
 
     pub fn webnn_id(onnx_name: &str) -> String {

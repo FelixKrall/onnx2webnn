@@ -3320,7 +3320,70 @@ fn fold_integer_constants(graph: &GraphProto, ctx: &mut InferenceResult) -> bool
     )
 }
 
-fn read_int_tensor(tensor: &TensorProto) -> Vec<i64> {
+/// Per-element shapes of a SplitToSequence with static input shape and
+/// constant split sizes (mirrors the conversion-time lowering).
+fn split_to_sequence_element_shapes(
+    node: &NodeProto,
+    value_shapes: &HashMap<String, Vec<i64>>,
+    initializers: &HashMap<String, &TensorProto>,
+    const_values: &HashMap<String, Vec<i64>>,
+) -> Option<Vec<Vec<i64>>> {
+    let ins = node.input.as_slice();
+    let input_shape = value_shapes.get(ins.first()?.as_str())?;
+    let rank = input_shape.len();
+    let mut axis = node
+        .attribute
+        .as_slice()
+        .iter()
+        .find(|a| a.name.as_str() == "axis")
+        .map(|a| a.i)
+        .unwrap_or(0);
+    if axis < 0 {
+        axis += rank as i64;
+    }
+    let axis = usize::try_from(axis).ok().filter(|&a| a < rank)?;
+    let dim = input_shape[axis];
+
+    let sizes: Vec<i64> = match ins.get(1).filter(|n| !n.is_empty()) {
+        Some(name) => {
+            let values = const_values
+                .get(name.as_str())
+                .cloned()
+                .or_else(|| initializers.get(name.as_str()).map(|t| read_int_tensor(t)))
+                .filter(|v| !v.is_empty())?;
+            let is_scalar = value_shapes
+                .get(name.as_str())
+                .map(|s| s.is_empty())
+                .unwrap_or(values.len() == 1);
+            if is_scalar && values.len() == 1 {
+                let chunk = values[0].max(1);
+                let mut sizes = vec![chunk; (dim / chunk) as usize];
+                if dim % chunk != 0 {
+                    sizes.push(dim % chunk);
+                }
+                sizes
+            } else {
+                values
+            }
+        }
+        None => vec![1; usize::try_from(dim).ok()?],
+    };
+    if sizes.iter().sum::<i64>() != dim || sizes.iter().any(|&s| s <= 0) {
+        return None;
+    }
+    Some(
+        sizes
+            .iter()
+            .map(|&s| {
+                let mut shape = input_shape.clone();
+                shape[axis] = s;
+                shape
+            })
+            .collect(),
+    )
+}
+
+pub(crate) fn read_int_tensor(tensor: &TensorProto) -> Vec<i64> {
     let raw = tensor.raw_data.as_slice();
     if !raw.is_empty() {
         match tensor.data_type {
@@ -3422,6 +3485,70 @@ pub fn propagate_shapes_and_fold_constants(
                             }
                             continue;
                         }
+                    }
+
+                    // Sequences: track per-element shapes under `{name}__seq{i}`
+                    // so SequenceAt consumers resolve (mirrors the conversion).
+                    if onnx_node.op_type.as_str() == "SplitToSequence" {
+                        if let Some(elems) = split_to_sequence_element_shapes(
+                            onnx_node,
+                            value_shapes,
+                            initializers,
+                            const_values,
+                        ) {
+                            if let Some(seq_name) = onnx_node.output.first() {
+                                let dtype = onnx_node
+                                    .input
+                                    .first()
+                                    .and_then(|n| value_types.get(n.as_str()).copied());
+                                for (i, shape) in elems.iter().enumerate() {
+                                    let key = format!("{}__seq{i}", sanitize_identifier(seq_name));
+                                    value_shapes.insert(key.clone(), shape.clone());
+                                    if let Some(dtype) = dtype {
+                                        value_types.insert(key, dtype);
+                                    }
+                                }
+                                value_shapes.insert(
+                                    format!("{}__seqlen", sanitize_identifier(seq_name)),
+                                    vec![elems.len() as i64],
+                                );
+                            }
+                        }
+                        continue;
+                    }
+                    if onnx_node.op_type.as_str() == "SequenceAt" {
+                        let resolved = (|| {
+                            let ins = onnx_node.input.as_slice();
+                            let seq = sanitize_identifier(ins.first()?);
+                            let count = value_shapes
+                                .get(&format!("{seq}__seqlen"))?
+                                .first()
+                                .copied()?;
+                            let mut idx = const_values
+                                .get(ins.get(1)?.as_str())
+                                .and_then(|v| v.first().copied())
+                                .or_else(|| {
+                                    initializers
+                                        .get(ins.get(1)?.as_str())
+                                        .and_then(|t| read_int_tensor(t).first().copied())
+                                })?;
+                            if idx < 0 {
+                                idx += count;
+                            }
+                            value_shapes.get(&format!("{seq}__seq{idx}")).cloned()
+                        })();
+                        if let (Some(shape), Some(out)) = (resolved, onnx_node.output.first()) {
+                            value_shapes.insert(out.to_string(), shape);
+                            if let Some(dtype) = onnx_node
+                                .input
+                                .first()
+                                .map(|n| format!("{}__seq0", sanitize_identifier(n)))
+                                .and_then(|k| value_types.get(&k).copied())
+                            {
+                                value_types.insert(out.to_string(), dtype);
+                            }
+                        }
+                        continue;
                     }
 
                     if onnx_node.op_type.as_str() == "Split" {
