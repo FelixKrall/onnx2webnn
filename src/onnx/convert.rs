@@ -942,10 +942,11 @@ Provide --override-dim {}=<value> or enable --experimental-dynamic-inputs.",
                 for out in onnx_node.output.as_slice() {
                     if out.contains(&probe) {
                         eprintln!(
-                            "[probe] {} ({}) shape={:?} const={:?}",
+                            "[probe] {} ({}) shape={:?} type={:?} const={:?}",
                             out,
                             onnx_node.op_type,
                             value_shapes.get(out.as_str()),
+                            value_types.get(out.as_str()),
                             const_values.get(out.as_str()).map(|v| v
                                 .iter()
                                 .take(8)
