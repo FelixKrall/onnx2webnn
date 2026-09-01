@@ -1321,6 +1321,13 @@ impl UtilityHandler {
 
                 for i in 0..desired_len {
                     let axis = axes[i] as usize;
+                    if axis >= input_shape.len() {
+                        return Err(OnnxError::InvalidShape(format!(
+                            "Slice '{node_name}' axis {axis} out of bounds for input \
+                             '{}' with tracked shape {input_shape:?}",
+                            inputs[0]
+                        )));
+                    }
                     let dim = input_shape[axis];
                     let step = steps[i];
                     if step <= 0 {

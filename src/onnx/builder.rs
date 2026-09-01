@@ -177,27 +177,21 @@ impl<'a, 'ctx, 'bld> OnnxBuilder<'a, 'ctx, 'bld> {
     ) -> Result<(), OnnxError> {
         let id = Self::webnn_id(name);
         let desc = descriptor_static(data_type, shape)?;
+        // pod_collect_to_vec copies, tolerating unaligned byte buffers (raw
+        // protobuf payloads carry no alignment guarantee).
         let op = match data_type {
-            DataType::Float32 => self.builder.constant_from_slice(
-                &desc,
-                bytemuck::try_cast_slice::<_, f32>(bytes)
-                    .map_err(|e| OnnxError::InvalidShape(e.to_string()))?,
-            ),
-            DataType::Float16 => self.builder.constant_from_slice(
-                &desc,
-                bytemuck::try_cast_slice::<_, u16>(bytes)
-                    .map_err(|e| OnnxError::InvalidShape(e.to_string()))?,
-            ),
-            DataType::Int32 => self.builder.constant_from_slice(
-                &desc,
-                bytemuck::try_cast_slice::<_, i32>(bytes)
-                    .map_err(|e| OnnxError::InvalidShape(e.to_string()))?,
-            ),
-            DataType::Int64 => self.builder.constant_from_slice(
-                &desc,
-                bytemuck::try_cast_slice::<_, i64>(bytes)
-                    .map_err(|e| OnnxError::InvalidShape(e.to_string()))?,
-            ),
+            DataType::Float32 => self
+                .builder
+                .constant_from_slice(&desc, &bytemuck::pod_collect_to_vec::<u8, f32>(bytes)),
+            DataType::Float16 => self
+                .builder
+                .constant_from_slice(&desc, &bytemuck::pod_collect_to_vec::<u8, u16>(bytes)),
+            DataType::Int32 => self
+                .builder
+                .constant_from_slice(&desc, &bytemuck::pod_collect_to_vec::<u8, i32>(bytes)),
+            DataType::Int64 => self
+                .builder
+                .constant_from_slice(&desc, &bytemuck::pod_collect_to_vec::<u8, i64>(bytes)),
             DataType::Uint8 | DataType::Int8 | DataType::Uint4 | DataType::Int4 => {
                 self.builder.constant_from_slice(&desc, bytes)
             }

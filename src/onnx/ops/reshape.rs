@@ -778,6 +778,8 @@ impl ReshapeHandler {
                     } else {
                         1
                     };
+                    // torch exports use -1 for "keep the input dimension".
+                    let tgt_dim = if tgt_dim == -1 { in_dim } else { tgt_dim };
                     if in_dim != tgt_dim && in_dim != 1 && tgt_dim != 1 {
                         compatible = false;
                         break;

@@ -258,7 +258,11 @@ fn seed_constant_nodes(
                 let vals = read_int_tensor(t);
                 if !vals.is_empty() {
                     result.const_values.insert(out_name.clone(), vals.clone());
-                    let shape: Vec<i64> = if vals.len() == 1 {
+                    // Keep the tensor's declared rank (e.g. a [1,1,S,S] bool
+                    // mask); only synthesize a flat shape when dims are absent.
+                    let shape: Vec<i64> = if !t.dims.is_empty() {
+                        t.dims.clone()
+                    } else if vals.len() == 1 {
                         Vec::new()
                     } else {
                         vec![vals.len() as i64]
@@ -467,6 +471,8 @@ pub fn infer_node_output_shape(
         | "QMoE"
         | "CumSum"
         | "CumProd"
+        | "DequantizeLinear"
+        | "QuantizeLinear"
         | "Sin"
         | "Cos"
         | "Tan"
@@ -494,6 +500,9 @@ pub fn infer_node_output_shape(
         | "HardSwish"
         | "Mish"
         | "Clip"
+        | "Not"
+        | "IsNaN"
+        | "IsInf"
         | "BatchNormalization"
         | "InstanceNormalization"
         | "Trilu" => {
@@ -504,8 +513,24 @@ pub fn infer_node_output_shape(
             value_shapes.get(ins[0].as_str()).cloned()
         }
 
+        // Where broadcasts its three inputs together.
+        "Where" => {
+            let ins = node.input.as_slice();
+            if ins.len() < 3 {
+                return None;
+            }
+            let mut out: Vec<i64> = Vec::new();
+            for name in ins.iter().take(3) {
+                let shape = value_shapes.get(name.as_str())?;
+                out = broadcast_shape(&out, shape)?;
+            }
+            Some(out)
+        }
+
         // Binary operations with NumPy-style broadcasting semantics.
-        "Add" | "Sub" | "Mul" | "Div" | "Pow" => {
+        // (Min/Max are variadic; two inputs covers the common exports.)
+        "Add" | "Sub" | "Mul" | "Div" | "Pow" | "Equal" | "Greater" | "GreaterOrEqual" | "Less"
+        | "LessOrEqual" | "And" | "Or" | "Xor" | "Min" | "Max" => {
             let ins = node.input.as_slice();
             if ins.len() < 2 {
                 return None;
@@ -545,8 +570,15 @@ pub fn infer_node_output_shape(
                 return None;
             }
 
-            let a_shape = value_shapes.get(ins[0].as_str())?;
-            let b_shape = value_shapes.get(ins[1].as_str())?;
+            // Weight operands are often initializers absent from value_shapes.
+            let shape_of = |name: &str| {
+                value_shapes
+                    .get(name)
+                    .cloned()
+                    .or_else(|| initializers.get(name).map(|t| t.dims.clone()))
+            };
+            let a_shape = &shape_of(ins[0].as_str())?;
+            let b_shape = &shape_of(ins[1].as_str())?;
 
             // Handle 2D case: [M, K] @ [K, N] -> [M, N]
             if a_shape.len() >= 2 && b_shape.len() >= 2 {
@@ -639,17 +671,25 @@ pub fn infer_node_output_shape(
                 .as_slice()
                 .iter()
                 .find(|a| a.name.as_str() == "keepdims")
-                .and_then(|a| if a.i != 0 { Some(a.i != 0) } else { None })
+                .map(|a| a.i != 0)
                 .unwrap_or(true);
 
-            // Get axes attribute
-            let axes: Vec<i64> = node
+            // Axes: attribute (opset < 18) or constant second input (opset 18+).
+            let mut axes: Vec<i64> = node
                 .attribute
                 .as_slice()
                 .iter()
                 .find(|a| a.name.as_str() == "axes")
                 .map(|a| a.ints.clone())
                 .unwrap_or_default();
+            if axes.is_empty() {
+                if let Some(axes_name) = ins.get(1).filter(|n| !n.is_empty()) {
+                    axes = const_values
+                        .get(axes_name.as_str())
+                        .cloned()
+                        .unwrap_or_default();
+                }
+            }
 
             if axes.is_empty() {
                 // Reduce all dimensions
@@ -1478,6 +1518,17 @@ fn read_int64_values_from_maps(
                     .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]) as i64)
                     .collect(),
             );
+        }
+        if tensor.data_type == TensorProto_DataType::Bool as i32
+            || tensor.data_type == TensorProto_DataType::Uint8 as i32
+            || tensor.data_type == TensorProto_DataType::Int8 as i32
+        {
+            return Some(raw.iter().map(|&b| i64::from(b)).collect());
+        }
+        // Only interpret raw bytes as packed i64 for actual int64 tensors;
+        // decoding e.g. a bool mask this way poisons const folding.
+        if tensor.data_type != TensorProto_DataType::Int64 as i32 {
+            return None;
         }
         return Some(
             raw.chunks_exact(8)
@@ -2850,7 +2901,12 @@ fn fold_shape_constants(
                                     && starts.len() == 1
                                     && ends.len() == 1
                                 {
-                                    let start = starts[0].max(0) as usize;
+                                    // Negative indices count from the end (e.g. shape[-1:]).
+                                    let start = if starts[0] < 0 {
+                                        (data.len() as i64 + starts[0]).max(0) as usize
+                                    } else {
+                                        (starts[0] as usize).min(data.len())
+                                    };
                                     let end = if ends[0] < 0 {
                                         (data.len() as i64 + ends[0]).max(0) as usize
                                     } else {
@@ -3272,10 +3328,19 @@ fn read_int_tensor(tensor: &TensorProto) -> Vec<i64> {
                 .chunks_exact(4)
                 .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]) as i64)
                 .collect(),
-            _ => raw
+            x if x == TensorProto_DataType::Bool as i32
+                || x == TensorProto_DataType::Uint8 as i32
+                || x == TensorProto_DataType::Int8 as i32 =>
+            {
+                raw.iter().map(|&b| i64::from(b)).collect()
+            }
+            x if x == TensorProto_DataType::Int64 as i32 => raw
                 .chunks_exact(8)
                 .map(|c| i64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
                 .collect(),
+            // Never reinterpret non-integer payloads (float weights, bool
+            // masks were handled above) as packed i64 — it poisons folding.
+            _ => Vec::new(),
         }
     } else if !tensor.int64_data.as_slice().is_empty() {
         tensor.int64_data.as_slice().to_vec()
@@ -3310,6 +3375,7 @@ pub fn propagate_shapes_and_fold_constants(
 ) {
     // Propagate shapes and fold constant shape expressions in a few passes
     for _ in 0..24 {
+        let mut shapes_changed = false;
         if options.optimize {
             let max_iterations = 10;
             for iteration in 0..max_iterations {
@@ -3323,30 +3389,11 @@ pub fn propagate_shapes_and_fold_constants(
                         .all(|out| value_shapes.contains_key(out.as_str()));
                     // Shapes recorded from partial information (e.g. the
                     // binary-broadcast single-input guess) go stale once more
-                    // inputs resolve. Keep recomputing shape-plumbing ops:
-                    // their inference is exact given resolved inputs and
-                    // returns None otherwise, so overwriting is idempotent.
-                    let refresh = matches!(
-                        onnx_node.op_type.as_str(),
-                        "Add"
-                            | "Sub"
-                            | "Mul"
-                            | "Div"
-                            | "Pow"
-                            | "Unsqueeze"
-                            | "Squeeze"
-                            | "Slice"
-                            | "Concat"
-                            | "Transpose"
-                            | "Reshape"
-                            | "Expand"
-                            | "Cast"
-                            | "Gather"
-                            | "Shape"
-                    );
-                    if all_outputs_known && !refresh {
-                        continue;
-                    }
+                    // inputs resolve. Every inference arm is exact given
+                    // resolved inputs and returns None otherwise, so always
+                    // recomputing is idempotent; multi-output special cases
+                    // above keep their or_insert semantics.
+                    let _ = all_outputs_known;
 
                     if onnx_node.op_type.as_str() == "DynamicQuantizeLinear" {
                         if let Some(input_name) = onnx_node.input.first() {
@@ -3391,11 +3438,35 @@ pub fn propagate_shapes_and_fold_constants(
                         }
                     }
 
-                    if let Some(inferred) =
-                        infer_node_output_shape(onnx_node, value_shapes, initializers, const_values)
+                    let inferred_opt = infer_node_output_shape(
+                        onnx_node,
+                        value_shapes,
+                        initializers,
+                        const_values,
+                    );
+                    if std::env::var("O2W_TRACE").is_ok()
+                        && onnx_node
+                            .output
+                            .first()
+                            .is_some_and(|o| o.contains("layers.0/self_attn/Reshape_output_0"))
                     {
+                        eprintln!(
+                            "[opt-loop] {} stored={:?} inferred={:?} in0={:?}",
+                            onnx_node.output[0],
+                            value_shapes.get(onnx_node.output[0].as_str()),
+                            inferred_opt,
+                            onnx_node
+                                .input
+                                .first()
+                                .map(|i| value_shapes.get(i.as_str()))
+                        );
+                    }
+                    if let Some(inferred) = inferred_opt {
                         if let Some(output_name) = onnx_node.output.as_slice().first() {
                             // Force the correct shape - shape inference computes exact output shape
+                            if value_shapes.get(output_name.as_str()) != Some(&inferred) {
+                                shapes_changed = true;
+                            }
                             value_shapes.insert(output_name.to_string(), inferred);
                             if matches!(onnx_node.op_type.as_str(), "ConvInteger" | "MatMulInteger")
                             {
@@ -3491,7 +3562,9 @@ pub fn propagate_shapes_and_fold_constants(
             // at least one node folded this pass
         }
 
-        if const_values.len() == consts_before {
+        // In-place shape corrections (stale broadcast guesses healing as more
+        // inputs resolve) count as progress even when no new const appeared.
+        if const_values.len() == consts_before && !shapes_changed {
             break;
         }
     }

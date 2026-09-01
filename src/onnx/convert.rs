@@ -942,11 +942,15 @@ Provide --override-dim {}=<value> or enable --experimental-dynamic-inputs.",
                 for out in onnx_node.output.as_slice() {
                     if out.contains(&probe) {
                         eprintln!(
-                            "[probe] {} ({}) shape={:?} const={}",
+                            "[probe] {} ({}) shape={:?} const={:?}",
                             out,
                             onnx_node.op_type,
                             value_shapes.get(out.as_str()),
-                            const_values.contains_key(out.as_str()),
+                            const_values.get(out.as_str()).map(|v| v
+                                .iter()
+                                .take(8)
+                                .copied()
+                                .collect::<Vec<_>>()),
                         );
                     }
                 }
@@ -1013,6 +1017,13 @@ Provide --override-dim {}=<value> or enable --experimental-dynamic-inputs.",
                 // nodes have a defined producer.
                 for out in outputs {
                     if let Some(values) = const_values.get(out) {
+                        // Zero-element constants (e.g. folded empty axes lists)
+                        // cannot exist as WebNN operands; consumers treat them
+                        // as absent optionals.
+                        if values.is_empty() {
+                            b.mark_empty_optional(out);
+                            continue;
+                        }
                         let const_name = sanitize_identifier(out);
                         let mut shape = value_shapes
                             .get(out.as_str())
@@ -1036,11 +1047,39 @@ Provide --override-dim {}=<value> or enable --experimental-dynamic-inputs.",
                             .cloned()
                             .unwrap_or(DataType::Int64);
 
-                        // Flatten i64 values into little-endian bytes
-                        let mut bytes = Vec::with_capacity(values.len() * 8);
-                        for v in values {
-                            bytes.extend_from_slice(&v.to_le_bytes());
-                        }
+                        // Serialize the i64 payload at the width of the tracked
+                        // dtype (folded bool masks are Uint8, Cast chains may
+                        // be Int32); unsupported widths fall back to Int64.
+                        let (dtype, bytes): (DataType, Vec<u8>) = match dtype {
+                            DataType::Uint8 | DataType::Int8 => {
+                                (dtype, values.iter().map(|&v| v as u8).collect())
+                            }
+                            DataType::Int32 => (
+                                dtype,
+                                values
+                                    .iter()
+                                    .flat_map(|&v| (v as i32).to_le_bytes())
+                                    .collect(),
+                            ),
+                            DataType::Float32 => (
+                                dtype,
+                                values
+                                    .iter()
+                                    .flat_map(|&v| (v as f32).to_le_bytes())
+                                    .collect(),
+                            ),
+                            DataType::Float16 => (
+                                dtype,
+                                values
+                                    .iter()
+                                    .flat_map(|&v| half::f16::from_f64(v as f64).to_le_bytes())
+                                    .collect(),
+                            ),
+                            _ => (
+                                DataType::Int64,
+                                values.iter().flat_map(|&v| v.to_le_bytes()).collect(),
+                            ),
+                        };
 
                         let shape_u32: Vec<u32> = shape.iter().map(|d| *d as u32).collect();
                         b.register_constant_from_bytes(&const_name, dtype, &shape_u32, &bytes)?;
