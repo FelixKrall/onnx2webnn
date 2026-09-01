@@ -1282,6 +1282,208 @@ pub fn convert_onnx<P: AsRef<Path>>(
     convert_model(model, &options)
 }
 
+/// Inline `If` nodes whose condition folds to a constant (e.g. pyannote's
+/// shape-derived `Equal(Gather(Shape(x)), k)` gate). The chosen branch's
+/// nodes and initializers are spliced into the outer graph with internal
+/// names prefixed; outer-scope captures keep their names. Runtime-dependent
+/// conditions are left in place (and later rejected as unsupported).
+fn inline_constant_ifs(model: &mut ModelProto, options: &ConvertOptions) {
+    use crate::protos::onnx::GraphProto;
+
+    for _ in 0..4 {
+        let graph = match model.graph.as_ref() {
+            Some(g) if g.node.iter().any(|n| n.op_type == "If") => g,
+            _ => return,
+        };
+
+        // Minimal seeding so shape-derived conditions fold.
+        let mut value_shapes: HashMap<String, Vec<i64>> = HashMap::new();
+        let mut value_types: HashMap<String, DataType> = HashMap::new();
+        let mut const_values: HashMap<String, Vec<i64>> = HashMap::new();
+        let mut value_shape_dims = HashMap::new();
+        for vi in graph.input.as_slice() {
+            let Some(TypeProtoValue::TensorType(tt)) =
+                vi.r#type.as_ref().and_then(|t| t.value.as_ref())
+            else {
+                continue;
+            };
+            let Some(shape) = tt.shape.as_ref() else {
+                continue;
+            };
+            let dims: Option<Vec<i64>> = shape
+                .dim
+                .iter()
+                .map(|d| match d.value.as_ref() {
+                    Some(DimensionValue::DimValue(v)) if *v > 0 => Some(*v),
+                    Some(DimensionValue::DimParam(p)) => {
+                        options.free_dim_overrides.get(p).map(|&v| v as i64)
+                    }
+                    _ => None,
+                })
+                .collect();
+            if let Some(dims) = dims {
+                value_shapes.insert(vi.name.clone(), dims);
+            }
+        }
+        let initializers_map: HashMap<String, &crate::protos::onnx::TensorProto> = graph
+            .initializer
+            .iter()
+            .map(|t| (t.name.clone(), t))
+            .collect();
+        for (name, t) in &initializers_map {
+            value_shapes.insert(name.clone(), t.dims.clone());
+            let vals = crate::onnx::shape_inference::read_int_tensor(t);
+            if !vals.is_empty() {
+                const_values.insert(name.clone(), vals);
+            }
+        }
+        for node in graph.node.as_slice() {
+            if node.op_type == "Constant" {
+                if let (Some(out), Some(t)) = (
+                    node.output.first(),
+                    node.attribute
+                        .iter()
+                        .find(|a| a.name == "value")
+                        .and_then(|a| a.t.as_ref()),
+                ) {
+                    let vals = crate::onnx::shape_inference::read_int_tensor(t);
+                    if !vals.is_empty() {
+                        value_shapes.insert(out.clone(), t.dims.clone());
+                        const_values.insert(out.clone(), vals);
+                    }
+                }
+            }
+        }
+        crate::onnx::shape_inference::propagate_shapes_and_fold_constants(
+            graph,
+            &initializers_map,
+            &mut value_shapes,
+            &mut value_types,
+            &mut const_values,
+            &mut value_shape_dims,
+            &crate::onnx::shape_inference::PropagateOptions {
+                optimize: true,
+                experimental_dynamic_inputs: false,
+            },
+        );
+
+        // Splice each If with a folded condition.
+        let mut new_nodes: Vec<crate::protos::onnx::NodeProto> = Vec::new();
+        let mut new_initializers: Vec<crate::protos::onnx::TensorProto> = Vec::new();
+        let mut changed = false;
+        for node in graph.node.as_slice() {
+            if node.op_type != "If" {
+                new_nodes.push(node.clone());
+                continue;
+            }
+            let cond = node
+                .input
+                .first()
+                .and_then(|c| const_values.get(c.as_str()))
+                .and_then(|v| v.first().copied());
+            let Some(cond) = cond else {
+                new_nodes.push(node.clone());
+                continue;
+            };
+            let branch_attr = if cond != 0 {
+                "then_branch"
+            } else {
+                "else_branch"
+            };
+            let Some(branch): Option<&GraphProto> = node
+                .attribute
+                .iter()
+                .find(|a| a.name == branch_attr)
+                .and_then(|a| a.g.as_ref())
+            else {
+                new_nodes.push(node.clone());
+                continue;
+            };
+
+            crate::debug_println!(
+                "[if-inline] {} taking {branch_attr} (cond={cond})",
+                node.name
+            );
+            let prefix = if node.name.is_empty() {
+                format!("{}_if", node.output.first().cloned().unwrap_or_default())
+            } else {
+                node.name.clone()
+            };
+            // Names produced inside the branch get prefixed; everything else
+            // is an outer-scope capture and keeps its name.
+            let mut rename: HashMap<String, String> = HashMap::new();
+            for t in branch.initializer.as_slice() {
+                rename.insert(t.name.clone(), format!("{prefix}::{}", t.name));
+            }
+            for n in branch.node.as_slice() {
+                for out in n.output.as_slice() {
+                    if !out.is_empty() {
+                        rename.insert(out.clone(), format!("{prefix}::{out}"));
+                    }
+                }
+            }
+            // Branch graph outputs feed the If node's outputs directly.
+            for (branch_out, if_out) in branch.output.iter().zip(node.output.as_slice()) {
+                rename.insert(branch_out.name.clone(), if_out.clone());
+            }
+
+            for t in branch.initializer.as_slice() {
+                let mut t = t.clone();
+                if let Some(new_name) = rename.get(&t.name) {
+                    t.name = new_name.clone();
+                }
+                new_initializers.push(t);
+            }
+            let mut produced_outputs: HashSet<String> = HashSet::new();
+            for n in branch.node.as_slice() {
+                let mut n = n.clone();
+                if !n.name.is_empty() {
+                    n.name = format!("{prefix}::{}", n.name);
+                }
+                for i in n.input.iter_mut() {
+                    if let Some(new_name) = rename.get(i) {
+                        *i = new_name.clone();
+                    }
+                }
+                for o in n.output.iter_mut() {
+                    if let Some(new_name) = rename.get(o) {
+                        *o = new_name.clone();
+                    }
+                    produced_outputs.insert(o.clone());
+                }
+                new_nodes.push(n);
+            }
+            // A branch output that is an outer capture or initializer needs an
+            // explicit passthrough to the If output name.
+            for (branch_out, if_out) in branch.output.iter().zip(node.output.as_slice()) {
+                if !produced_outputs.contains(if_out.as_str()) {
+                    let src = rename
+                        .get(&branch_out.name)
+                        .filter(|n| *n != if_out)
+                        .cloned()
+                        .unwrap_or_else(|| branch_out.name.clone());
+                    new_nodes.push(crate::protos::onnx::NodeProto {
+                        op_type: "Identity".to_string(),
+                        name: format!("{prefix}::passthrough_{if_out}"),
+                        input: vec![src],
+                        output: vec![if_out.clone()],
+                        ..Default::default()
+                    });
+                }
+            }
+            changed = true;
+        }
+
+        if !changed {
+            return;
+        }
+        if let Some(g) = model.graph.as_mut() {
+            g.node = new_nodes;
+            g.initializer.extend(new_initializers);
+        }
+    }
+}
+
 /// Lower an in-memory ONNX [`ModelProto`] to [`MLGraphBuilder`] and validate with ORT `build()`.
 pub fn convert_model_proto(
     model: ModelProto,
@@ -1292,9 +1494,10 @@ pub fn convert_model_proto(
 
 /// Lower ONNX to [`MLGraphBuilder`] and validate with ORT `build()`.
 pub(crate) fn convert_model(
-    model: ModelProto,
+    mut model: ModelProto,
     options: &ConvertOptions,
 ) -> Result<ValidatedGraph<'static>, OnnxError> {
+    inline_constant_ifs(&mut model, options);
     let converter = OnnxConverter::new(model.clone())?;
     converter.extract_metadata()?;
 

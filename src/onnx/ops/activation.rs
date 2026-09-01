@@ -427,12 +427,10 @@ impl ActivationHandler {
                 OnnxBuilder::labeled_options(&celu_neg_label),
             )
             .map_err(map_op_error)?;
-        let celu_neg = cast_to_dtype(
-            b,
-            celu_neg,
-            input_dtype,
-            &step_label(&output_name, "celu_neg_cast"),
-        )?;
+        // The whole chain is built in input_dtype (scalars via
+        // register_scalar_like), so no cast back is needed; an identity
+        // f16->f16 cast trips ORT's fp16 transform at optimization level
+        // Disable.
 
         let input0 = b.resolve_operand(&inputs[0])?;
         let gt_label = step_label(&output_name, "gt");
@@ -869,15 +867,12 @@ impl ActivationHandler {
                 OnnxBuilder::labeled_options(&low_label),
             )
             .map_err(map_op_error)?;
-        let low = cast_to_dtype(b, low, input_dtype, &step_label(&output_name, "low_cast"))?;
-        let high = cast_to_dtype(b, high, input_dtype, &step_label(&output_name, "high_cast"))?;
 
         let mid_label = step_label(&output_name, "mid");
         let mid = b
             .builder
             .where_with_options(lt, low, zero, OnnxBuilder::labeled_options(&mid_label))
             .map_err(map_op_error)?;
-        let mid = cast_to_dtype(b, mid, input_dtype, &step_label(&output_name, "mid_cast"))?;
         let out = b
             .builder
             .where_with_options(gt, high, mid, OnnxBuilder::labeled_options(&output_name))
@@ -915,6 +910,7 @@ fn exp_and_exp_neg(
     Ok((exp_pos, exp_neg))
 }
 
+#[allow(dead_code)]
 fn cast_to_dtype(
     b: &mut OnnxBuilder<'_, '_, '_>,
     operand: MLOperand,

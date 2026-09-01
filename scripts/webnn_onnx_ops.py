@@ -17,6 +17,9 @@ WEBNN_SUPPORTED_ONNX_OPS: frozenset[str] = frozenset(
         "GroupQueryAttention",
         # moe.rs
         "MoE",
+        # convert.rs inline_constant_ifs: If with a constant condition is
+        # inlined; runtime conditions remain unsupported.
+        "If",
         "QMoE",
         # einsum.rs
         "Einsum",

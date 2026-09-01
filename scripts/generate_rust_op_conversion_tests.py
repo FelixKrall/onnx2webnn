@@ -54,6 +54,9 @@ _FP16_EXCLUDED_OPS = frozenset(
         "Shape",
         # Spec restricts the input to tensor(float); no fp16 form exists.
         "DynamicQuantizeLinear",
+        # The dtype rewrite does not recurse into subgraph attributes, so an
+        # fp16 If fixture has f32 branch internals and is invalid ONNX.
+        "If",
     }
 )
 

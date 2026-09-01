@@ -221,6 +221,8 @@ These appear in graphs but become constants or metadata during `--optimize` / co
 | QMoE | conversion-time 4/8-bit blockwise dequantization → MoE lowering | Implemented — same restrictions as MoE |
 | GatherBlockQuantized | conversion-time 4/8-bit table dequantization → gather | Implemented — quantize_axis must be the last axis |
 | SplitToSequence + SequenceAt | per-element slices registered as pseudo-operands, SequenceAt aliases by constant index | Implemented — torch split() export pattern; sequence graph outputs rejected |
+| If (constant condition) | branch inlined into the outer graph before conversion | Implemented — runtime conditions remain unsupported |
+| LSTM/GRU (direction=bidirectional/reverse) | WebNN native direction support + [dirs,...] bias split and Y layout | Implemented — LSTM initial_h/initial_c wired; sequence_lens/peephole rejected |
 | CumProd | `cumulativeSum` on log + `Exp`, or iterative multiply subgraph | P3 — new in opset 26 |
 
 #### 2c. Advanced single-entry WebNN ops (high attribute complexity)

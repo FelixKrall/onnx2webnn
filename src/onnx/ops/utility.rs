@@ -1143,6 +1143,8 @@ impl UtilityHandler {
 
         let output_name = output_label(node, node_name);
         let mut slice_params: Option<(Vec<u32>, Vec<MLDimension>)> = None;
+        // Axes handled as full reverses (negative-step slices spanning the dim).
+        let mut reverse_axes: Vec<u32> = Vec::new();
 
         let read_ints = |name: &str, context: &ConversionContext| -> Option<Vec<i64>> {
             if let Some(vals) = context.const_values.get(name) {
@@ -1331,9 +1333,23 @@ impl UtilityHandler {
                     let dim = input_shape[axis];
                     let step = steps[i];
                     if step <= 0 {
-                        return Err(OnnxError::InvalidShape(
-                            "Slice currently requires positive step values".to_string(),
-                        ));
+                        // Full-axis reverse (torch.flip): step -1 spanning the
+                        // whole dimension lowers to WebNN reverse.
+                        let start_raw = starts_norm[i];
+                        let end_raw = ends_norm[i];
+                        let full = step == -1
+                            && (start_raw == -1 || start_raw >= dim - 1)
+                            && (end_raw <= -dim || end_raw <= i64::MIN + 1);
+                        if full {
+                            reverse_axes.push(axis as u32);
+                            dense_starts[axis] = 0;
+                            dense_sizes[axis] = dim;
+                            dense_strides[axis] = 1;
+                            continue;
+                        }
+                        return Err(OnnxError::InvalidShape(format!(
+                            "Slice '{node_name}' has unsupported step {step} on axis {axis}"
+                        )));
                     }
 
                     let mut start = starts_norm[i];
@@ -1440,9 +1456,21 @@ impl UtilityHandler {
                     let dim = input_shape[axis];
                     let step = steps[i];
                     if step <= 0 {
-                        return Err(OnnxError::InvalidShape(
-                            "Slice currently requires positive step values".to_string(),
-                        ));
+                        let start_raw = starts[i];
+                        let end_raw = ends[i];
+                        let full = step == -1
+                            && (start_raw == -1 || start_raw >= dim - 1)
+                            && (end_raw <= -dim || end_raw <= i64::MIN + 1);
+                        if full {
+                            reverse_axes.push(axis as u32);
+                            dense_starts[axis] = 0;
+                            dense_sizes[axis] = dim;
+                            dense_strides[axis] = 1;
+                            continue;
+                        }
+                        return Err(OnnxError::InvalidShape(format!(
+                            "Slice '{node_name}' has unsupported step {step} on axis {axis}"
+                        )));
                     }
 
                     let mut start = starts[i];
@@ -1492,7 +1520,24 @@ impl UtilityHandler {
             return Ok(ConversionResult::default());
         }
         let input = b.resolve_operand(&inputs[0])?;
-        let out = slice_with_params(b, input, &output_name, &starts, &sizes)?;
+        let slice_label = if reverse_axes.is_empty() {
+            output_name.clone()
+        } else {
+            format!("{output_name}__pre_reverse")
+        };
+        let mut out = slice_with_params(b, input, &slice_label, &starts, &sizes)?;
+        if !reverse_axes.is_empty() {
+            out = b
+                .builder
+                .reverse_with_options(
+                    out,
+                    MLReverseOptions {
+                        label: output_name.clone(),
+                        axes: Some(reverse_axes.clone()),
+                    },
+                )
+                .map_err(map_op_error)?;
+        }
         if let Some(output) = node.output.as_slice().first() {
             record_node_output(b, output, &output_name, out);
         }

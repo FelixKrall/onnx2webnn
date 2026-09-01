@@ -398,15 +398,15 @@ fn propagate_node_shapes(
                 &result.const_values,
             ) {
                 let out_name = outputs[0].to_string();
-                if refresh_binary {
+                let advanced = if refresh_binary {
                     let changed = result.value_shapes.get(&out_name) != Some(&shape);
                     result.value_shapes.insert(out_name.clone(), shape);
-                    if changed {
-                        progress = true;
-                    }
+                    changed
                 } else {
+                    let new_entry = !result.value_shapes.contains_key(&out_name);
                     result.value_shapes.entry(out_name.clone()).or_insert(shape);
-                }
+                    new_entry
+                };
 
                 // Propagate dtype from first input if available.
                 if matches!(node.op_type.as_str(), "ConvInteger" | "MatMulInteger") {
@@ -428,7 +428,9 @@ fn propagate_node_shapes(
                     }
                 }
 
-                progress = true;
+                if advanced {
+                    progress = true;
+                }
             }
         }
 
@@ -503,6 +505,8 @@ pub fn infer_node_output_shape(
         | "Not"
         | "IsNaN"
         | "IsInf"
+        | "ScatterND"
+        | "ScatterElements"
         | "BatchNormalization"
         | "InstanceNormalization"
         | "Trilu" => {
@@ -529,8 +533,8 @@ pub fn infer_node_output_shape(
 
         // Binary operations with NumPy-style broadcasting semantics.
         // (Min/Max are variadic; two inputs covers the common exports.)
-        "Add" | "Sub" | "Mul" | "Div" | "Pow" | "Equal" | "Greater" | "GreaterOrEqual" | "Less"
-        | "LessOrEqual" | "And" | "Or" | "Xor" | "Min" | "Max" => {
+        "Add" | "Sub" | "Mul" | "Div" | "Mod" | "Pow" | "Equal" | "Greater" | "GreaterOrEqual"
+        | "Less" | "LessOrEqual" | "And" | "Or" | "Xor" | "Min" | "Max" => {
             let ins = node.input.as_slice();
             if ins.len() < 2 {
                 return None;
@@ -1812,6 +1816,13 @@ fn fold_binary_const_i64(
                 }
                 av / bv
             }
+            "Mod" => {
+                if bv == 0 {
+                    return None;
+                }
+                // ONNX Mod fmod=0: result takes the divisor's sign.
+                ((av % bv) + bv) % bv
+            }
             "Equal" => {
                 if av == bv {
                     1
@@ -2261,7 +2272,10 @@ impl FoldShapeConstantsOptions {
         Self {
             require_positive_dims: true,
             experimental_dynamic_inputs: opts.experimental_dynamic_inputs,
-            fold_where_values: false,
+            // Where must stay foldable here: the early pass may have folded it
+            // from placeholder shapes, and only a refresh with resolved inputs
+            // can correct the value (e.g. torch expand_as target vectors).
+            fold_where_values: true,
             fold_reshape: false,
             fold_unsqueeze_axes: false,
         }
@@ -2387,6 +2401,12 @@ fn fold_shape_constants(
                     | "Slice"
                     | "Concat"
                     | "Cast"
+                    | "Transpose"
+                    | "Expand"
+                    | "Equal"
+                    | "Where"
+                    | "Range"
+                    | "ConstantOfShape"
                     | "Add"
                     | "Sub"
                     | "Mul"
@@ -2700,7 +2720,7 @@ fn fold_shape_constants(
                         }
                     }
                 }
-            } else if matches!(op_type, "Add" | "Sub" | "Mul" | "Div") {
+            } else if matches!(op_type, "Add" | "Sub" | "Mul" | "Div" | "Mod") {
                 if node.input.as_slice().len() >= 2 {
                     if let (Some(a_name), Some(b_name), Some(out)) = (
                         node.input.as_slice().first(),
@@ -2830,6 +2850,7 @@ fn fold_shape_constants(
                         .unwrap_or(0);
                     let to_int = to_type == TensorProto_DataType::Int64 as i64
                         || to_type == TensorProto_DataType::Int32 as i64
+                        || to_type == TensorProto_DataType::Bool as i64
                         || to_type == 0; // missing attr: still allow int const passthrough
                                          // Integer consts survive a cast to float exactly (e.g. a folded
                                          // sequence length feeding a float Range limit).
@@ -2876,6 +2897,42 @@ fn fold_shape_constants(
                         }
                     }
                 }
+            } else if op_type == "Transpose" {
+                // Fold Transpose over small 2-D integer consts (pad-spec chains:
+                // build [[l,r],...] -> reverse -> transpose -> flatten).
+                if let (Some(inp), Some(out)) = (
+                    node.input.as_slice().first(),
+                    node.output.as_slice().first(),
+                ) {
+                    if let (Some(data), Some(shape)) = (
+                        const_values.get(inp.as_str()).cloned(),
+                        value_shapes.get(inp.as_str()).cloned(),
+                    ) {
+                        let perm: Vec<usize> = node
+                            .attribute
+                            .as_slice()
+                            .iter()
+                            .find(|a| a.name.as_str() == "perm")
+                            .map(|a| a.ints.iter().map(|&i| i as usize).collect())
+                            .unwrap_or_else(|| (0..shape.len()).rev().collect());
+                        if shape.len() == 2
+                            && perm == [1, 0]
+                            && shape.iter().all(|&d| d > 0)
+                            && (shape[0] * shape[1]) as usize == data.len()
+                        {
+                            let (r, c) = (shape[0] as usize, shape[1] as usize);
+                            let mut t = Vec::with_capacity(data.len());
+                            for j in 0..c {
+                                for i in 0..r {
+                                    t.push(data[i * c + j]);
+                                }
+                            }
+                            const_values.insert(out.to_string(), t);
+                            value_shapes.insert(out.to_string(), vec![shape[1], shape[0]]);
+                            value_types.insert(out.to_string(), DataType::Int64);
+                        }
+                    }
+                }
             } else if op_type == "Slice" {
                 // Fold Slice over integer shape vectors (common for Resize sizes = Concat(Slice(Shape), HW)).
                 let inputs = node.input.as_slice();
@@ -2895,6 +2952,30 @@ fn fold_shape_constants(
                                 && ends.len() == starts.len()
                                 && steps.len() == starts.len()
                             {
+                                // Full reverse along axis 0 (torch.flip export):
+                                // reorder rows of the (flat) const payload.
+                                if axes == [0] && steps == [-1] && starts.len() == 1 {
+                                    let dim0 = value_shapes
+                                        .get(data_name.as_str())
+                                        .and_then(|s| s.first().copied())
+                                        .unwrap_or(data.len() as i64);
+                                    let covers_all = (starts[0] == -1 || starts[0] >= dim0 - 1)
+                                        && (ends[0] <= -dim0 || ends[0] <= i64::MIN + 1);
+                                    if covers_all && dim0 > 0 && data.len() as i64 % dim0 == 0 {
+                                        let row = data.len() / dim0 as usize;
+                                        let mut rev = Vec::with_capacity(data.len());
+                                        for chunk in data.chunks(row).rev() {
+                                            rev.extend_from_slice(chunk);
+                                        }
+                                        const_values.insert(out.to_string(), rev);
+                                        if let Some(shape) =
+                                            value_shapes.get(data_name.as_str()).cloned()
+                                        {
+                                            value_shapes.insert(out.to_string(), shape);
+                                        }
+                                        value_types.insert(out.to_string(), DataType::Int64);
+                                    }
+                                }
                                 // Only the common 1-D shape-vector case is folded here.
                                 if axes == [0]
                                     && steps == [1]
@@ -3033,6 +3114,7 @@ fn fold_shape_constants(
             } else if op_type == "Concat" {
                 // Concatenate constant inputs (often used to build shape tensors)
                 if let Some(out) = node.output.as_slice().first() {
+                    let mut per_input: Vec<Vec<i64>> = Vec::new();
                     let mut concatenated: Vec<i64> = Vec::new();
                     let mut all_const = true;
                     for inp in node.input.as_slice() {
@@ -3040,10 +3122,81 @@ fn fold_shape_constants(
                             const_values_for_input(graph, inp.as_str(), const_values)
                         {
                             concatenated.extend_from_slice(&vals);
+                            per_input.push(vals);
                         } else {
                             all_const = false;
                             break;
                         }
+                    }
+
+                    // N-D constant concat (e.g. folded meshgrid index tensors):
+                    // block-copy along the (normalized) axis.
+                    let nd_folded = if all_const {
+                        (|| {
+                            let shapes: Vec<Vec<i64>> = node
+                                .input
+                                .as_slice()
+                                .iter()
+                                .map(|i| value_shapes.get(i.as_str()).cloned())
+                                .collect::<Option<_>>()?;
+                            let rank = shapes.first()?.len();
+                            if rank <= 1 || shapes.iter().any(|s| s.len() != rank) {
+                                return None;
+                            }
+                            let mut axis = node
+                                .attribute
+                                .as_slice()
+                                .iter()
+                                .find(|a| a.name.as_str() == "axis")
+                                .map(|a| a.i)
+                                .unwrap_or(0);
+                            if axis < 0 {
+                                axis += rank as i64;
+                            }
+                            let ax = usize::try_from(axis).ok().filter(|&a| a < rank)?;
+                            let base = &shapes[0];
+                            for s in &shapes {
+                                for d in 0..rank {
+                                    if d != ax && s[d] != base[d] {
+                                        return None;
+                                    }
+                                }
+                                if shape_numel(s)?
+                                    != per_input[shapes
+                                        .iter()
+                                        .position(|x| std::ptr::eq(x, s))
+                                        .unwrap_or(0)]
+                                    .len()
+                                {
+                                    return None;
+                                }
+                            }
+                            let inner: i64 = base[ax + 1..].iter().product();
+                            let outer: i64 = base[..ax].iter().product();
+                            if inner <= 0 || outer <= 0 {
+                                return None;
+                            }
+                            let mut out_shape = base.clone();
+                            out_shape[ax] = shapes.iter().map(|s| s[ax]).sum();
+                            let mut values = Vec::with_capacity(shape_numel(&out_shape)?);
+                            for o in 0..outer as usize {
+                                for (vals, s) in per_input.iter().zip(&shapes) {
+                                    let block = (s[ax] * inner) as usize;
+                                    let start = o * block;
+                                    values.extend_from_slice(vals.get(start..start + block)?);
+                                }
+                            }
+                            Some((values, out_shape))
+                        })()
+                    } else {
+                        None
+                    };
+                    if let Some((values, out_shape)) = nd_folded {
+                        const_values.insert(out.to_string(), values);
+                        value_shapes.insert(out.to_string(), out_shape.clone());
+                        value_shapes.insert(sanitize_identifier(out), out_shape);
+                        value_types.insert(out.to_string(), DataType::Int64);
+                        continue;
                     }
 
                     // Handle axis=0 or axis=-1 (common for shape building)
@@ -3091,6 +3244,75 @@ fn fold_shape_constants(
                         value_shapes.insert(out.to_string(), out_shape.clone());
                         value_shapes.insert(sanitize_identifier(out), out_shape);
                         value_types.insert(out.to_string(), DataType::Int64);
+                    }
+                }
+            } else if op_type == "Expand" {
+                // Materialize Expand over integer consts (Swin/roll meshgrid
+                // index construction). Bounded to keep folded payloads small.
+                if let (Some(data_name), Some(shape_name), Some(out)) = (
+                    node.input.as_slice().first(),
+                    node.input.as_slice().get(1),
+                    node.output.as_slice().first(),
+                ) {
+                    if let (Some(data), Some(target)) = (
+                        const_values.get(data_name.as_str()).cloned(),
+                        const_values.get(shape_name.as_str()).cloned(),
+                    ) {
+                        let data_shape = value_shapes
+                            .get(data_name.as_str())
+                            .cloned()
+                            .unwrap_or_else(|| {
+                                if data.len() == 1 {
+                                    Vec::new()
+                                } else {
+                                    vec![data.len() as i64]
+                                }
+                            });
+                        let folded = (|| {
+                            // Bidirectional broadcast (torch -1 keeps input dim).
+                            let rank = data_shape.len().max(target.len());
+                            let mut out_shape = Vec::with_capacity(rank);
+                            for i in 0..rank {
+                                let d = if i + data_shape.len() >= rank {
+                                    data_shape[i + data_shape.len() - rank]
+                                } else {
+                                    1
+                                };
+                                let t = if i + target.len() >= rank {
+                                    target[i + target.len() - rank]
+                                } else {
+                                    1
+                                };
+                                let t = if t == -1 { d } else { t };
+                                if d != t && d != 1 && t != 1 {
+                                    return None;
+                                }
+                                out_shape.push(d.max(t));
+                            }
+                            let numel = shape_numel(&out_shape)?;
+                            if numel > 1_000_000 || data.is_empty() {
+                                return None;
+                            }
+                            let mut values = Vec::with_capacity(numel);
+                            for idx in 0..numel {
+                                let src = linear_index_for_broadcast_operand(
+                                    idx,
+                                    &out_shape,
+                                    &data_shape,
+                                )?;
+                                values.push(*data.get(src)?);
+                            }
+                            Some((values, out_shape))
+                        })();
+                        if let Some((values, out_shape)) = folded {
+                            const_values.insert(out.to_string(), values);
+                            value_shapes.insert(out.to_string(), out_shape);
+                            if let Some(dtype) = value_types.get(data_name.as_str()).copied() {
+                                value_types.insert(out.to_string(), dtype);
+                            } else {
+                                value_types.insert(out.to_string(), DataType::Int64);
+                            }
+                        }
                     }
                 }
             } else if op_type == "ConstantOfShape" {
@@ -3167,7 +3389,7 @@ fn fold_shape_constants(
                         }
                     }
                 }
-            } else if matches!(op_type, "Add" | "Sub" | "Mul" | "Div") {
+            } else if matches!(op_type, "Add" | "Sub" | "Mul" | "Div" | "Mod") {
                 // Integer arithmetic over folded shape scalars/vectors (e.g.
                 // `Mul(Gather(Shape(x), 0), num_heads)` in attention reshape chains).
                 if node.input.as_slice().len() >= 2 {
@@ -3383,6 +3605,34 @@ fn split_to_sequence_element_shapes(
     )
 }
 
+/// ONNX RNN family output shapes: Y [seq, dirs, batch, hidden],
+/// Y_h/Y_c [dirs, batch, hidden].
+fn rnn_output_shapes(
+    node: &NodeProto,
+    value_shapes: &HashMap<String, Vec<i64>>,
+) -> Option<Vec<Vec<i64>>> {
+    let ins = node.input.as_slice();
+    let x = value_shapes.get(ins.first()?.as_str())?;
+    let w = value_shapes.get(ins.get(1)?.as_str())?;
+    if x.len() != 3 || w.len() != 3 {
+        return None;
+    }
+    let (seq, batch) = (x[0], x[1]);
+    let dirs = w[0];
+    let hidden = node
+        .attribute
+        .as_slice()
+        .iter()
+        .find(|a| a.name.as_str() == "hidden_size")
+        .map(|a| a.i)
+        .filter(|&h| h > 0)?;
+    Some(vec![
+        vec![seq, dirs, batch, hidden],
+        vec![dirs, batch, hidden],
+        vec![dirs, batch, hidden],
+    ])
+}
+
 pub(crate) fn read_int_tensor(tensor: &TensorProto) -> Vec<i64> {
     let raw = tensor.raw_data.as_slice();
     if !raw.is_empty() {
@@ -3549,6 +3799,24 @@ pub fn propagate_shapes_and_fold_constants(
                             }
                         }
                         continue;
+                    }
+
+                    if matches!(onnx_node.op_type.as_str(), "LSTM" | "GRU" | "RNN") {
+                        if let Some(shapes) = rnn_output_shapes(onnx_node, value_shapes) {
+                            let dtype = onnx_node
+                                .input
+                                .first()
+                                .and_then(|n| value_types.get(n.as_str()).copied());
+                            for (output, shape) in onnx_node.output.iter().zip(shapes) {
+                                if !output.is_empty() {
+                                    value_shapes.insert(output.to_string(), shape);
+                                    if let Some(dtype) = dtype {
+                                        value_types.insert(output.to_string(), dtype);
+                                    }
+                                }
+                            }
+                            continue;
+                        }
                     }
 
                     if onnx_node.op_type.as_str() == "Split" {

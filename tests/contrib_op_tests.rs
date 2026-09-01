@@ -460,6 +460,145 @@ fn split_to_sequence_matches_ort() {
     assert_op_matches_ort(build_split_to_sequence(), ExpectConvertOp::Success, 17);
 }
 
+/// Bidirectional LSTM with combined bias (the pyannote pattern). Initial
+/// states and Y_h/Y_c are exercised once the rustnn exporter handles them
+/// for direction "both" (see rustnn/LSTM_BIDI_EXPORTER_BUGS.md).
+fn build_bidirectional_lstm() -> ModelProto {
+    use onnx2webnn::test_models::prelude::*;
+
+    let (seq, batch, input, hidden) = (5i64, 1i64, 3i64, 4i64);
+    let dirs = 2i64;
+    let det = |seed: i64, len: i64| -> Vec<f32> {
+        (0..len)
+            .map(|i| (((i * 31 + seed * 17) % 23) as f32 - 11.0) * 0.05)
+            .collect()
+    };
+
+    let lstm = node(
+        "LSTM",
+        "test_bilstm",
+        &["X", "W", "R", "B"],
+        &["Y"],
+        &[
+            attr_int("hidden_size", hidden),
+            attr_string("direction", "bidirectional"),
+        ],
+    );
+
+    model(
+        17,
+        graph(
+            "test_BiLSTM_graph",
+            vec![f32_input("X", &[seq, batch, input])],
+            vec![f32_output("Y", &[seq, dirs, batch, hidden])],
+            vec![lstm],
+            vec![
+                f32_init(
+                    "W",
+                    &[dirs, 4 * hidden, input],
+                    &det(1, dirs * 4 * hidden * input),
+                ),
+                f32_init(
+                    "R",
+                    &[dirs, 4 * hidden, hidden],
+                    &det(2, dirs * 4 * hidden * hidden),
+                ),
+                f32_init("B", &[dirs, 8 * hidden], &det(3, dirs * 8 * hidden)),
+            ],
+        ),
+    )
+}
+
+#[test]
+fn bidirectional_lstm_matches_ort() {
+    assert_op_matches_ort(build_bidirectional_lstm(), ExpectConvertOp::Success, 17);
+}
+
+/// If with a shape-derived constant condition inlines the taken branch.
+fn build_constant_if() -> ModelProto {
+    use onnx2webnn::test_models::prelude::*;
+
+    let then_g = graph(
+        "then_g",
+        vec![],
+        vec![f32_output("branch_out", &[2, 3])],
+        vec![node(
+            "Add",
+            "then_add",
+            &["x", "delta"],
+            &["branch_out"],
+            &[],
+        )],
+        vec![f32_init("delta", &[1], &[1.0])],
+    );
+    let else_g = graph(
+        "else_g",
+        vec![],
+        vec![f32_output("branch_out", &[2, 3])],
+        vec![node(
+            "Sub",
+            "else_sub",
+            &["x", "delta"],
+            &["branch_out"],
+            &[],
+        )],
+        vec![f32_init("delta", &[1], &[2.0])],
+    );
+
+    let mut if_node = node("If", "test_if", &["cond"], &["y"], &[]);
+    if_node
+        .attribute
+        .push(onnx2webnn::protos::onnx::AttributeProto {
+            name: "then_branch".to_string(),
+            r#type: 5, // GRAPH
+            g: Some(then_g),
+            ..Default::default()
+        });
+    if_node
+        .attribute
+        .push(onnx2webnn::protos::onnx::AttributeProto {
+            name: "else_branch".to_string(),
+            r#type: 5, // GRAPH
+            g: Some(else_g),
+            ..Default::default()
+        });
+
+    let nodes = vec![
+        node("Shape", "shape", &["x"], &["xs"], &[]),
+        node(
+            "Gather",
+            "gather",
+            &["xs", "idx"],
+            &["d0"],
+            &[attr_int("axis", 0)],
+        ),
+        node("Equal", "eq", &["d0", "two"], &["cond_u8"], &[]),
+        node(
+            "Cast",
+            "cast",
+            &["cond_u8"],
+            &["cond"],
+            &[attr_int("to", 9)],
+        ),
+        if_node,
+    ];
+    model(
+        17,
+        graph(
+            "test_ConstIf_graph",
+            vec![f32_input("x", &[2, 3])],
+            vec![f32_output("y", &[2, 3])],
+            nodes,
+            vec![i64_init("idx", &[], &[0]), i64_init("two", &[], &[2])],
+        ),
+    )
+}
+
+#[test]
+fn constant_if_inlines_and_matches_ort() {
+    assert_op_matches_ort(build_constant_if(), ExpectConvertOp::Success, 17);
+}
+
 #[test]
 fn group_query_attention_matches_ort() {
     assert_op_matches_ort(build_gqa(), ExpectConvertOp::Success, 17);
