@@ -460,9 +460,8 @@ fn split_to_sequence_matches_ort() {
     assert_op_matches_ort(build_split_to_sequence(), ExpectConvertOp::Success, 17);
 }
 
-/// Bidirectional LSTM with combined bias (the pyannote pattern). Initial
-/// states and Y_h/Y_c are exercised once the rustnn exporter handles them
-/// for direction "both" (see rustnn/LSTM_BIDI_EXPORTER_BUGS.md).
+/// Bidirectional LSTM with combined bias and initial states, requesting
+/// Y, Y_h and Y_c (the pyannote pattern).
 fn build_bidirectional_lstm() -> ModelProto {
     use onnx2webnn::test_models::prelude::*;
 
@@ -477,8 +476,8 @@ fn build_bidirectional_lstm() -> ModelProto {
     let lstm = node(
         "LSTM",
         "test_bilstm",
-        &["X", "W", "R", "B"],
-        &["Y"],
+        &["X", "W", "R", "B", "", "initial_h", "initial_c"],
+        &["Y", "Y_h", "Y_c"],
         &[
             attr_int("hidden_size", hidden),
             attr_string("direction", "bidirectional"),
@@ -490,7 +489,11 @@ fn build_bidirectional_lstm() -> ModelProto {
         graph(
             "test_BiLSTM_graph",
             vec![f32_input("X", &[seq, batch, input])],
-            vec![f32_output("Y", &[seq, dirs, batch, hidden])],
+            vec![
+                f32_output("Y", &[seq, dirs, batch, hidden]),
+                f32_output("Y_h", &[dirs, batch, hidden]),
+                f32_output("Y_c", &[dirs, batch, hidden]),
+            ],
             vec![lstm],
             vec![
                 f32_init(
@@ -504,6 +507,16 @@ fn build_bidirectional_lstm() -> ModelProto {
                     &det(2, dirs * 4 * hidden * hidden),
                 ),
                 f32_init("B", &[dirs, 8 * hidden], &det(3, dirs * 8 * hidden)),
+                f32_init(
+                    "initial_h",
+                    &[dirs, batch, hidden],
+                    &det(4, dirs * batch * hidden),
+                ),
+                f32_init(
+                    "initial_c",
+                    &[dirs, batch, hidden],
+                    &det(5, dirs * batch * hidden),
+                ),
             ],
         ),
     )
