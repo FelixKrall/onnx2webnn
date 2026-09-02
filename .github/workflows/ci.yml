@@ -9,6 +9,11 @@ on:
 env:
   # Keep in sync with the `ort` crate version pinned by rustnn.
   ORT_VERSION: 1.29.0
+  # rustnn checkout. Pinned to the fork branch carrying the ONNX exporter
+  # fixes (Squeeze axes, f16 casts, bidirectional LSTM/GRU) until they land
+  # upstream; then switch back to rustnn/rustnn @ main.
+  RUSTNN_REPO: mklimenko-nv/rustnn
+  RUSTNN_REF: private/mklimenko/onnx2webnn-fixes
 
 jobs:
   test:
@@ -59,7 +64,8 @@ jobs:
       - name: Checkout rustnn
         uses: actions/checkout@v4
         with:
-          repository: rustnn/rustnn
+          repository: ${{ env.RUSTNN_REPO }}
+          ref: ${{ env.RUSTNN_REF }}
           path: rustnn
 
       - name: Install Rust
