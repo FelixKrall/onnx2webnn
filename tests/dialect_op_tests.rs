@@ -11,8 +11,73 @@
 #[allow(dead_code)]
 mod common;
 
-use common::{assert_op_matches_ort, ExpectConvertOp};
-use onnx2webnn::protos::onnx::ModelProto;
+use common::{assert_op_matches_ort, assert_op_matches_ort_with_options, ExpectConvertOp};
+use onnx2webnn::protos::onnx::{AttributeProto, GraphProto, ModelProto};
+use onnx2webnn::ConvertOptions;
+use std::collections::HashMap;
+
+/// optimum's merged-decoder layout: a boolean graph input gates an `If`.
+/// `--pin-input` freezes it so the chosen branch (here `x * 2`) is inlined;
+/// ORT runs the same pinned model for the reference.
+fn build_gated_if() -> ModelProto {
+    use onnx2webnn::test_models::prelude::*;
+
+    let branch = |name: &str, op: &str, konst: &str| GraphProto {
+        name: name.to_string(),
+        node: vec![node(
+            op,
+            &format!("{name}_op"),
+            &["x", konst],
+            &["b_out"],
+            &[],
+        )],
+        output: vec![f32_output("b_out", &[2, 3])],
+        ..Default::default()
+    };
+    let mut if_node = node("If", "gate", &["use_cache_branch"], &["y"], &[]);
+    if_node.attribute.push(AttributeProto {
+        name: "then_branch".to_string(),
+        r#type: 5, // GRAPH
+        g: Some(branch("then_g", "Mul", "two")),
+        ..Default::default()
+    });
+    if_node.attribute.push(AttributeProto {
+        name: "else_branch".to_string(),
+        r#type: 5, // GRAPH
+        g: Some(branch("else_g", "Add", "one")),
+        ..Default::default()
+    });
+
+    model(
+        17,
+        graph(
+            "test_GatedIf_graph",
+            vec![
+                f32_input("x", &[2, 3]),
+                bool_input("use_cache_branch", &[1]),
+            ],
+            vec![f32_output("y", &[2, 3])],
+            vec![if_node],
+            vec![f32_init("two", &[], &[2.0]), f32_init("one", &[], &[1.0])],
+        ),
+    )
+}
+
+#[test]
+fn pinned_if_gate_inlines_chosen_branch() {
+    for (value, _branch) in [(1i64, "then"), (0i64, "else")] {
+        let options = ConvertOptions {
+            pinned_inputs: HashMap::from([("use_cache_branch".to_string(), value)]),
+            ..ConvertOptions::default()
+        };
+        assert_op_matches_ort_with_options(
+            build_gated_if(),
+            ExpectConvertOp::Success,
+            17,
+            &options,
+        );
+    }
+}
 
 /// `Shape(x, start=-2)` feeds `ConstantOfShape`; the broadcast Add only
 /// matches ORT if the sliced shape vector is `[4, 5]` rather than the full
@@ -142,6 +207,41 @@ fn build_average_pool_count_include_pad(kernel: &[i64], pads: &[i64]) -> ModelPr
             vec![],
         ),
     )
+}
+
+/// `Cast(f32 -> f16)` feeding RMSNormalization: the decomposition's epsilon
+/// constant must follow the Cast's target type, not the input's.
+fn build_cast_into_rms_norm() -> ModelProto {
+    use onnx2webnn::test_models::prelude::*;
+
+    let scale: Vec<u16> = [1.0f32, 0.5, 2.0, 1.5]
+        .iter()
+        .map(|v| half::f16::from_f32(*v).to_bits())
+        .collect();
+    model(
+        23,
+        graph(
+            "test_CastRmsNorm_graph",
+            vec![f32_input("x", &[2, 4])],
+            vec![f16_output("y", &[2, 4])],
+            vec![
+                node("Cast", "to_f16", &["x"], &["x16"], &[attr_int("to", 10)]),
+                node(
+                    "RMSNormalization",
+                    "rms",
+                    &["x16", "scale"],
+                    &["y"],
+                    &[attr_int("axis", -1), attr_float("epsilon", 1e-5)],
+                ),
+            ],
+            vec![f16_init("scale", &[4], &scale)],
+        ),
+    )
+}
+
+#[test]
+fn cast_into_rms_norm_matches_ort() {
+    assert_op_matches_ort(build_cast_into_rms_norm(), ExpectConvertOp::Success, 23);
 }
 
 #[test]

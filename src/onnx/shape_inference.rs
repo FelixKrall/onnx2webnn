@@ -409,7 +409,18 @@ fn propagate_node_shapes(
                 };
 
                 // Propagate dtype from first input if available.
-                if matches!(node.op_type.as_str(), "ConvInteger" | "MatMulInteger") {
+                if node.op_type.as_str() == "Cast" {
+                    // The output type is the `to` attribute, not the input's.
+                    let to = node
+                        .attribute
+                        .as_slice()
+                        .iter()
+                        .find(|a| a.name.as_str() == "to")
+                        .map(|a| a.i as i32);
+                    if let Some(dtype) = to.and_then(|t| map_onnx_data_type(t).ok()) {
+                        result.value_types.insert(out_name.clone(), dtype);
+                    }
+                } else if matches!(node.op_type.as_str(), "ConvInteger" | "MatMulInteger") {
                     result
                         .value_types
                         .entry(out_name.clone())
@@ -4420,6 +4431,28 @@ mod tests {
             infer_test_node(&node, &[14, 14], &[("axes", vec![5])]),
             None
         );
+    }
+
+    #[test]
+    fn cast_output_type_follows_to_attribute() {
+        use crate::onnx::test_models::prelude::*;
+        let m = model(
+            17,
+            graph(
+                "cast_types",
+                vec![f32_input("x", &[2, 3])],
+                vec![f16_output("z", &[2, 3])],
+                vec![
+                    node("Cast", "c16", &["x"], &["y"], &[attr_int("to", 10)]),
+                    node("Abs", "abs", &["y"], &["z"], &[]),
+                ],
+                vec![],
+            ),
+        );
+        let res = infer_static_shapes(&m, &HashMap::new()).unwrap();
+        assert_eq!(res.value_types.get("y"), Some(&DataType::Float16));
+        // Downstream unary ops inherit the cast type.
+        assert_eq!(res.value_types.get("z"), Some(&DataType::Float16));
     }
 
     #[test]

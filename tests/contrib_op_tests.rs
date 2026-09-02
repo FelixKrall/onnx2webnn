@@ -211,7 +211,7 @@ fn build_qmoe(bits: i64) -> ModelProto {
 
     let packed = |seed: i64, rows: i64, cols: i64| -> Vec<u8> {
         (0..rows * cols / per_byte)
-            .map(|i| (((i * 7 + seed * 13) % 256) as u8))
+            .map(|i| ((i * 7 + seed * 13) % 256) as u8)
             .collect()
     };
     // Normalize weight magnitudes across bit widths (|q - zp| <= 2^(bits-1))

@@ -36,6 +36,18 @@ pub enum ExpectConvertOp {
 /// Fixtures are built at the opset declared in `model.opset_import`. The converter
 /// itself accepts any `ai.onnx` opset in the supported range (1–26).
 pub fn assert_op_matches_ort(model: ModelProto, expect: ExpectConvertOp, test_opset: i64) {
+    assert_op_matches_ort_with_options(model, expect, test_opset, &ConvertOptions::default());
+}
+
+/// Like [`assert_op_matches_ort`] with explicit [`ConvertOptions`]. Pinned
+/// inputs are frozen in the ORT reference model too, so both sides see the
+/// same constants and the pinned input is not fed at dispatch.
+pub fn assert_op_matches_ort_with_options(
+    model: ModelProto,
+    expect: ExpectConvertOp,
+    test_opset: i64,
+    options: &ConvertOptions,
+) {
     let declared_opset = model
         .opset_import
         .iter()
@@ -46,7 +58,10 @@ pub fn assert_op_matches_ort(model: ModelProto, expect: ExpectConvertOp, test_op
         declared_opset, test_opset,
         "fixture opset and test opset should match"
     );
-    let result = convert_model_proto(model.clone(), &ConvertOptions::default());
+    let result = convert_model_proto(model.clone(), options);
+    let mut model = model;
+    onnx2webnn::onnx::convert::pin_graph_inputs(&mut model, &options.pinned_inputs)
+        .expect("pinned inputs should exist in the fixture");
     match expect {
         ExpectConvertOp::UnsupportedOp => match result {
             Err(err) if err.is_unsupported_op() => {}

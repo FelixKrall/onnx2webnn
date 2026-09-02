@@ -17,7 +17,7 @@ env:
 
 jobs:
   test:
-    name: Build & Test (${{ matrix.os }}${{ matrix.cargo_flags && ', coreml' || '' }})
+    name: Build & Test (${{ matrix.os }}${{ matrix.cargo_flags && ', coreml' || '' }}${{ matrix.profile == '' && ', debug' || '' }})
     runs-on: ${{ matrix.os }}
     # The CoreML job dispatches every integration test through Apple's CoreML
     # backend; op coverage there may lag the ORT backend, so it reports
@@ -32,10 +32,12 @@ jobs:
             ort_archive: onnxruntime-linux-x64
             ort_ext: tgz
             ort_dylib: lib/libonnxruntime.so
+            profile: --release
           - os: windows-latest
             ort_archive: onnxruntime-win-x64
             ort_ext: zip
             ort_dylib: lib/onnxruntime.dll
+            profile: --release
           - os: macos-latest
             ort_archive: onnxruntime-osx-arm64
             ort_ext: tgz
@@ -43,6 +45,10 @@ jobs:
             # rustnn selects the CoreML backend automatically on macOS when
             # the feature is compiled in (ORT still serves as the reference).
             cargo_flags: --features coreml
+            # Debug profile until rustnn/rustnn#216 lands: optimized builds
+            # crash in MLContext::dispatch() on CoreML (provider ownership in
+            # the Objective-C shim). Switch to --release afterwards.
+            profile: ""
             experimental: true
     defaults:
       run:
@@ -110,8 +116,27 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-      - name: Build (release)
-        run: cargo build --release --locked ${{ matrix.cargo_flags }}
+      - name: Build
+        run: cargo build ${{ matrix.profile }} --locked ${{ matrix.cargo_flags }}
 
-      - name: Test (release)
-        run: cargo test --release --locked ${{ matrix.cargo_flags }}
+      # tests/model_skeletons.rs converts the transformers.js exports in
+      # tests/models/manifest.json. With CI set it builds weight-stripped
+      # skeletons from the Hugging Face Hub with range requests (graph and
+      # small constants only) and keeps them in target/model-skeletons; the
+      # ~40 MB cache spares the Hub on later runs until the manifest or the
+      # scanner changes.
+      - name: Cache model skeletons
+        uses: actions/cache@v4
+        with:
+          path: onnx2webnn/target/model-skeletons
+          key: model-skeletons-${{ hashFiles('onnx2webnn/tests/models/manifest.json', 'onnx2webnn/tests/common/skeleton.rs') }}
+
+      - name: Test
+        # Hosted runners have 4 cores and 7-16 GB; the heavy sweep entries
+        # (multi-GB weights) need more than that and are skipped.
+        env:
+          # Optional; raises Hub rate limits if the repository defines it.
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          O2W_MODEL_TEST_JOBS: 2
+          O2W_MODEL_TEST_SKIP_HEAVY: 1
+        run: cargo test ${{ matrix.profile }} --locked ${{ matrix.cargo_flags }}
