@@ -241,6 +241,25 @@ impl OpRegistry {
     ) -> Result<ConversionResult, OnnxError> {
         let op_type = node.op_type.as_str();
 
+        // Zero-size values (an empty Slice, a Reshape of it, ...) have no WebNN
+        // representation. When shape inference proves every output empty, mark
+        // them like empty optional inputs so consumers such as Concat drop them.
+        let outputs: Vec<&String> = node.output.iter().filter(|o| !o.is_empty()).collect();
+        if !outputs.is_empty()
+            && outputs.iter().all(|o| {
+                context
+                    .value_shapes
+                    .get(o.as_str())
+                    .is_some_and(|shape| shape.contains(&0))
+            })
+        {
+            for out in outputs {
+                builder.mark_empty_optional(out);
+                builder.mark_empty_optional(&crate::onnx::convert::sanitize_identifier(out));
+            }
+            return Ok(ConversionResult::default());
+        }
+
         for handler in &self.handlers {
             if handler.supports(op_type) {
                 let result = handler.convert(node, context, builder)?;

@@ -86,6 +86,7 @@ WEBNN_SUPPORTED_ONNX_OPS: frozenset[str] = frozenset(
         "DynamicQuantizeLinear",
         # utility.rs
         "Shape",
+        "OneHot",
         "Gather",
         "GatherBlockQuantized",
         "GatherND",

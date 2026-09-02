@@ -53,7 +53,7 @@ reads (e.g. the KV cache in the prefill branch) and zero-size dummy outputs are 
 |------|---------|
 | `--input` | Input `.onnx` path (required) |
 | `--optimize` | Constant folding and shape propagation |
-| `--override-dim NAME=VALUE` | Bind a symbolic dim (repeatable) |
+| `--override-dim NAME=VALUE` | Bind a symbolic dim (repeatable); unnamed zero dims are addressed as `<input>_dim<axis>` |
 | `--override-dims-file` | JSON overrides (`freeDimensionOverrides` or flat object) |
 | `--pin-input NAME=VALUE` | Freeze a graph input to `true`/`false`/an integer (repeatable) |
 | `--allow-missing-external-data` | Zero-fill external tensors whose data file is absent (weight-stripped skeleton models) |

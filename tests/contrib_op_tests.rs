@@ -12,7 +12,7 @@
 mod common;
 
 use common::{assert_op_matches_ort, ExpectConvertOp};
-use onnx2webnn::protos::onnx::{ModelProto, OperatorSetIdProto};
+use onnx2webnn::protos::onnx::{ModelProto, OperatorSetIdProto, TensorProto};
 
 fn with_ms_domain(mut model: ModelProto, ms_version: i64) -> ModelProto {
     model.opset_import.push(OperatorSetIdProto {
@@ -71,52 +71,138 @@ fn build_matmul_bnb4(quant_type: i64) -> ModelProto {
 /// initializers set to the unpadded values the static lowering assumes, so
 /// ORT computes the same attention pattern the WebNN causal mask encodes.
 fn build_gqa() -> ModelProto {
+    build_gqa_with(false, None)
+}
+
+/// `packed`: query carries Q, K and V ([B, S, (H + 2·kvH)·Dh]) and the key/value
+/// inputs are empty. `rotary`: do_rotary=1 with cos/sin caches
+/// ([max_seq, Dh/2]) and the given `rotary_interleaved` flag.
+fn build_gqa_with(packed: bool, rotary: Option<bool>) -> ModelProto {
     use onnx2webnn::test_models::prelude::*;
 
-    let (num_heads, kv_heads, head_dim) = (2i64, 1i64, 8i64);
+    // ORT's rotary path requires head_size % 16 == 0.
+    let (num_heads, kv_heads, head_dim) = (2i64, 1i64, 16i64);
     let (seq, past_seq) = (4i64, 2i64);
     let total_seq = seq + past_seq;
+    let max_seq = 8i64;
 
+    let mut input_names = vec![
+        "query",
+        if packed { "" } else { "key" },
+        if packed { "" } else { "value" },
+        "past_key",
+        "past_value",
+        "seqlens_k",
+        "total_seq_len",
+    ];
+    let mut attrs = vec![
+        attr_int("num_heads", num_heads),
+        attr_int("kv_num_heads", kv_heads),
+    ];
+    if let Some(interleaved) = rotary {
+        input_names.extend(["cos_cache", "sin_cache"]);
+        attrs.push(attr_int("do_rotary", 1));
+        attrs.push(attr_int("rotary_interleaved", i64::from(interleaved)));
+    }
     let mut gqa = node(
         "GroupQueryAttention",
         "test_gqa",
-        &[
-            "query",
-            "key",
-            "value",
-            "past_key",
-            "past_value",
-            "seqlens_k",
-            "total_seq_len",
-        ],
+        &input_names,
         &["Y", "present_key", "present_value"],
-        &[
-            attr_int("num_heads", num_heads),
-            attr_int("kv_num_heads", kv_heads),
-        ],
+        &attrs,
     );
     gqa.domain = "com.microsoft".to_string();
+
+    let query_hidden = if packed {
+        (num_heads + 2 * kv_heads) * head_dim
+    } else {
+        num_heads * head_dim
+    };
+    let mut inputs = vec![f32_input("query", &[1, seq, query_hidden])];
+    if !packed {
+        inputs.push(f32_input("key", &[1, seq, kv_heads * head_dim]));
+        inputs.push(f32_input("value", &[1, seq, kv_heads * head_dim]));
+    }
+    inputs.push(f32_input("past_key", &[1, kv_heads, past_seq, head_dim]));
+    inputs.push(f32_input("past_value", &[1, kv_heads, past_seq, head_dim]));
+
+    let mut initializers = vec![
+        i32_init("seqlens_k", &[1], &[(total_seq - 1) as i32]),
+        i32_init("total_seq_len", &[1], &[total_seq as i32]),
+    ];
+    if rotary.is_some() {
+        let half = head_dim / 2;
+        let table = |seed: i64| -> Vec<f32> {
+            (0..max_seq * half)
+                .map(|i| (((i * 13 + seed * 7) % 21) as f32 / 10.0) - 1.0)
+                .collect()
+        };
+        initializers.push(f32_init("cos_cache", &[max_seq, half], &table(1)));
+        initializers.push(f32_init("sin_cache", &[max_seq, half], &table(2)));
+    }
 
     let model = model(
         17,
         graph(
             "test_GroupQueryAttention_graph",
-            vec![
-                f32_input("query", &[1, seq, num_heads * head_dim]),
-                f32_input("key", &[1, seq, kv_heads * head_dim]),
-                f32_input("value", &[1, seq, kv_heads * head_dim]),
-                f32_input("past_key", &[1, kv_heads, past_seq, head_dim]),
-                f32_input("past_value", &[1, kv_heads, past_seq, head_dim]),
-            ],
+            inputs,
             vec![
                 f32_output("Y", &[1, seq, num_heads * head_dim]),
                 f32_output("present_key", &[1, kv_heads, total_seq, head_dim]),
                 f32_output("present_value", &[1, kv_heads, total_seq, head_dim]),
             ],
             vec![gqa],
+            initializers,
+        ),
+    );
+    with_ms_domain(model, 1)
+}
+
+/// GatherBlockQuantized over an INT4 (data type 22) table: logical dims,
+/// two's-complement nibbles, no zero points (defaults to 0 for signed types).
+fn build_gather_block_quantized_int4() -> ModelProto {
+    use onnx2webnn::test_models::prelude::*;
+
+    let (rows, cols, block_size) = (8i64, 32i64, 16i64);
+    let blocks = cols / block_size;
+    let packed: Vec<u8> = (0..rows * cols / 2)
+        .map(|i| ((i * 5 + 3) % 256) as u8)
+        .collect();
+    let scales: Vec<f32> = (0..rows * blocks)
+        .map(|i| 0.02 + (i % 7) as f32 * 0.01)
+        .collect();
+    let data = TensorProto {
+        name: "data".to_string(),
+        data_type: 22, // INT4
+        dims: vec![rows, cols],
+        raw_data: packed,
+        ..Default::default()
+    };
+
+    let mut gbq = node(
+        "GatherBlockQuantized",
+        "test_gbq_int4",
+        &["data", "indices", "scales"],
+        &["Y"],
+        &[
+            attr_int("block_size", block_size),
+            attr_int("gather_axis", 0),
+            attr_int("quantize_axis", 1),
+        ],
+    );
+    gbq.domain = "com.microsoft".to_string();
+
+    let model = model(
+        21,
+        graph(
+            "test_GatherBlockQuantizedInt4_graph",
+            vec![],
+            vec![f32_output("Y", &[3, cols])],
+            vec![gbq],
             vec![
-                i32_init("seqlens_k", &[1], &[(total_seq - 1) as i32]),
-                i32_init("total_seq_len", &[1], &[total_seq as i32]),
+                data,
+                i64_init("indices", &[3], &[0, 5, 2]),
+                f32_init("scales", &[rows, blocks], &scales),
             ],
         ),
     );
@@ -615,6 +701,38 @@ fn constant_if_inlines_and_matches_ort() {
 #[test]
 fn group_query_attention_matches_ort() {
     assert_op_matches_ort(build_gqa(), ExpectConvertOp::Success, 17);
+}
+
+#[test]
+fn group_query_attention_packed_qkv_matches_ort() {
+    assert_op_matches_ort(build_gqa_with(true, None), ExpectConvertOp::Success, 17);
+}
+
+#[test]
+fn group_query_attention_rotary_matches_ort() {
+    assert_op_matches_ort(
+        build_gqa_with(false, Some(false)),
+        ExpectConvertOp::Success,
+        17,
+    );
+}
+
+#[test]
+fn group_query_attention_rotary_interleaved_packed_matches_ort() {
+    assert_op_matches_ort(
+        build_gqa_with(true, Some(true)),
+        ExpectConvertOp::Success,
+        17,
+    );
+}
+
+#[test]
+fn gather_block_quantized_int4_matches_ort() {
+    assert_op_matches_ort(
+        build_gather_block_quantized_int4(),
+        ExpectConvertOp::Success,
+        21,
+    );
 }
 
 #[test]

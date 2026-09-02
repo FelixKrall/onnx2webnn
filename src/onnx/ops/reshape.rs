@@ -801,6 +801,19 @@ impl ReshapeHandler {
             _ => shape_values,
         };
 
+        // An empty target shape (ONNX: broadcast against a rank-0 shape) is a
+        // no-op; alias the input instead of emitting an expand.
+        if dynamic_new_shape.is_none() && shape_values.is_empty() {
+            let input = b.resolve_operand(&data_input_raw)?;
+            let output_name = output_label(node, node_name);
+            if let Some(onnx_out) = node.output.first() {
+                record_node_output(b, onnx_out, &output_name, input);
+            } else {
+                b.record_operand(&[&output_name], input);
+            }
+            return Ok(ConversionResult::default());
+        }
+
         let shape_u32: Vec<u32> = shape_values.iter().map(|&v| v as u32).collect();
 
         // Determine if this is a broadcast (WebNN expand) or reshape operation
@@ -1026,6 +1039,23 @@ impl ReshapeHandler {
                     splits = Some(attr.ints.clone());
                 }
                 _ => {}
+            }
+        }
+
+        // Opset 13+: split sizes come from the optional second input.
+        if splits.is_none() {
+            if let Some(name) = inputs.get(1).filter(|n| !n.is_empty()) {
+                splits = context
+                    .const_values
+                    .get(name.as_str())
+                    .cloned()
+                    .or_else(|| {
+                        context
+                            .initializers
+                            .get(name.as_str())
+                            .map(|t| crate::onnx::shape_inference::read_int_tensor(t))
+                    })
+                    .filter(|v| !v.is_empty());
             }
         }
 

@@ -313,6 +313,22 @@ pub fn tensor_element_count(tensor: &TensorProto) -> usize {
 
 /// Extract initializer / constant tensor bytes for `constant_from_slice`.
 pub fn tensor_proto_to_bytes(tensor: &TensorProto) -> Result<Vec<u8>, OnnxError> {
+    if tensor.data_type == TensorProto_DataType::Double as i32 {
+        // float64 is lowered to float32 (WebNN has no float64).
+        let values: Vec<f64> = if !tensor.raw_data.is_empty() {
+            tensor
+                .raw_data
+                .chunks_exact(8)
+                .map(|c| f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
+                .collect()
+        } else {
+            tensor.double_data.clone()
+        };
+        return Ok(values
+            .iter()
+            .flat_map(|&v| (v as f32).to_le_bytes())
+            .collect());
+    }
     if !tensor.raw_data.is_empty() {
         return Ok(tensor.raw_data.clone());
     }

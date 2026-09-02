@@ -123,7 +123,7 @@ changed at opset 22/25/26.
 | Normalization | LayerNormalization, Softmax | `normalization.rs` |
 | Shape | Reshape, Transpose, Concat, Split, Unsqueeze, Squeeze, Tile, Expand, Flatten | `reshape.rs` |
 | Conversion | Cast, Constant | `conversion.rs` |
-| Utility | Shape, Gather, Slice, ConstantOfShape, Range, Trilu | `utility.rs` |
+| Utility | Shape, Gather, Slice, ConstantOfShape, Range, Trilu, OneHot | `utility.rs` |
 | Reduction | ReduceMean, ReduceSum, ReduceMax, ReduceMin | `reduction.rs` |
 | Activation / unary | Relu, Gelu, Tanh, Sigmoid, Sqrt, Exp, Log, Abs, Neg, Erf, Cos, Sin, Identity | `activation.rs` |
 | Scatter | ScatterND | `scatter.rs` |

@@ -181,8 +181,21 @@ fn seed_inputs(
         for dim in shape.dim.as_slice() {
             if let Some(value) = &dim.value {
                 match value {
-                    DimensionValue::DimValue(v) => {
+                    DimensionValue::DimValue(v) if *v > 0 => {
                         shape_dims.push(*v);
+                    }
+                    DimensionValue::DimValue(_) => {
+                        // Unnamed dynamic dim: overridable as `<input>_dim<axis>`.
+                        let hint =
+                            format!("{}_dim{}", sanitize_identifier(&name), shape_dims.len());
+                        if let Some(v) = overrides.get(hint.as_str()) {
+                            shape_dims.push(*v as i64);
+                        } else {
+                            return Err(ShapeInferenceError::DynamicDim {
+                                input: name.clone(),
+                                dim: hint,
+                            });
+                        }
                     }
                     DimensionValue::DimParam(key) => {
                         if let Some(v) = overrides.get(key.as_str()) {
@@ -293,17 +306,8 @@ fn propagate_node_shapes(
             if outputs.is_empty() {
                 continue;
             }
-            // Binary broadcast shapes may have been guessed from a single known
-            // input; keep refreshing them as more inputs resolve.
-            let refresh_binary =
-                matches!(node.op_type.as_str(), "Add" | "Sub" | "Mul" | "Div" | "Pow");
-            if !refresh_binary
-                && outputs
-                    .iter()
-                    .all(|o| result.value_shapes.contains_key(o.as_str()))
-            {
-                continue;
-            }
+            // Shapes may have been guessed before an upstream constant (e.g. a
+            // Reshape target) folded; recompute every node and track changes.
 
             if node.op_type.as_str() == "DynamicQuantizeLinear" {
                 if let Some(input_name) = node.input.first() {
@@ -398,18 +402,28 @@ fn propagate_node_shapes(
                 &result.const_values,
             ) {
                 let out_name = outputs[0].to_string();
-                let advanced = if refresh_binary {
-                    let changed = result.value_shapes.get(&out_name) != Some(&shape);
-                    result.value_shapes.insert(out_name.clone(), shape);
-                    changed
-                } else {
-                    let new_entry = !result.value_shapes.contains_key(&out_name);
-                    result.value_shapes.entry(out_name.clone()).or_insert(shape);
-                    new_entry
-                };
+                let advanced = result.value_shapes.get(&out_name) != Some(&shape);
+                result.value_shapes.insert(out_name.clone(), shape);
 
                 // Propagate dtype from first input if available.
-                if node.op_type.as_str() == "Cast" {
+                if node.op_type.as_str() == "OneHot" {
+                    // Output takes the type of `values`, not of the indices.
+                    if let Some(values) = node.input.as_slice().get(2) {
+                        let dtype =
+                            result
+                                .value_types
+                                .get(values.as_str())
+                                .copied()
+                                .or_else(|| {
+                                    initializers
+                                        .get(values.as_str())
+                                        .and_then(|t| map_onnx_data_type(t.data_type).ok())
+                                });
+                        if let Some(dtype) = dtype {
+                            result.value_types.insert(out_name.clone(), dtype);
+                        }
+                    }
+                } else if node.op_type.as_str() == "Cast" {
                     // The output type is the `to` attribute, not the input's.
                     let to = node
                         .attribute
@@ -420,6 +434,21 @@ fn propagate_node_shapes(
                     if let Some(dtype) = to.and_then(|t| map_onnx_data_type(t).ok()) {
                         result.value_types.insert(out_name.clone(), dtype);
                     }
+                } else if matches!(
+                    node.op_type.as_str(),
+                    "Equal"
+                        | "Greater"
+                        | "GreaterOrEqual"
+                        | "Less"
+                        | "LessOrEqual"
+                        | "And"
+                        | "Or"
+                        | "Xor"
+                        | "Not"
+                        | "IsNaN"
+                        | "IsInf"
+                ) {
+                    result.value_types.insert(out_name.clone(), DataType::Uint8);
                 } else if matches!(node.op_type.as_str(), "ConvInteger" | "MatMulInteger") {
                     result
                         .value_types
@@ -796,8 +825,14 @@ pub fn infer_node_output_shape(
                 if bits != 4 && bits != 8 {
                     return None;
                 }
-                let last = data_shape.last_mut()?;
-                *last *= 8 / bits;
+                // INT4/UINT4 tables (data types 22/21) already have logical dims.
+                let four_bit_dtype = initializers
+                    .get(ins[0].as_str())
+                    .is_some_and(|t| t.data_type == 21 || t.data_type == 22);
+                if !four_bit_dtype {
+                    let last = data_shape.last_mut()?;
+                    *last *= 8 / bits;
+                }
             }
             let data_shape = &data_shape;
             let indices_shape = value_shapes.get(ins[1].as_str())?;
@@ -931,6 +966,13 @@ pub fn infer_node_output_shape(
                 return None;
             }
             let input_shape = value_shapes.get(ins[0].as_str())?;
+            // An empty shape vector broadcasts to the input itself.
+            if const_values
+                .get(ins[1].as_str())
+                .is_some_and(|v| v.is_empty())
+            {
+                return Some(input_shape.clone());
+            }
             let target = read_int64_values_from_maps(ins[1].as_str(), initializers, const_values)?;
             broadcast_shape(input_shape, &target)
         }
@@ -950,6 +992,30 @@ pub fn infer_node_output_shape(
                 .zip(repeats.iter())
                 .map(|(&dim, &repeat)| dim.checked_mul(repeat))
                 .collect()
+        }
+
+        "OneHot" => {
+            let ins = node.input.as_slice();
+            let indices = value_shapes.get(ins.first()?.as_str())?;
+            let depth =
+                read_int64_values_from_maps(ins.get(1)?.as_str(), initializers, const_values)?
+                    .first()
+                    .copied()?;
+            let out_rank = indices.len() as i64 + 1;
+            let axis = node
+                .attribute
+                .as_slice()
+                .iter()
+                .find(|a| a.name.as_str() == "axis")
+                .map(|a| a.i)
+                .unwrap_or(-1);
+            let axis = if axis < 0 { axis + out_rank } else { axis };
+            if axis < 0 || axis >= out_rank || depth <= 0 {
+                return None;
+            }
+            let mut out = indices.clone();
+            out.insert(axis as usize, depth);
+            Some(out)
         }
 
         "Range" => {
@@ -2518,6 +2584,8 @@ fn fold_shape_constants(
                     | "Sub"
                     | "Mul"
                     | "Div"
+                    | "Neg"
+                    | "Reshape"
             );
             if const_values.contains_key(outputs[0].as_str()) && !refresh_shape_value {
                 continue;
@@ -2530,6 +2598,15 @@ fn fold_shape_constants(
                         const_values.get(inputs[0].as_str()).cloned(),
                         const_values.get(inputs[1].as_str()).cloned(),
                     ) {
+                        // An empty const for a non-empty tensor is a stale
+                        // placeholder from an earlier pass; wait for the refresh.
+                        let input_numel: i64 = value_shapes
+                            .get(inputs[0].as_str())
+                            .map(|s| s.iter().product())
+                            .unwrap_or(0);
+                        if data.is_empty() && input_numel > 0 {
+                            continue;
+                        }
                         if target.contains(&-1) {
                             let total: i64 = if data.is_empty() {
                                 1
@@ -3003,6 +3080,21 @@ fn fold_shape_constants(
                                 DataType::Int64
                             };
                             value_types.insert(out.to_string(), out_type);
+                        }
+                    }
+                }
+            } else if op_type == "Neg" {
+                if let (Some(inp), Some(out)) = (
+                    node.input.as_slice().first(),
+                    node.output.as_slice().first(),
+                ) {
+                    if let Some(vals) = const_values.get(inp.as_str()).cloned() {
+                        const_values.insert(out.to_string(), vals.iter().map(|v| -v).collect());
+                        if let Some(shape) = value_shapes.get(inp.as_str()).cloned() {
+                            value_shapes.insert(out.to_string(), shape);
+                        }
+                        if let Some(dtype) = value_types.get(inp.as_str()).cloned() {
+                            value_types.insert(out.to_string(), dtype);
                         }
                     }
                 }
@@ -4453,6 +4545,86 @@ mod tests {
         assert_eq!(res.value_types.get("y"), Some(&DataType::Float16));
         // Downstream unary ops inherit the cast type.
         assert_eq!(res.value_types.get("z"), Some(&DataType::Float16));
+    }
+
+    #[test]
+    fn unnamed_zero_dims_are_overridable() {
+        use crate::onnx::test_models::prelude::*;
+        let m = model(
+            17,
+            graph(
+                "zero_dims",
+                vec![tensor_input(
+                    "x",
+                    TensorProto_DataType::Float as i32,
+                    &[0, 4],
+                )],
+                vec![f32_output("y", &[0, 4])],
+                vec![node("Abs", "abs", &["x"], &["y"], &[])],
+                vec![],
+            ),
+        );
+        let err = infer_static_shapes(&m, &HashMap::new()).unwrap_err();
+        assert!(matches!(err, ShapeInferenceError::DynamicDim { dim, .. } if dim == "x_dim0"));
+        let overrides = HashMap::from([("x_dim0".to_string(), 3u32)]);
+        let res = infer_static_shapes(&m, &overrides).unwrap();
+        assert_eq!(res.value_shapes.get("y"), Some(&vec![3, 4]));
+    }
+
+    #[test]
+    fn comparison_outputs_are_bool() {
+        use crate::onnx::test_models::prelude::*;
+        let m = model(
+            17,
+            graph(
+                "cmp",
+                vec![f32_input("a", &[2]), f32_input("b", &[2])],
+                vec![bool_output("eq", &[2])],
+                vec![
+                    node("Equal", "eq_node", &["a", "b"], &["eq"], &[]),
+                    node("Less", "lt_node", &["a", "b"], &["lt"], &[]),
+                ],
+                vec![],
+            ),
+        );
+        let res = infer_static_shapes(&m, &HashMap::new()).unwrap();
+        assert_eq!(res.value_types.get("eq"), Some(&DataType::Uint8));
+        assert_eq!(res.value_types.get("lt"), Some(&DataType::Uint8));
+    }
+
+    #[test]
+    fn neg_folds_shape_constants() {
+        let graph = GraphProto {
+            node: vec![
+                shape_node_named("Shape", &["input"], "s"),
+                shape_node_named("Gather", &["s", "idx"], "g"),
+                shape_node_named("Neg", &["g"], "n"),
+            ],
+            ..Default::default()
+        };
+        let mut value_shapes = HashMap::from([("input".to_string(), vec![2, 3])]);
+        let mut value_types = HashMap::new();
+        let mut const_values = HashMap::from([("idx".to_string(), vec![1])]);
+        let mut value_shape_dims = HashMap::new();
+        propagate_shapes_and_fold_constants(
+            &graph,
+            &HashMap::new(),
+            &mut value_shapes,
+            &mut value_types,
+            &mut const_values,
+            &mut value_shape_dims,
+            &PropagateOptions {
+                optimize: true,
+                experimental_dynamic_inputs: false,
+            },
+        );
+        assert_eq!(const_values.get("n"), Some(&vec![-3]));
+    }
+
+    fn shape_node_named(op_type: &str, inputs: &[&str], output: &str) -> NodeProto {
+        let mut node = shape_node(op_type, inputs);
+        node.output = vec![output.to_string()];
+        node
     }
 
     #[test]

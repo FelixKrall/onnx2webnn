@@ -15,9 +15,11 @@
 // drives GQA for batch-1 web inference; the runtime `seqlens_k` /
 // `total_sequence_length` inputs are therefore ignored.
 //
-// Rejected: packed QKV (empty key/value names), do_rotary=1 (rotary arrives
-// via explicit RotaryEmbedding nodes in transformers.js exports), softcap,
-// and local (sliding-window) attention.
+// Packed QKV (empty key/value inputs, query = [B, S, (H + 2·kvH)·Dh]) is
+// split along the hidden axis first. With do_rotary=1 the cos/sin caches
+// (inputs 7/8, [max_seq, rotary_dim/2]) are applied to q and k at positions
+// P..P+S before attention. Rejected: softcap and local (sliding-window)
+// attention.
 
 use crate::onnx::builder::{map_op_error, OnnxBuilder};
 use crate::onnx::builder_helpers::{
@@ -28,7 +30,7 @@ use crate::onnx::ops::conv::lookup_shape;
 use crate::onnx::ops::{ConversionContext, ConversionResult, OpHandler};
 use crate::protos::onnx::NodeProto;
 use rustnn::mlcontext::MLOperand;
-use rustnn::operator_options::MLTransposeOptions;
+use rustnn::operator_options::{MLSliceOptions, MLSplitOptions, MLTransposeOptions};
 use rustnn::DataType;
 
 pub struct AttentionHandler;
@@ -106,6 +108,157 @@ fn heads_layout(
     transpose(b, split, vec![0, 2, 1, 3], &format!("{label}_bhsd"))
 }
 
+/// Rotate `x` ([B, S, heads, Dh]) with the GQA cos/sin caches
+/// ([max_seq, rotary_dim/2]) at positions `past_seq..past_seq+seq`.
+#[allow(clippy::too_many_arguments)]
+fn apply_rotary(
+    b: &mut OnnxBuilder<'_, '_, '_>,
+    x: MLOperand,
+    cos_cache: MLOperand,
+    sin_cache: MLOperand,
+    cache_shape: &[i64],
+    batch: i64,
+    seq: i64,
+    past_seq: i64,
+    heads: i64,
+    head_dim: i64,
+    interleaved: bool,
+    label: &str,
+) -> Result<MLOperand, OnnxError> {
+    if cache_shape.len() != 2 || cache_shape[0] < past_seq + seq {
+        return Err(OnnxError::InvalidShape(format!(
+            "GroupQueryAttention rotary cache {cache_shape:?} too small for positions {past_seq}..{}",
+            past_seq + seq
+        )));
+    }
+    let half = cache_shape[1];
+    let rotary_dim = half * 2;
+    if rotary_dim > head_dim {
+        return Err(OnnxError::InvalidShape(format!(
+            "GroupQueryAttention rotary_dim {rotary_dim} exceeds head_dim {head_dim}"
+        )));
+    }
+    let strided_slice = |b: &mut OnnxBuilder<'_, '_, '_>,
+                         input: MLOperand,
+                         starts: &[i64],
+                         sizes: &[i64],
+                         strides: Vec<u32>,
+                         tag: &str|
+     -> Result<MLOperand, OnnxError> {
+        let starts: Vec<u32> = starts.iter().map(|&v| v as u32).collect();
+        b.builder
+            .slice_with_options(
+                input,
+                &starts,
+                &i64_slice_to_mldim(sizes)?,
+                MLSliceOptions {
+                    label: format!("{label}_{tag}"),
+                    strides,
+                },
+            )
+            .map_err(map_op_error)
+    };
+    // cos/sin rows for the current positions, broadcastable to [B, S, heads, half].
+    let mut cos = strided_slice(
+        b,
+        cos_cache,
+        &[past_seq, 0],
+        &[seq, half],
+        Vec::new(),
+        "cos_rows",
+    )?;
+    let mut sin = strided_slice(
+        b,
+        sin_cache,
+        &[past_seq, 0],
+        &[seq, half],
+        Vec::new(),
+        "sin_rows",
+    )?;
+    let cache_view = i64_slice_to_mldim(&[1, seq, 1, half])?;
+    cos = reshape_with_shape(b, cos, &format!("{label}_cos"), cache_view.clone())?;
+    sin = reshape_with_shape(b, sin, &format!("{label}_sin"), cache_view)?;
+
+    let rotate_shape = [batch, seq, heads, rotary_dim];
+    let x_rotate = if rotary_dim < head_dim {
+        strided_slice(b, x, &[0, 0, 0, 0], &rotate_shape, Vec::new(), "rotate")?
+    } else {
+        x
+    };
+    let half_shape = [batch, seq, heads, half];
+    let (x1, x2) = if interleaved {
+        (
+            strided_slice(
+                b,
+                x_rotate,
+                &[0, 0, 0, 0],
+                &rotate_shape,
+                vec![1, 1, 1, 2],
+                "even",
+            )?,
+            strided_slice(
+                b,
+                x_rotate,
+                &[0, 0, 0, 1],
+                &[batch, seq, heads, rotary_dim - 1],
+                vec![1, 1, 1, 2],
+                "odd",
+            )?,
+        )
+    } else {
+        (
+            strided_slice(
+                b,
+                x_rotate,
+                &[0, 0, 0, 0],
+                &half_shape,
+                Vec::new(),
+                "first_half",
+            )?,
+            strided_slice(
+                b,
+                x_rotate,
+                &[0, 0, 0, half],
+                &half_shape,
+                Vec::new(),
+                "second_half",
+            )?,
+        )
+    };
+    let cos_x1 = b.builder.mul(x1, cos).map_err(map_op_error)?;
+    let sin_x2 = b.builder.mul(x2, sin).map_err(map_op_error)?;
+    let real = b.builder.sub(cos_x1, sin_x2).map_err(map_op_error)?;
+    let sin_x1 = b.builder.mul(x1, sin).map_err(map_op_error)?;
+    let cos_x2 = b.builder.mul(x2, cos).map_err(map_op_error)?;
+    let imag = b.builder.add(sin_x1, cos_x2).map_err(map_op_error)?;
+    let rotated = if interleaved {
+        let component = i64_slice_to_mldim(&[batch, seq, heads, half, 1])?;
+        let real = reshape_with_shape(b, real, &format!("{label}_real"), component.clone())?;
+        let imag = reshape_with_shape(b, imag, &format!("{label}_imag"), component)?;
+        let joined = b.builder.concat(&[real, imag], 4).map_err(map_op_error)?;
+        reshape_with_shape(
+            b,
+            joined,
+            &format!("{label}_interleaved"),
+            i64_slice_to_mldim(&rotate_shape)?,
+        )?
+    } else {
+        b.builder.concat(&[real, imag], 3).map_err(map_op_error)?
+    };
+    if rotary_dim < head_dim {
+        let tail = strided_slice(
+            b,
+            x,
+            &[0, 0, 0, rotary_dim],
+            &[batch, seq, heads, head_dim - rotary_dim],
+            Vec::new(),
+            "tail",
+        )?;
+        return b.builder.concat(&[rotated, tail], 3).map_err(map_op_error);
+    }
+    Ok(rotated)
+}
+
 fn convert_group_query_attention(
     node: &NodeProto,
     node_name: &str,
@@ -119,17 +272,13 @@ fn convert_group_query_attention(
             inputs.len()
         )));
     }
-    if inputs[1].is_empty() || inputs[2].is_empty() {
-        return Err(OnnxError::unsupported_op(
-            "GroupQueryAttention(packed QKV)",
-            node_name.to_string(),
-        ));
-    }
+    let packed_qkv = inputs[1].is_empty() || inputs[2].is_empty();
 
     let mut num_heads = 0i64;
     let mut kv_num_heads = 0i64;
     let mut scale = 0.0f32;
     let mut do_rotary = 0i64;
+    let mut rotary_interleaved = 0i64;
     let mut softcap = 0.0f32;
     let mut local_window_size = -1i64;
     for attr in &node.attribute {
@@ -138,17 +287,26 @@ fn convert_group_query_attention(
             "kv_num_heads" => kv_num_heads = attr.i,
             "scale" => scale = attr.f,
             "do_rotary" => do_rotary = attr.i,
+            "rotary_interleaved" => rotary_interleaved = attr.i,
             "softcap" => softcap = attr.f,
             "local_window_size" => local_window_size = attr.i,
             _ => {}
         }
     }
-    if do_rotary != 0 {
-        return Err(OnnxError::unsupported_op(
-            "GroupQueryAttention(do_rotary)",
-            node_name.to_string(),
-        ));
-    }
+    let rotary = if do_rotary != 0 {
+        let cos_name = inputs.get(7).filter(|n| !n.is_empty());
+        let sin_name = inputs.get(8).filter(|n| !n.is_empty());
+        match (cos_name, sin_name) {
+            (Some(cos), Some(sin)) => Some((cos.clone(), sin.clone())),
+            _ => {
+                return Err(OnnxError::InvalidShape(format!(
+                    "GroupQueryAttention {node_name} has do_rotary=1 but no cos/sin caches"
+                )))
+            }
+        }
+    } else {
+        None
+    };
     if softcap != 0.0 {
         return Err(OnnxError::unsupported_op(
             "GroupQueryAttention(softcap)",
@@ -190,11 +348,15 @@ fn convert_group_query_attention(
     let head_dim = past_shape[3];
     let past_seq = past_shape[2];
     let total_seq = past_seq + seq;
-    if q_shape[2] != num_heads * head_dim {
+    let expected_hidden = if packed_qkv {
+        (num_heads + 2 * kv_num_heads) * head_dim
+    } else {
+        num_heads * head_dim
+    };
+    if q_shape[2] != expected_hidden {
         return Err(OnnxError::InvalidShape(format!(
-            "GroupQueryAttention hidden {} != num_heads*head_dim {}",
-            q_shape[2],
-            num_heads * head_dim
+            "GroupQueryAttention hidden {} != expected {expected_hidden}",
+            q_shape[2]
         )));
     }
     if scale == 0.0 {
@@ -208,30 +370,100 @@ fn convert_group_query_attention(
         .unwrap_or(DataType::Float32);
     let label = output_label(node, node_name);
 
-    let q_in = b.resolve_operand(&inputs[0])?;
-    let k_in = b.resolve_operand(&inputs[1])?;
-    let v_in = b.resolve_operand(&inputs[2])?;
+    let (q_in, k_in, v_in) = if packed_qkv {
+        let qkv = b.resolve_operand(&inputs[0])?;
+        let sizes = [
+            (num_heads * head_dim) as u32,
+            (kv_num_heads * head_dim) as u32,
+            (kv_num_heads * head_dim) as u32,
+        ];
+        let mut parts = b
+            .builder
+            .split_with_options(
+                qkv,
+                &sizes,
+                MLSplitOptions {
+                    label: format!("{label}_qkv_split"),
+                    axis: 2,
+                },
+            )
+            .map_err(map_op_error)?;
+        let v = parts.pop().expect("three split outputs");
+        let k = parts.pop().expect("three split outputs");
+        let q = parts.pop().expect("three split outputs");
+        (q, k, v)
+    } else {
+        (
+            b.resolve_operand(&inputs[0])?,
+            b.resolve_operand(&inputs[1])?,
+            b.resolve_operand(&inputs[2])?,
+        )
+    };
     let past_key = b.resolve_operand(&inputs[3])?;
     let past_value = b.resolve_operand(&inputs[4])?;
 
-    let q = heads_layout(
-        b,
-        q_in,
-        batch,
-        seq,
-        num_heads,
-        head_dim,
-        &format!("{label}_q"),
-    )?;
-    let k = heads_layout(
-        b,
-        k_in,
-        batch,
-        seq,
-        kv_num_heads,
-        head_dim,
-        &format!("{label}_k"),
-    )?;
+    let (q, k) = if let Some((cos_name, sin_name)) = &rotary {
+        let cache_shape = lookup_shape(cos_name, context).ok_or_else(|| {
+            OnnxError::InvalidShape(format!(
+                "GroupQueryAttention requires a static cos_cache shape for '{cos_name}'"
+            ))
+        })?;
+        let cos_cache = b.resolve_operand(cos_name)?;
+        let sin_cache = b.resolve_operand(sin_name)?;
+        let mut rotated = Vec::with_capacity(2);
+        for (input, heads, tag) in [(q_in, num_heads, "q"), (k_in, kv_num_heads, "k")] {
+            let bshd = reshape_with_shape(
+                b,
+                input,
+                &format!("{label}_{tag}_split"),
+                i64_slice_to_mldim(&[batch, seq, heads, head_dim])?,
+            )?;
+            let bshd = apply_rotary(
+                b,
+                bshd,
+                cos_cache,
+                sin_cache,
+                &cache_shape,
+                batch,
+                seq,
+                past_seq,
+                heads,
+                head_dim,
+                rotary_interleaved != 0,
+                &format!("{label}_{tag}_rotary"),
+            )?;
+            rotated.push(transpose(
+                b,
+                bshd,
+                vec![0, 2, 1, 3],
+                &format!("{label}_{tag}_bhsd"),
+            )?);
+        }
+        let k = rotated.pop().expect("two rotated operands");
+        let q = rotated.pop().expect("two rotated operands");
+        (q, k)
+    } else {
+        (
+            heads_layout(
+                b,
+                q_in,
+                batch,
+                seq,
+                num_heads,
+                head_dim,
+                &format!("{label}_q"),
+            )?,
+            heads_layout(
+                b,
+                k_in,
+                batch,
+                seq,
+                kv_num_heads,
+                head_dim,
+                &format!("{label}_k"),
+            )?,
+        )
+    };
     let v = heads_layout(
         b,
         v_in,

@@ -414,6 +414,9 @@ fn strip_tensor<S: ByteSource>(
     stats.stripped_bytes += data_bytes;
     let length = if dims.is_empty() {
         data_bytes
+    } else if data_type == 21 || data_type == 22 {
+        // UINT4 / INT4: two elements per byte.
+        dims.iter().product::<u64>().div_ceil(2)
     } else {
         dims.iter().product::<u64>() * element_size(data_type)
     };

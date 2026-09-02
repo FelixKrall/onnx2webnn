@@ -16,7 +16,8 @@
 //! - `strip=<path>`: the same local files run through the skeleton scanner
 //!   (exercises the scanner offline).
 //!
-//! Unset outside CI, the sweep is skipped and says so.
+//! Unset outside CI, the sweep is skipped and says so. `O2W_MANIFEST` runs a
+//! different manifest file.
 //!
 //! Skeletons are fetched with `O2W_MODEL_FETCH_JOBS` threads (default 8; the
 //! Hub round trips dominate). Light entries then convert on a thread pool of
@@ -231,8 +232,15 @@ impl Sweep {
 
 #[test]
 fn manifest_models_convert_and_build() {
-    let manifest_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/models/manifest.json");
-    let manifest = std::fs::read_to_string(manifest_path).expect("read tests/models/manifest.json");
+    // O2W_MANIFEST points at another manifest (e.g. candidates under evaluation).
+    let manifest_path = std::env::var_os("O2W_MANIFEST")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/models/manifest.json")
+        });
+    let manifest = std::fs::read_to_string(&manifest_path)
+        .unwrap_or_else(|e| panic!("read {}: {e}", manifest_path.display()));
     let entries: Vec<Entry> = serde_json::from_str(&manifest).expect("parse manifest");
     let Some(source) = source() else {
         eprintln!("skipping model sweep: set O2W_MODELS=hub, dir=<path> or strip=<path>");

@@ -143,6 +143,17 @@ pub(crate) fn map_onnx_data_type(onnx_type: i32) -> Result<DataType, OnnxError> 
     if onnx_type == TensorProto_DataType::Bool as i32 {
         return Ok(DataType::Uint8);
     }
+    // WebNN has no float64; double tensors are lowered to float32.
+    if onnx_type == TensorProto_DataType::Double as i32 {
+        return Ok(DataType::Float32);
+    }
+    // Packed 4-bit tensors (ONNX 1.16+): UINT4 = 21, INT4 = 22.
+    if onnx_type == 21 {
+        return Ok(DataType::Uint4);
+    }
+    if onnx_type == 22 {
+        return Ok(DataType::Int4);
+    }
 
     let utils_dtype = utils_data_types::onnx_to_webnn(onnx_type)?;
     Ok(match utils_dtype {
@@ -548,6 +559,10 @@ impl OnnxConverter {
                                     DimensionValue::DimValue(v) => {
                                         if *v > 0 {
                                             resolved.push(Dimension::Static(*v as u32));
+                                        } else if let Some(v) =
+                                            effective_overrides.get(&format!("{}_dim{}", name, idx))
+                                        {
+                                            resolved.push(Dimension::Static(*v));
                                         } else if options.experimental_dynamic_inputs {
                                             resolved.push(Dimension::Dynamic(DynamicDimension {
                                                 name: format!("{}_dim{}", name, idx),
@@ -1364,11 +1379,16 @@ fn tensor_byte_len(tensor: &crate::protos::onnx::TensorProto) -> Option<usize> {
         {
             1
         }
+        // UINT4 / INT4: two elements per byte, handled below.
+        21 | 22 => 0,
         _ => return None,
     };
     let numel: usize = tensor.dims.iter().try_fold(1usize, |acc, &d| {
         usize::try_from(d).ok().and_then(|d| acc.checked_mul(d))
     })?;
+    if elem == 0 {
+        return Some(numel.div_ceil(2));
+    }
     numel.checked_mul(elem)
 }
 
@@ -1574,8 +1594,13 @@ fn inline_constant_ifs(model: &mut ModelProto, options: &ConvertOptions) {
             let dims: Option<Vec<i64>> = shape
                 .dim
                 .iter()
-                .map(|d| match d.value.as_ref() {
+                .enumerate()
+                .map(|(idx, d)| match d.value.as_ref() {
                     Some(DimensionValue::DimValue(v)) if *v > 0 => Some(*v),
+                    Some(DimensionValue::DimValue(_)) => options
+                        .free_dim_overrides
+                        .get(&format!("{}_dim{}", sanitize_identifier(&vi.name), idx))
+                        .map(|&v| v as i64),
                     Some(DimensionValue::DimParam(p)) => {
                         options.free_dim_overrides.get(p).map(|&v| v as i64)
                     }

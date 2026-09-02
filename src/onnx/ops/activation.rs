@@ -1008,27 +1008,25 @@ fn clip_bound(context: &ConversionContext, name: &str, which: &str) -> Result<f6
     })
 }
 
+/// First element of a (one-element) float, float16, bfloat16 or integer tensor.
 fn scalar_from_tensor(tensor: &TensorProto) -> Option<f64> {
-    if let Some(v) = tensor.float_data.first() {
-        return Some(*v as f64);
-    }
     if let Some(v) = tensor.double_data.first() {
         return Some(*v);
     }
-    if !tensor.raw_data.is_empty() {
-        return match tensor.data_type {
-            x if x == TensorProto_DataType::Float as i32 => tensor
-                .raw_data
-                .get(0..4)
-                .map(|b| f32::from_le_bytes(b.try_into().unwrap()) as f64),
-            x if x == TensorProto_DataType::Double as i32 => tensor
-                .raw_data
-                .get(0..8)
-                .map(|b| f64::from_le_bytes(b.try_into().unwrap())),
-            _ => None,
-        };
+    if let Ok(values) = crate::onnx::ops::matmul::decode_float_tensor_as_f32(tensor) {
+        if let Some(v) = values.first() {
+            return Some(f64::from(*v));
+        }
     }
-    None
+    if tensor.data_type == TensorProto_DataType::Double as i32 {
+        return tensor
+            .raw_data
+            .get(0..8)
+            .map(|b| f64::from_le_bytes(b.try_into().unwrap()));
+    }
+    crate::onnx::shape_inference::read_int_tensor(tensor)
+        .first()
+        .map(|&v| v as f64)
 }
 
 fn emit_unary(

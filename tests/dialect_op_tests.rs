@@ -244,6 +244,176 @@ fn cast_into_rms_norm_matches_ort() {
     assert_op_matches_ort(build_cast_into_rms_norm(), ExpectConvertOp::Success, 23);
 }
 
+/// OneHot with negative (wrapping) and out-of-range indices.
+fn build_one_hot(axis: i64) -> ModelProto {
+    use onnx2webnn::test_models::prelude::*;
+
+    let out_shape = if axis == 0 {
+        vec![4, 2, 3]
+    } else {
+        vec![2, 3, 4]
+    };
+    model(
+        17,
+        graph(
+            "test_OneHot_graph",
+            vec![],
+            vec![f32_output("y", &out_shape)],
+            vec![node(
+                "OneHot",
+                "one_hot",
+                &["idx", "depth", "values"],
+                &["y"],
+                &[attr_int("axis", axis)],
+            )],
+            vec![
+                i64_init("idx", &[2, 3], &[0, 1, 2, 3, -1, 5]),
+                i64_init("depth", &[], &[4]),
+                f32_init("values", &[2], &[0.0, 1.0]),
+            ],
+        ),
+    )
+}
+
+/// Split whose sizes arrive through the opset-13 `split` input.
+fn build_split_sizes_input() -> ModelProto {
+    use onnx2webnn::test_models::prelude::*;
+
+    model(
+        17,
+        graph(
+            "test_SplitSizes_graph",
+            vec![f32_input("x", &[2, 7])],
+            vec![f32_output("a", &[2, 3]), f32_output("b", &[2, 4])],
+            vec![node(
+                "Split",
+                "split",
+                &["x", "sizes"],
+                &["a", "b"],
+                &[attr_int("axis", 1)],
+            )],
+            vec![i64_init("sizes", &[2], &[3, 4])],
+        ),
+    )
+}
+
+/// Nearest-neighbour Resize of a rank-3 tensor along its last axis
+/// (timesformer's temporal position embeddings).
+fn build_resize_1d() -> ModelProto {
+    use onnx2webnn::test_models::prelude::*;
+
+    model(
+        17,
+        graph(
+            "test_Resize1d_graph",
+            vec![f32_input("x", &[1, 2, 8])],
+            vec![f32_output("y", &[1, 2, 16])],
+            vec![node(
+                "Resize",
+                "resize",
+                &["x", "", "", "sizes"],
+                &["y"],
+                &[
+                    attr_string("mode", "nearest"),
+                    attr_string("coordinate_transformation_mode", "asymmetric"),
+                    attr_string("nearest_mode", "floor"),
+                ],
+            )],
+            vec![i64_init("sizes", &[3], &[1, 2, 16])],
+        ),
+    )
+}
+
+/// float64 is lowered to float32: Cast(to=double) feeding IsInf (chronos).
+fn build_double_isinf() -> ModelProto {
+    use onnx2webnn::test_models::prelude::*;
+
+    model(
+        17,
+        graph(
+            "test_DoubleIsInf_graph",
+            vec![f32_input("x", &[2, 3])],
+            vec![bool_output("y", &[2, 3])],
+            vec![
+                node("Cast", "to_f64", &["x"], &["x64"], &[attr_int("to", 11)]),
+                node("IsInf", "isinf", &["x64"], &["y"], &[]),
+            ],
+            vec![],
+        ),
+    )
+}
+
+/// Zero-size intermediates (an empty Slice and a Reshape of it) have no WebNN
+/// operand; consumers drop them so the result equals the non-empty inputs.
+fn build_empty_intermediates() -> ModelProto {
+    use onnx2webnn::test_models::prelude::*;
+
+    model(
+        17,
+        graph(
+            "test_EmptyIntermediates_graph",
+            vec![f32_input("x", &[2, 4]), f32_input("z", &[3, 2])],
+            vec![f32_output("y1", &[2, 4]), f32_output("y2", &[3, 2])],
+            vec![
+                node(
+                    "Slice",
+                    "empty_slice",
+                    &["x", "starts", "ends", "axes"],
+                    &["e"],
+                    &[],
+                ),
+                node(
+                    "Concat",
+                    "cat1",
+                    &["x", "e"],
+                    &["y1"],
+                    &[attr_int("axis", 1)],
+                ),
+                node("Reshape", "reshape_empty", &["e", "shape"], &["r"], &[]),
+                node(
+                    "Concat",
+                    "cat2",
+                    &["z", "r"],
+                    &["y2"],
+                    &[attr_int("axis", 0)],
+                ),
+            ],
+            vec![
+                i64_init("starts", &[1], &[4]),
+                i64_init("ends", &[1], &[4]),
+                i64_init("axes", &[1], &[1]),
+                i64_init("shape", &[2], &[-1, 2]),
+            ],
+        ),
+    )
+}
+
+#[test]
+fn one_hot_matches_ort() {
+    assert_op_matches_ort(build_one_hot(-1), ExpectConvertOp::Success, 17);
+    assert_op_matches_ort(build_one_hot(0), ExpectConvertOp::Success, 17);
+}
+
+#[test]
+fn split_sizes_input_matches_ort() {
+    assert_op_matches_ort(build_split_sizes_input(), ExpectConvertOp::Success, 17);
+}
+
+#[test]
+fn resize_1d_matches_ort() {
+    assert_op_matches_ort(build_resize_1d(), ExpectConvertOp::Success, 17);
+}
+
+#[test]
+fn double_cast_isinf_matches_ort() {
+    assert_op_matches_ort(build_double_isinf(), ExpectConvertOp::Success, 17);
+}
+
+#[test]
+fn empty_intermediates_match_ort() {
+    assert_op_matches_ort(build_empty_intermediates(), ExpectConvertOp::Success, 17);
+}
+
 #[test]
 fn shape_start_end_matches_ort() {
     assert_op_matches_ort(build_shape_start_end(), ExpectConvertOp::Success, 17);
