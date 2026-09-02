@@ -975,10 +975,17 @@ impl ReshapeHandler {
                 }
             })
             .collect();
-        let axis = if let Some(rank) = context.input_rank(non_empty[0].as_str()) {
-            normalize_axis_best_effort(axis, rank)
-        } else {
-            axis
+        let rank = non_empty
+            .iter()
+            .find_map(|name| context.input_rank(name.as_str()));
+        let axis = match rank {
+            Some(rank) => normalize_axis_best_effort(axis, rank),
+            None if axis < 0 => {
+                return Err(OnnxError::InvalidShape(format!(
+                    "Concat '{output_name}' has negative axis {axis} but no input rank is known"
+                )));
+            }
+            None => axis,
         };
         let out = b
             .builder

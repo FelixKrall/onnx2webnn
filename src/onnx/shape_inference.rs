@@ -838,22 +838,32 @@ pub fn infer_node_output_shape(
                 .find(|a| a.name.as_str() == "axes")
                 .map(|a| a.ints.clone())
                 .unwrap_or_default();
-
+            if axes.is_empty() {
+                // Opset 13+: axes is the second input.
+                let axes_name = ins.get(1)?;
+                axes = read_int64_values_from_maps(axes_name.as_str(), initializers, const_values)?;
+            }
             if axes.is_empty() {
                 return None;
             }
 
-            axes.sort();
+            // Negative axes are relative to the output rank.
+            let out_rank = input_shape.len() as i64 + axes.len() as i64;
+            let mut normalized: Vec<i64> = axes
+                .iter()
+                .map(|&a| if a < 0 { a + out_rank } else { a })
+                .collect();
+            if normalized.iter().any(|&a| a < 0 || a >= out_rank) {
+                return None;
+            }
+            normalized.sort_unstable();
+            normalized.dedup();
+            if normalized.len() as i64 + input_shape.len() as i64 != out_rank {
+                return None;
+            }
             let mut output_shape = input_shape;
-            for axis in axes {
-                let idx = if axis < 0 {
-                    (output_shape.len() as i64 + axis + 1) as usize
-                } else {
-                    axis as usize
-                };
-                if idx <= output_shape.len() {
-                    output_shape.insert(idx, 1);
-                }
+            for axis in normalized {
+                output_shape.insert(axis as usize, 1);
             }
             Some(output_shape)
         }
@@ -936,24 +946,20 @@ pub fn infer_node_output_shape(
             if ins.len() != 3 {
                 return None;
             }
-            let scalar = |name: &str| {
-                read_int64_values_from_maps(name, initializers, const_values)
-                    .and_then(|values| values.first().copied())
-            };
+            // ONNX: number_of_elements = max(ceil((limit - start) / delta), 0).
+            // Computed in f64 so float ranges (dynamo `arange(0.5, n, 1.0)`) work.
+            let scalar = |name: &str| read_range_scalar_f64(name, initializers, const_values);
             let start = scalar(ins[0].as_str())?;
             let limit = scalar(ins[1].as_str())?;
             let delta = scalar(ins[2].as_str())?;
-            let len = if delta > 0 && start < limit {
-                (limit - start).checked_add(delta - 1)? / delta
-            } else if delta < 0 && start > limit {
-                let step = delta.checked_neg()?;
-                (start - limit).checked_add(step - 1)? / step
-            } else if delta == 0 {
+            if delta == 0.0 || !delta.is_finite() {
                 return None;
-            } else {
-                0
-            };
-            Some(vec![len])
+            }
+            let len = ((limit - start) / delta).ceil();
+            if !len.is_finite() {
+                return None;
+            }
+            Some(vec![if len > 0.0 { len as i64 } else { 0 }])
         }
 
         "Concat" => {
@@ -1477,6 +1483,88 @@ fn integral_float_tensor_as_i64(tensor: &TensorProto) -> Option<Vec<i64>> {
         return None;
     }
     Some(floats.into_iter().map(|v| v as i64).collect())
+}
+
+/// Scalar Range operand as i64: integer values from const/initializer maps,
+/// or an integral float initializer (dynamo emits float Range for arange).
+fn read_range_scalar(
+    name: &str,
+    initializers: &HashMap<String, &TensorProto>,
+    const_values: &HashMap<String, Vec<i64>>,
+) -> Option<i64> {
+    if let Some(values) = read_int64_values_from_maps(name, initializers, const_values) {
+        return values.first().copied();
+    }
+    integral_float_tensor_as_i64(initializers.get(name)?).and_then(|v| v.first().copied())
+}
+
+/// Scalar Range operand as f64 (any numeric initializer or folded constant),
+/// used for output-length inference only.
+fn read_range_scalar_f64(
+    name: &str,
+    initializers: &HashMap<String, &TensorProto>,
+    const_values: &HashMap<String, Vec<i64>>,
+) -> Option<f64> {
+    if let Some(values) = read_int64_values_from_maps(name, initializers, const_values) {
+        return values.first().map(|&v| v as f64);
+    }
+    let tensor = initializers.get(name)?;
+    if tensor.dims.as_slice().contains(&0) {
+        return None;
+    }
+    let raw = tensor.raw_data.as_slice();
+    let dtype = tensor.data_type;
+    if dtype == TensorProto_DataType::Float as i32 {
+        if raw.len() >= 4 {
+            return Some(f64::from(f32::from_le_bytes([
+                raw[0], raw[1], raw[2], raw[3],
+            ])));
+        }
+        return tensor.float_data.first().map(|&v| f64::from(v));
+    }
+    if dtype == TensorProto_DataType::Float16 as i32 {
+        if raw.len() >= 2 {
+            return Some(f64::from(
+                half::f16::from_bits(u16::from_le_bytes([raw[0], raw[1]])).to_f32(),
+            ));
+        }
+        return tensor
+            .int32_data
+            .first()
+            .map(|&v| f64::from(half::f16::from_bits(v as u16).to_f32()));
+    }
+    if dtype == TensorProto_DataType::Double as i32 {
+        if raw.len() >= 8 {
+            return Some(f64::from_le_bytes([
+                raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
+            ]));
+        }
+        return tensor.double_data.first().copied();
+    }
+    None
+}
+
+/// Element type of a value from the tracked types or its initializer.
+fn value_or_initializer_dtype(
+    name: &str,
+    value_types: &HashMap<String, DataType>,
+    initializers: &HashMap<String, &TensorProto>,
+) -> Option<DataType> {
+    if let Some(dtype) = value_types.get(name) {
+        return Some(*dtype);
+    }
+    let tensor = initializers.get(name)?;
+    match tensor.data_type {
+        x if x == TensorProto_DataType::Float as i32 => Some(DataType::Float32),
+        x if x == TensorProto_DataType::Float16 as i32 => Some(DataType::Float16),
+        x if x == TensorProto_DataType::Int32 as i32 => Some(DataType::Int32),
+        x if x == TensorProto_DataType::Int64 as i32 => Some(DataType::Int64),
+        x if x == TensorProto_DataType::Uint8 as i32 => Some(DataType::Uint8),
+        x if x == TensorProto_DataType::Int8 as i32 => Some(DataType::Int8),
+        x if x == TensorProto_DataType::Uint32 as i32 => Some(DataType::Uint32),
+        x if x == TensorProto_DataType::Bool as i32 => Some(DataType::Uint8),
+        _ => None,
+    }
 }
 
 /// Output element type of a GatherBlockQuantized node: the scales' float type.
@@ -2327,10 +2415,11 @@ fn value_shape_dims_for_input<'a>(
     None
 }
 
-/// Parse ConstantOfShape `value` attribute (default: int64 zero).
+/// Parse ConstantOfShape `value` attribute (default: float32 zero).
 fn constant_of_shape_fill(node: &NodeProto) -> (DataType, i64) {
-    let mut fill_value: i64 = 0;
-    let mut dtype = DataType::Int64;
+    // ONNX default when `value` is absent: float32 zero.
+    let mut fill_value: i64 = 0f32.to_bits() as i64;
+    let mut dtype = DataType::Float32;
     for attr in node.attribute.as_slice() {
         if attr.name.as_str() != "value" {
             continue;
@@ -2378,6 +2467,13 @@ fn fold_shape_constants(
 ) -> bool {
     let consts_before = const_values.len();
     let mut any_folded = false;
+    let initializers: HashMap<String, &TensorProto> = graph
+        .initializer
+        .as_slice()
+        .iter()
+        .map(|t| (t.name.to_string(), t))
+        .collect();
+    let initializers = &initializers;
 
     // Cascade Shape → Slice → Concat → Cast within one propagation pass.
     for _ in 0..16 {
@@ -2643,8 +2739,10 @@ fn fold_shape_constants(
                                     value_shape_dims.insert(out.clone(), out_dims);
                                 }
                             }
-                            const_values.insert(out.clone(), shape.clone());
-                            let inferred_shape = vec![shape.len() as i64];
+                            let (start, end) = shape_attr_range(node, shape.len());
+                            let sliced = shape[start..end].to_vec();
+                            const_values.insert(out.clone(), sliced.clone());
+                            let inferred_shape = vec![sliced.len() as i64];
                             // Force the correct shape - Shape operation computes exact output shape
                             value_shapes.insert(out.clone(), inferred_shape.clone());
                             value_shapes.insert(sanitize_identifier(&out), inferred_shape);
@@ -3049,19 +3147,12 @@ fn fold_shape_constants(
                         }
 
                         // Range(start, limit, delta) -> [start, start+delta, start+2*delta, ...]
-                        if let (Some(start_vals), Some(limit_vals), Some(delta_vals)) = (
-                            const_values.get(start_name),
-                            const_values.get(limit_name),
-                            const_values.get(delta_name),
+                        if let (Some(start), Some(limit), Some(delta)) = (
+                            read_range_scalar(start_name, initializers, const_values),
+                            read_range_scalar(limit_name, initializers, const_values),
+                            read_range_scalar(delta_name, initializers, const_values),
                         ) {
-                            if !start_vals.is_empty()
-                                && !limit_vals.is_empty()
-                                && !delta_vals.is_empty()
                             {
-                                let start = start_vals[0];
-                                let limit = limit_vals[0];
-                                let delta = delta_vals[0];
-
                                 let mut range_vals = Vec::new();
                                 if delta > 0 {
                                     let mut current = start;
@@ -3078,12 +3169,18 @@ fn fold_shape_constants(
                                 }
 
                                 if let Some(out) = node.output.as_slice().first() {
+                                    let dtype = value_or_initializer_dtype(
+                                        start_name,
+                                        value_types,
+                                        initializers,
+                                    )
+                                    .unwrap_or(DataType::Int64);
                                     const_values.insert(out.to_string(), range_vals.clone());
                                     let out_shape = vec![range_vals.len() as i64];
                                     // Force the correct shape - Range computes exact output shape
                                     value_shapes.insert(out.to_string(), out_shape.clone());
                                     value_shapes.insert(sanitize_identifier(out), out_shape);
-                                    value_types.insert(out.to_string(), DataType::Int64);
+                                    value_types.insert(out.to_string(), dtype);
                                 }
                             }
                         }
@@ -3603,6 +3700,23 @@ fn split_to_sequence_element_shapes(
             })
             .collect(),
     )
+}
+
+/// Apply ONNX `Shape` start/end attributes (dynamo exports slice shapes,
+/// e.g. `Shape(x, start=0, end=1)` for the batch dim).
+pub(crate) fn shape_attr_range(node: &NodeProto, rank: usize) -> (usize, usize) {
+    let rank_i = rank as i64;
+    let norm = |v: i64| -> usize { v.clamp(-rank_i, rank_i).rem_euclid(rank_i.max(1)) as usize };
+    let mut start = 0usize;
+    let mut end = rank;
+    for attr in node.attribute.as_slice() {
+        match attr.name.as_str() {
+            "start" => start = norm(attr.i),
+            "end" => end = if attr.i >= rank_i { rank } else { norm(attr.i) },
+            _ => {}
+        }
+    }
+    (start.min(rank), end.clamp(start.min(rank), rank))
 }
 
 /// ONNX RNN family output shapes: Y [seq, dirs, batch, hidden],
@@ -4220,6 +4334,91 @@ mod tests {
                 &[("start", vec![8]), ("limit", vec![1]), ("delta", vec![-3])]
             ),
             Some(vec![3])
+        );
+    }
+
+    #[test]
+    fn range_shape_handles_float_initializers() {
+        // dynamo: arange(0.5, 14.0, 1.0) -> 14 elements
+        let f32_scalar = |name: &str, v: f32| TensorProto {
+            name: name.to_string(),
+            data_type: TensorProto_DataType::Float as i32,
+            raw_data: v.to_le_bytes().to_vec(),
+            ..Default::default()
+        };
+        let start = f32_scalar("start", 0.5);
+        let delta = f32_scalar("delta", 1.0);
+        let initializers =
+            HashMap::from([("start".to_string(), &start), ("delta".to_string(), &delta)]);
+        let const_values = HashMap::from([("limit".to_string(), vec![14])]);
+        let node = shape_node("Range", &["start", "limit", "delta"]);
+        assert_eq!(
+            infer_node_output_shape(&node, &HashMap::new(), &initializers, &const_values),
+            Some(vec![14])
+        );
+    }
+
+    #[test]
+    fn shape_attr_range_slices_shape_vector() {
+        use crate::protos::onnx::AttributeProto;
+        let mut node = shape_node("Shape", &["input"]);
+        assert_eq!(shape_attr_range(&node, 4), (0, 4));
+        node.attribute = vec![
+            AttributeProto {
+                name: "start".to_string(),
+                i: 0,
+                ..Default::default()
+            },
+            AttributeProto {
+                name: "end".to_string(),
+                i: 1,
+                ..Default::default()
+            },
+        ];
+        assert_eq!(shape_attr_range(&node, 4), (0, 1));
+        node.attribute[0].i = -2;
+        node.attribute[1].i = 100;
+        assert_eq!(shape_attr_range(&node, 4), (2, 4));
+
+        // Folded Shape output honours the range.
+        let graph = GraphProto {
+            node: vec![node],
+            ..Default::default()
+        };
+        let mut value_shapes = HashMap::from([("input".to_string(), vec![1, 3, 224, 224])]);
+        let mut value_types = HashMap::new();
+        let mut const_values = HashMap::new();
+        let mut value_shape_dims = HashMap::new();
+        propagate_shapes_and_fold_constants(
+            &graph,
+            &HashMap::new(),
+            &mut value_shapes,
+            &mut value_types,
+            &mut const_values,
+            &mut value_shape_dims,
+            &PropagateOptions {
+                optimize: true,
+                experimental_dynamic_inputs: false,
+            },
+        );
+        assert_eq!(const_values.get("output"), Some(&vec![224, 224]));
+        assert_eq!(value_shapes.get("output"), Some(&vec![2]));
+    }
+
+    #[test]
+    fn unsqueeze_shape_reads_axes_input_with_negative_axes() {
+        let node = shape_node("Unsqueeze", &["input", "axes"]);
+        assert_eq!(
+            infer_test_node(&node, &[14, 14], &[("axes", vec![-1])]),
+            Some(vec![14, 14, 1])
+        );
+        assert_eq!(
+            infer_test_node(&node, &[14, 14], &[("axes", vec![0, -1])]),
+            Some(vec![1, 14, 14, 1])
+        );
+        assert_eq!(
+            infer_test_node(&node, &[14, 14], &[("axes", vec![5])]),
+            None
         );
     }
 

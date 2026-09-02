@@ -24,13 +24,15 @@ use crate::onnx::builder_helpers::{
     slice_sizes_from_i64, slice_with_params,
 };
 use crate::onnx::convert::{sanitize_identifier, OnnxError};
+use crate::onnx::ops::conv::lookup_shape;
 use crate::onnx::ops::{
     normalize_axis_best_effort, ConversionContext, ConversionResult, OpHandler,
 };
 use crate::protos::onnx::NodeProto;
 use half::f16;
 use rustnn::operator_options::{
-    MLDimension, MLDynamicDimension, MLGatherOptions, MLReverseOptions, MLTriangularOptions,
+    MLDimension, MLDynamicDimension, MLGatherOptions, MLReverseOptions, MLSliceOptions,
+    MLTriangularOptions,
 };
 use rustnn::DataType;
 
@@ -67,7 +69,7 @@ impl OpHandler for UtilityHandler {
         };
 
         match op_type {
-            "Shape" => self.convert_shape(node, &node_name, b),
+            "Shape" => self.convert_shape(node, &node_name, context, b),
             "Gather" => self.convert_gather(node, &node_name, context, b),
             "GatherBlockQuantized" => {
                 self.convert_gather_block_quantized(node, &node_name, context, b)
@@ -91,6 +93,7 @@ impl UtilityHandler {
         &self,
         node: &NodeProto,
         node_name: &str,
+        context: &ConversionContext,
         b: &mut OnnxBuilder<'_, '_, '_>,
     ) -> Result<ConversionResult, OnnxError> {
         let inputs = node.input.as_slice();
@@ -104,10 +107,38 @@ impl UtilityHandler {
         let output_name = output_label(node, node_name);
         let input = b.resolve_operand(&inputs[0])?;
         let opts = OnnxBuilder::labeled_options(&output_name);
-        let out = b
+        let mut out = b
             .builder
             .shape_with_options(input, opts)
             .map_err(map_op_error)?;
+        // Dynamo exports use Shape start/end attributes to slice the shape
+        // vector (e.g. Shape(x, start=0, end=1) for just the batch dim).
+        if let Some(rank) = lookup_shape(&inputs[0], context).map(|s| s.len()) {
+            let (start, end) = crate::onnx::shape_inference::shape_attr_range(node, rank);
+            if start != 0 || end != rank {
+                out = b
+                    .builder
+                    .slice_with_options(
+                        out,
+                        &[start as u32],
+                        &[MLDimension::Static((end - start) as u32)],
+                        MLSliceOptions {
+                            label: format!("{output_name}_range"),
+                            strides: Vec::new(),
+                        },
+                    )
+                    .map_err(map_op_error)?;
+            }
+        } else if node
+            .attribute
+            .as_slice()
+            .iter()
+            .any(|a| matches!(a.name.as_str(), "start" | "end"))
+        {
+            return Err(OnnxError::InvalidShape(format!(
+                "Shape node {node_name} has start/end attributes but input rank is unknown"
+            )));
+        }
         if let Some(output) = node.output.as_slice().first() {
             record_node_output(b, output, &output_name, out);
         }
@@ -586,9 +617,10 @@ impl UtilityHandler {
             }
         }
 
-        // Determine fill value and data type (default int64 zero)
-        let mut fill_value_i64: i64 = 0;
-        let mut dtype = DataType::Int64;
+        // Determine fill value and data type. ONNX defaults to float32 zero
+        // when the `value` attribute is absent.
+        let mut fill_value_i64: i64 = 0f32.to_bits() as i64;
+        let mut dtype = DataType::Float32;
         for attr in node.attribute.as_slice() {
             if attr.name.as_str() == "value" {
                 if let Some(t) = attr.t.as_ref() {
