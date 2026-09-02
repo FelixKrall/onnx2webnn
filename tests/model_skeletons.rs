@@ -18,9 +18,11 @@
 //!
 //! Unset outside CI, the sweep is skipped and says so.
 //!
-//! Light entries run on a thread pool (`O2W_MODEL_TEST_JOBS`, default 4).
-//! Entries marked `"heavy": true` (multi-GB weights, >10 GB peak RSS) run one
-//! at a time afterwards, or are skipped when `O2W_MODEL_TEST_SKIP_HEAVY` is set.
+//! Skeletons are fetched with `O2W_MODEL_FETCH_JOBS` threads (default 8; the
+//! Hub round trips dominate). Light entries then convert on a thread pool of
+//! `O2W_MODEL_TEST_JOBS` (default 4; conversions are memory-bound). Entries
+//! marked `"heavy": true` (multi-GB weights, >10 GB peak RSS) run one at a
+//! time afterwards, or are skipped when `O2W_MODEL_TEST_SKIP_HEAVY` is set.
 
 #[allow(dead_code)]
 mod common;
@@ -75,12 +77,12 @@ fn cache_dir() -> PathBuf {
         .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("target/model-skeletons"))
 }
 
-fn jobs() -> usize {
-    std::env::var("O2W_MODEL_TEST_JOBS")
+fn env_jobs(name: &str, default: usize) -> usize {
+    std::env::var(name)
         .ok()
         .and_then(|v| v.parse().ok())
         .filter(|&n| n > 0)
-        .unwrap_or(4)
+        .unwrap_or(default)
 }
 
 type Skeleton = Result<(Arc<Vec<u8>>, String), String>;
@@ -186,6 +188,28 @@ impl Sweep {
         }
     }
 
+    /// Build (or load from cache) the skeletons of `entries` with `workers`
+    /// threads; failures surface later when the entry converts.
+    fn prefetch(&self, entries: &[(usize, &Entry)], workers: usize) {
+        if matches!(self.source, Source::Dir(_)) {
+            return;
+        }
+        let mut files: Vec<&str> = entries.iter().map(|(_, e)| e.file.as_str()).collect();
+        files.sort_unstable();
+        files.dedup();
+        let queue = Mutex::new(files);
+        std::thread::scope(|scope| {
+            for _ in 0..workers {
+                scope.spawn(|| loop {
+                    let Some(file) = queue.lock().unwrap().pop() else {
+                        break;
+                    };
+                    let _ = self.skeleton(file);
+                });
+            }
+        });
+    }
+
     /// Run `entries` with at most `workers` conversions in flight.
     fn run(&self, entries: Vec<(usize, &Entry)>, workers: usize) {
         let queue = Mutex::new(entries);
@@ -225,7 +249,13 @@ fn manifest_models_convert_and_build() {
     let (heavy, light): (Vec<_>, Vec<_>) = entries.iter().enumerate().partition(|(_, e)| e.heavy);
 
     let started = std::time::Instant::now();
-    sweep.run(light, jobs());
+    let fetch_jobs = env_jobs("O2W_MODEL_FETCH_JOBS", 8);
+    sweep.prefetch(&light, fetch_jobs);
+    if !skip_heavy {
+        sweep.prefetch(&heavy, fetch_jobs);
+    }
+    let fetch_secs = started.elapsed().as_secs_f32();
+    sweep.run(light, env_jobs("O2W_MODEL_TEST_JOBS", 4));
     let light_secs = started.elapsed().as_secs_f32();
     if skip_heavy {
         eprintln!(
@@ -238,9 +268,10 @@ fn manifest_models_convert_and_build() {
 
     let failures = sweep.failures.into_inner().unwrap();
     eprintln!(
-        "model sweep: {} passed, {} failed; light phase {:.1} s, total {:.1} s",
+        "model sweep: {} passed, {} failed; fetch {:.1} s, light done at {:.1} s, total {:.1} s",
         sweep.passed.load(Ordering::Relaxed),
         failures.len(),
+        fetch_secs,
         light_secs,
         started.elapsed().as_secs_f32()
     );

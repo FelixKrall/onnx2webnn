@@ -74,9 +74,9 @@ that does not exist, which the converter zero-fills. A 1.4 GB export becomes a ~
 
 `O2W_MODELS` selects the source: `hub` (the default when `CI` is set), `dir=<path>` for full local
 downloads laid out as `<org>--<repo>/onnx/<file>.onnx`, or `strip=<path>` to run local files through
-the skeleton scanner. Unset outside CI, the sweep is skipped. `O2W_MODEL_TEST_JOBS` sets the
-parallelism (default 4) and `O2W_MODEL_TEST_SKIP_HEAVY` skips the entries that need more than 10 GB
-of RAM.
+the skeleton scanner. Unset outside CI, the sweep is skipped. `O2W_MODEL_FETCH_JOBS` (default 8) sets
+how many skeletons are fetched at once, `O2W_MODEL_TEST_JOBS` (default 4) how many convert at once,
+and `O2W_MODEL_TEST_SKIP_HEAVY` skips the entries that need more than 10 GB of RAM.
 
 ```powershell
 $env:O2W_MODELS = "dir=..\transformers_js_experiments\models"; cargo test --release --test model_skeletons
