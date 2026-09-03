@@ -152,6 +152,7 @@ impl Sweep {
             experimental_dynamic_inputs: false,
             pinned_inputs: entry.pin_inputs.clone(),
             zero_fill_missing_external_data: true,
+            output_path: None,
         };
         let started = std::time::Instant::now();
         let result = match &self.source {
