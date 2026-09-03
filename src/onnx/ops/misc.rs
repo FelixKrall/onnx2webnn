@@ -163,7 +163,7 @@ impl MiscHandler {
             axis as u32
         };
 
-        // cumulativeProduct via log → cumulativeSum → exp (fixture uses positive floats).
+        // cumulativeProduct via log -> cumulativeSum -> exp (fixture uses positive floats).
         let log_label = format!("{output_name}__log");
         let log_opts = OnnxBuilder::labeled_options(&log_label);
         let log_x = b

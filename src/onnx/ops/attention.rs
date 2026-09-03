@@ -5,17 +5,17 @@
 
 // com.microsoft.GroupQueryAttention decomposition.
 //
-// Lowered as reshape/transpose → concat with the KV cache → scaled q·kᵀ →
-// static causal mask → softmax → ·v, following the layout ORT uses:
-//   query [B, S, H·Dh], key/value [B, S, kvH·Dh], past_{key,value} [B, kvH, P, Dh].
+// Lowered as reshape/transpose -> concat with the KV cache -> scaled q*k^T ->
+// static causal mask -> softmax -> *v, following the layout ORT uses:
+//   query [B, S, H*Dh], key/value [B, S, kvH*Dh], past_{key,value} [B, kvH, P, Dh].
 //
 // The mask is a compile-time constant that allows key position j for query
-// row i iff j ≤ P + i. This assumes the KV cache is fully populated and the
+// row i iff j <= P + i. This assumes the KV cache is fully populated and the
 // batch is unpadded (`seqlens_k == P + S - 1`), which is how transformers.js
 // drives GQA for batch-1 web inference; the runtime `seqlens_k` /
 // `total_sequence_length` inputs are therefore ignored.
 //
-// Packed QKV (empty key/value inputs, query = [B, S, (H + 2·kvH)·Dh]) is
+// Packed QKV (empty key/value inputs, query = [B, S, (H + 2*kvH)*Dh]) is
 // split along the hidden axis first. With do_rotary=1 the cos/sin caches
 // (inputs 7/8, [max_seq, rotary_dim/2]) are applied to q and k at positions
 // P..P+S before attention. Rejected: softcap and local (sliding-window)
@@ -526,7 +526,7 @@ fn convert_group_query_attention(
     let key_heads = expand_heads(b, present_key, "key")?;
     let value_heads = expand_heads(b, present_value, "value")?;
 
-    // scores = (q * scale) @ kᵀ + causal_mask
+    // scores = (q * scale) @ k^T + causal_mask
     let scale_name = format!("{label}__scale");
     register_scalar(b, &scale_name, dtype, scale)?;
     let scale_op = b.resolve_operand(&scale_name)?;

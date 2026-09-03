@@ -676,7 +676,7 @@ impl ReshapeHandler {
         };
 
         if shape_values.iter().all(|&v| v == 1) {
-            // All-ones placeholders from Where(ConstantOfShape, …) are not reliable target shapes.
+            // All-ones placeholders from Where(ConstantOfShape, ...) are not reliable target shapes.
             shape_values.clear();
         }
 
@@ -952,7 +952,7 @@ impl ReshapeHandler {
 
         let output_name = output_label(node, node_name);
         // Zero-size operands (e.g. an empty Slice) contribute nothing to a
-        // concatenation and cannot be represented in WebNN — drop them.
+        // concatenation and cannot be represented in WebNN - drop them.
         let non_empty: Vec<&String> = inputs
             .iter()
             .filter(|name| !b.is_empty_optional(name))

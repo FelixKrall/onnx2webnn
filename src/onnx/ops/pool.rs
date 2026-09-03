@@ -528,7 +528,7 @@ impl PoolHandler {
         let input_raw = inputs[0].as_str();
         let input_shape = lookup_shape(input_raw, context).ok_or_else(|| {
             OnnxError::InvalidShape(format!(
-                "{}: input '{}' shape is unknown — required to determine spatial window size",
+                "{}: input '{}' shape is unknown - required to determine spatial window size",
                 op_label, input_raw
             ))
         })?;

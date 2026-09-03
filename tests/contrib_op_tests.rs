@@ -74,7 +74,7 @@ fn build_gqa() -> ModelProto {
     build_gqa_with(false, None)
 }
 
-/// `packed`: query carries Q, K and V ([B, S, (H + 2·kvH)·Dh]) and the key/value
+/// `packed`: query carries Q, K and V ([B, S, (H + 2*kvH)*Dh]) and the key/value
 /// inputs are empty. `rotary`: do_rotary=1 with cos/sin caches
 /// ([max_seq, Dh/2]) and the given `rotary_interleaved` flag.
 fn build_gqa_with(packed: bool, rotary: Option<bool>) -> ModelProto {
@@ -401,6 +401,15 @@ fn qmoe_swiglu_8bit_matches_ort() {
 /// GatherBlockQuantized: 4- or 8-bit table with explicit packed zero points,
 /// constant indices, gather_axis 0.
 fn build_gather_block_quantized(bits: i64) -> ModelProto {
+    build_gather_block_quantized_with(bits, &[3], &[0, 5, 2])
+}
+
+/// `indices_shape`/`indices` let the batched (rank-2) gather path be exercised.
+fn build_gather_block_quantized_with(
+    bits: i64,
+    indices_shape: &[i64],
+    indices: &[i64],
+) -> ModelProto {
     use onnx2webnn::test_models::prelude::*;
 
     let (rows, cols, block_size) = (8i64, 32i64, 16i64);
@@ -436,11 +445,11 @@ fn build_gather_block_quantized(bits: i64) -> ModelProto {
         graph(
             "test_GatherBlockQuantized_graph",
             vec![],
-            vec![f32_output("Y", &[3, cols])],
+            vec![f32_output("Y", &[indices_shape, &[cols]].concat())],
             vec![gbq],
             vec![
                 u8_init("data", &[rows, cols / per_byte], &data),
-                i64_init("indices", &[3], &[0, 5, 2]),
+                i64_init("indices", indices_shape, indices),
                 f32_init("scales", &[rows, blocks], &scales),
                 u8_init("zero_points", &[rows, blocks / per_byte.min(blocks)], &zp),
             ],
@@ -453,6 +462,15 @@ fn build_gather_block_quantized(bits: i64) -> ModelProto {
 fn gather_block_quantized_4bit_matches_ort() {
     assert_op_matches_ort(
         build_gather_block_quantized(4),
+        ExpectConvertOp::Success,
+        21,
+    );
+}
+
+#[test]
+fn gather_block_quantized_batched_indices_matches_ort() {
+    assert_op_matches_ort(
+        build_gather_block_quantized_with(4, &[2, 2], &[7, 0, 3, 3]),
         ExpectConvertOp::Success,
         21,
     );

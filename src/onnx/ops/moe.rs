@@ -10,7 +10,7 @@
 //
 //   1. routing: softmax over the top-k router logits per row. The top-k mask
 //      is built with k iterations of reduceMax + equal (+ suppression), so
-//      exact ties may momentarily select more than k experts — negligible in
+//      exact ties may momentarily select more than k experts - negligible in
 //      float and identical in expectation to ORT's first-hit tie-break.
 //   2. experts: X expanded to [E, R, H], batched matmul against the
 //      per-expert weights (stored [E, out, in], hence transposed on the last
@@ -19,8 +19,8 @@
 //
 // Activation support: fused interleaved SwiGLU (`swiglu_fusion=1`, the
 // gpt-oss export layout: [g0, l0, g1, l1, ...]) with ORT's clamp semantics
-//   gate = min(gate, limit); linear = clamp(linear, ±limit);
-//   out  = gate · sigmoid(alpha·gate) · (linear + beta)
+//   gate = min(gate, limit); linear = clamp(linear, +/-limit);
+//   out  = gate * sigmoid(alpha*gate) * (linear + beta)
 // plus plain relu/gelu/sigmoid. Rejected: fc3 (unfused gating), sparse
 // mixer, and other fusion layouts.
 //
@@ -89,7 +89,8 @@ fn ml_float(dtype: DataType) -> MLOperandDataType {
 
 /// Dequantize QMoE expert weights (uint8; 4-bit packs two values per byte,
 /// low nibble first; symmetric zero point `1 << (bits-1)`) with blockwise
-/// scales `[E, out, in/block_size]` into a float constant `[E, out, in]`.
+/// scales `[E, out, in/block_size]` through `dequantizeLinear`; expanded to a
+/// float constant only when the block layout cannot be expressed that way.
 #[allow(clippy::too_many_arguments)]
 fn dequantize_expert_weights(
     b: &mut OnnxBuilder<'_, '_, '_>,
@@ -139,16 +140,65 @@ fn dequantize_expert_weights(
     }
 
     let bytes = crate::onnx::builder::tensor_proto_to_bytes(w_tensor)?;
-    let scales = crate::onnx::ops::matmul::decode_float_tensor_as_f32(s_tensor)?;
     let (rows_total, packed_u, in_u, blocks_u) = (
         (experts * out_rows) as usize,
         packed as usize,
         in_cols as usize,
         blocks as usize,
     );
-    if bytes.len() < rows_total * packed_u || scales.len() < rows_total * blocks_u {
+    if bytes.len() < rows_total * packed_u {
         return Err(OnnxError::InvalidShape(format!(
-            "QMoE weight/scale payloads too small for [E={experts}, out={out_rows}, in={in_cols}]"
+            "QMoE weight payload too small for [E={experts}, out={out_rows}, in={in_cols}]"
+        )));
+    }
+
+    // Blockwise dequantizeLinear needs `in` divisible by the block count.
+    if in_cols % blocks == 0 {
+        let shape_u32 = [experts as u32, out_rows as u32, in_cols as u32];
+        let block_shape = [experts as u32, out_rows as u32, blocks as u32];
+        let (q_dtype, zp_byte, zp_len) = if bits == 4 {
+            (DataType::Uint4, 0x88u8, (rows_total * blocks_u).div_ceil(2))
+        } else {
+            (DataType::Uint8, 0x80u8, rows_total * blocks_u)
+        };
+        let q_name = format!("{const_name}__q");
+        b.register_constant_from_bytes(
+            &q_name,
+            q_dtype,
+            &shape_u32,
+            &bytes[..rows_total * packed_u],
+        )?;
+        let s_dtype = crate::onnx::convert::map_onnx_data_type(s_tensor.data_type)?;
+        let s_bytes = crate::onnx::builder::tensor_proto_to_bytes(s_tensor)?;
+        let s_name = format!("{const_name}__scales");
+        b.register_constant_from_bytes(&s_name, s_dtype, &block_shape, &s_bytes)?;
+        let zp_name = format!("{const_name}__zp");
+        b.register_constant_from_bytes(&zp_name, q_dtype, &block_shape, &vec![zp_byte; zp_len])?;
+        let q = b.resolve_operand(&q_name)?;
+        let s = b.resolve_operand(&s_name)?;
+        let zp = b.resolve_operand(&zp_name)?;
+        let mut weights = b
+            .builder
+            .dequantize_linear_with_zeropoint(q, s, zp)
+            .map_err(map_op_error)?;
+        if s_dtype != dtype {
+            weights = b
+                .builder
+                .cast_with_options(
+                    weights,
+                    crate::onnx::builder::map_ast_data_type(dtype)?,
+                    OnnxBuilder::labeled_options(&format!("{const_name}__cast")),
+                )
+                .map_err(map_op_error)?;
+        }
+        b.record_operand(&[const_name], weights);
+        return Ok((const_name.to_string(), vec![experts, out_rows, in_cols]));
+    }
+
+    let scales = crate::onnx::ops::matmul::decode_float_tensor_as_f32(s_tensor)?;
+    if scales.len() < rows_total * blocks_u {
+        return Err(OnnxError::InvalidShape(format!(
+            "QMoE scale payload too small for [E={experts}, out={out_rows}, in={in_cols}]"
         )));
     }
 

@@ -16,8 +16,8 @@
  * limitations under the License.
  */
 
-// Activation and unary math operators. Plain unary ops (Relu, Sqrt, Floor, …) plus parametric
-// activations (Elu, LeakyRelu, HardSigmoid), Clip → clamp, and PRelu (binary).
+// Activation and unary math operators. Plain unary ops (Relu, Sqrt, Floor, ...) plus parametric
+// activations (Elu, LeakyRelu, HardSigmoid), Clip -> clamp, and PRelu (binary).
 
 use crate::onnx::builder::{map_ast_data_type, map_op_error, OnnxBuilder};
 use crate::onnx::convert::{sanitize_identifier, OnnxError};
@@ -252,7 +252,7 @@ impl ActivationHandler {
         Ok(ConversionResult::default())
     }
 
-    /// Clip → `clamp`. Bounds come from `min`/`max` attributes (opset 6) or optional constant
+    /// Clip -> `clamp`. Bounds come from `min`/`max` attributes (opset 6) or optional constant
     /// inputs (opset 11+). Non-constant bound inputs are rejected as unsupported.
     fn convert_clip(
         &self,

@@ -569,7 +569,7 @@ impl ConvHandler {
             }
         } else {
             return Err(OnnxError::InvalidShape(format!(
-                "{}: cannot determine spatial rank — provide kernel_shape attribute or filter/input shape info",
+                "{}: cannot determine spatial rank - provide kernel_shape attribute or filter/input shape info",
                 op_label,
             )));
         };

@@ -216,6 +216,154 @@ impl MatMulHandler {
     /// always initializers, decoding them into a dense `[K, N]` float constant
     /// is exact. Note this trades the 4-bit weight footprint for full-precision
     /// constants in the WebNN graph.
+    /// MatMulBnb4 with the weight kept packed: unpack nibbles, look them up
+    /// in the codebook, scale per block, then matmul.
+    #[allow(clippy::too_many_arguments)]
+    fn convert_matmul_bnb4_packed(
+        &self,
+        node: &NodeProto,
+        node_name: &str,
+        context: &ConversionContext,
+        b: &mut OnnxBuilder<'_, '_, '_>,
+        packed: &[u8],
+        quant_map: &[f32; 16],
+        absmax: &[f32],
+        n: i64,
+        k: i64,
+        block_size: i64,
+    ) -> Result<ConversionResult, OnnxError> {
+        use crate::onnx::builder::map_ast_data_type;
+        use rustnn::operator_options::MLGatherOptions;
+
+        let label = output_label(node, node_name);
+        let a_name = node
+            .input
+            .as_slice()
+            .first()
+            .map(|s| s.as_str())
+            .unwrap_or("");
+        let dtype = context
+            .value_types
+            .get(a_name)
+            .copied()
+            .unwrap_or(DataType::Float32);
+        let total = (n * k) as usize;
+        let n_blocks = absmax.len() as i64;
+        let half = packed.len() as u32;
+
+        let const_bytes = |b: &mut OnnxBuilder<'_, '_, '_>,
+                           tag: &str,
+                           dt: DataType,
+                           shape: &[u32],
+                           bytes: &[u8]|
+         -> Result<MLOperand, OnnxError> {
+            let name = format!("{label}__{tag}");
+            b.register_constant_from_bytes(&name, dt, shape, bytes)?;
+            b.resolve_operand(&name)
+        };
+        let float_bytes = |values: &[f32]| -> Vec<u8> {
+            match dtype {
+                DataType::Float16 => values
+                    .iter()
+                    .flat_map(|&v| half::f16::from_f32(v).to_le_bytes())
+                    .collect(),
+                _ => bytemuck::cast_slice(values).to_vec(),
+            }
+        };
+
+        let blob = const_bytes(b, "blob", DataType::Uint8, &[half], packed)?;
+        let c16 = const_bytes(b, "c16", DataType::Int32, &[1], &16i32.to_le_bytes())?;
+        let codebook = const_bytes(b, "codebook", dtype, &[16], &float_bytes(quant_map))?;
+        let scales = const_bytes(
+            b,
+            "absmax",
+            dtype,
+            &[n_blocks as u32, 1],
+            &float_bytes(absmax),
+        )?;
+
+        let opts = |tag: &str| OnnxBuilder::labeled_options(&format!("{label}__{tag}"));
+        let x = b
+            .builder
+            .cast_with_options(blob, map_ast_data_type(DataType::Int32)?, opts("i32"))
+            .map_err(map_op_error)?;
+        let hi = b
+            .builder
+            .div_with_options(x, c16, opts("hi"))
+            .map_err(map_op_error)?;
+        let hi16 = b
+            .builder
+            .mul_with_options(hi, c16, opts("hi16"))
+            .map_err(map_op_error)?;
+        let lo = b
+            .builder
+            .sub_with_options(x, hi16, opts("lo"))
+            .map_err(map_op_error)?;
+        let column = i64_slice_to_mldim(&[i64::from(half), 1])?;
+        let hi = reshape_with_shape(b, hi, &format!("{label}__hi_col"), column.clone())?;
+        let lo = reshape_with_shape(b, lo, &format!("{label}__lo_col"), column)?;
+        // Element 2i is the high nibble, 2i+1 the low nibble.
+        let codes = b
+            .builder
+            .concat_with_options(&[hi, lo], 1, opts("codes"))
+            .map_err(map_op_error)?;
+        let codes = reshape_with_shape(
+            b,
+            codes,
+            &format!("{label}__codes_flat"),
+            i64_slice_to_mldim(&[total as i64])?,
+        )?;
+        let values = b
+            .builder
+            .gather_with_options(
+                codebook,
+                codes,
+                MLGatherOptions {
+                    label: format!("{label}__lookup"),
+                    axis: 0,
+                },
+            )
+            .map_err(map_op_error)?;
+        let blocked = reshape_with_shape(
+            b,
+            values,
+            &format!("{label}__blocked"),
+            i64_slice_to_mldim(&[n_blocks, block_size])?,
+        )?;
+        let scaled = b
+            .builder
+            .mul_with_options(blocked, scales, opts("scaled"))
+            .map_err(map_op_error)?;
+        let weights_nk = reshape_with_shape(
+            b,
+            scaled,
+            &format!("{label}__weights_nk"),
+            i64_slice_to_mldim(&[n, k])?,
+        )?;
+        let weights = b
+            .builder
+            .transpose_with_options(
+                weights_nk,
+                MLTransposeOptions {
+                    label: format!("{label}__weights_kn"),
+                    permutation: vec![1, 0],
+                },
+            )
+            .map_err(map_op_error)?;
+
+        let a = b.resolve_operand(a_name)?;
+        let out = b
+            .builder
+            .matmul_with_options(a, weights, OnnxBuilder::labeled_options(&label))
+            .map_err(map_op_error)?;
+        if let Some(onnx_out) = node.output.first().filter(|name| !name.is_empty()) {
+            record_node_output(b, onnx_out, &label, out);
+        } else {
+            b.record_operand(&[&label], out);
+        }
+        Ok(ConversionResult::default())
+    }
+
     fn convert_matmul_bnb4(
         &self,
         node: &NodeProto,
@@ -299,6 +447,22 @@ impl MatMulHandler {
                 "MatMulBnb4 absmax holds {} values, need {n_blocks}",
                 absmax.len()
             )));
+        }
+
+        // Dense fallback below only when the weight is not a whole number of blocks.
+        if total % block_size as usize == 0 {
+            return self.convert_matmul_bnb4_packed(
+                node,
+                node_name,
+                context,
+                b,
+                &packed[..total.div_ceil(2)],
+                quant_map,
+                &absmax[..n_blocks],
+                n,
+                k,
+                block_size,
+            );
         }
 
         // B is the flattened row-major [N, K] weight; emit it transposed as
@@ -487,11 +651,11 @@ impl MatMulHandler {
     }
 
     /// Lower `com.microsoft.MatMulNBits` the same way ORT's WebNN EP does:
-    /// `dequantizeLinear` → reshape `[N,K]` → transpose `[K,N]` → `matmul` (+ optional bias).
+    /// `dequantizeLinear` -> reshape `[N,K]` -> transpose `[K,N]` -> `matmul` (+ optional bias).
     ///
     /// Supported: bits=4, constant packed `B`, constant `scales`, optional constant
     /// zero_points, optional bias.
-    /// Rejected: bits≠4, `g_idx`, non-constant `B`/`scales`/`zero_points`.
+    /// Rejected: bits!=4, `g_idx`, non-constant `B`/`scales`/`zero_points`.
     fn convert_matmul_nbits(
         &self,
         node: &NodeProto,
@@ -528,7 +692,7 @@ impl MatMulHandler {
         }
         if k <= 0 || n <= 0 || block_size < 16 || !(block_size as u64).is_power_of_two() {
             return Err(OnnxError::InvalidShape(format!(
-                "MatMulNBits requires positive K/N and power-of-two block_size≥16, \
+                "MatMulNBits requires positive K/N and power-of-two block_size>=16, \
                  got K={k} N={n} block_size={block_size}"
             )));
         }

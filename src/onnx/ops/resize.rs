@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// ONNX Resize → WebNN resample2d (4-D NCHW, spatial axes [2, 3] for now).
+// ONNX Resize -> WebNN resample2d (4-D NCHW, spatial axes [2, 3] for now).
 
 use crate::onnx::builder::{map_op_error, OnnxBuilder};
 use crate::onnx::builder_helpers::{

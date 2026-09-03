@@ -168,7 +168,7 @@ pub(crate) fn map_onnx_data_type(onnx_type: i32) -> Result<DataType, OnnxError> 
     })
 }
 
-/// Conversion options for ONNX → MLGraphBuilder lowering + ORT validation.
+/// Conversion options for ONNX -> MLGraphBuilder lowering + ORT validation.
 #[derive(Debug, Clone, Default)]
 pub struct ConvertOptions {
     /// Override dynamic dimension values (e.g., batch_size=1, sequence_length=128)
@@ -325,8 +325,8 @@ fn prune_empty_graph_outputs(model: &mut ModelProto) {
     );
 }
 
-/// Drop nodes whose outputs nothing consumes, transitively — e.g. the
-/// shape-derived `Shape → Gather → Equal → Cast` condition chain left behind
+/// Drop nodes whose outputs nothing consumes, transitively - e.g. the
+/// shape-derived `Shape -> Gather -> Equal -> Cast` condition chain left behind
 /// after a constant `If` is inlined. Dead ops are not just waste: backends may
 /// reject them (CoreML fails to compile a scalar `equal` the graph never uses).
 /// ONNX nodes are pure, so removal is side-effect free.
@@ -334,7 +334,7 @@ fn prune_dead_nodes(graph: &mut crate::protos::onnx::GraphProto) {
     /// Names a subgraph reads from enclosing scopes: anything referenced by its
     /// nodes/outputs that the subgraph does not define itself. Locals of
     /// intermediate scopes are over-approximated as captures, which only
-    /// over-keeps — safe for pruning.
+    /// over-keeps - safe for pruning.
     fn collect_subgraph_captures(
         g: &crate::protos::onnx::GraphProto,
         needed: &mut HashSet<String>,
@@ -509,7 +509,7 @@ impl OnnxConverter {
         // **Custom / vendor domains later:** to support non-official ops (e.g.
         // `com.microsoft.FusedConv`), extend handlers to register on `(domain, op_type)` and
         // update this loop to use the same key. Until then, a custom-domain node whose `op_type`
-        // collides with an `ai.onnx` name may pass the pre-scan and be lowered incorrectly —
+        // collides with an `ai.onnx` name may pass the pre-scan and be lowered incorrectly -
         // domain-aware dispatch is required before enabling those graphs.
         {
             let registry = crate::onnx::ops::OpRegistry::new();
@@ -978,7 +978,7 @@ Provide --override-dim {}=<value> or enable --experimental-dynamic-inputs.",
                             }
                         }
                         // Without the dynamic-inputs feature, rustnn rejects graphs
-                        // containing Dynamic dimensions — keep only fully static
+                        // containing Dynamic dimensions - keep only fully static
                         // metadata so unresolved composite dim_params (e.g.
                         // "batch_size * sequence_length") never reach the builder.
                         let keep_dims = options.experimental_dynamic_inputs
@@ -1387,7 +1387,7 @@ Provide --override-dim {}=<value> or enable --experimental-dynamic-inputs.",
 /// Resolve `data_location = EXTERNAL` initializers by reading the referenced
 /// files (relative to the model) into `raw_data`. Hub exports split large
 /// weights across several chunk files (`model.onnx_data`, `model.onnx_data_1`,
-/// …); each tensor names its own `location`, so per-tensor reads handle the
+/// ...); each tensor names its own `location`, so per-tensor reads handle the
 /// chunking naturally. Files are read once and cached across tensors.
 /// Zero-fill every external tensor (graph and subgraphs) that still lacks
 /// data: the in-memory path of weight-stripped skeleton models.
@@ -2117,7 +2117,7 @@ mod pin_input_tests {
         use crate::protos::onnx::AttributeProto;
 
         // `captured` is produced at top level but consumed ONLY implicitly
-        // inside the If's branch bodies — it must survive pruning.
+        // inside the If's branch bodies - it must survive pruning.
         let branch = |tag: &str| {
             graph(
                 &format!("{tag}_g"),

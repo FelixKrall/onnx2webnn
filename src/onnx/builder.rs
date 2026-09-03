@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-//! ONNX → [`MLGraphBuilder`] bridge (operand map, naming, rustnn error mapping).
+//! ONNX -> [`MLGraphBuilder`] bridge (operand map, naming, rustnn error mapping).
 
 use crate::onnx::convert::{map_onnx_data_type, sanitize_identifier, OnnxError};
 use crate::protos::onnx::{TensorProto, TensorProto_DataType};
@@ -20,9 +20,9 @@ use std::collections::{HashMap, HashSet};
 pub struct OnnxBuilder<'a, 'ctx, 'bld> {
     pub builder: &'a mut MLGraphBuilder<'ctx, 'bld>,
     operands: HashMap<String, MLOperand>,
-    /// Operand ids registered via `input()` — cannot be passed directly to `build()`.
+    /// Operand ids registered via `input()` - cannot be passed directly to `build()`.
     input_operands: HashSet<u32>,
-    /// Operand ids registered via `constant()` — cannot be passed directly to `build()`.
+    /// Operand ids registered via `constant()` - cannot be passed directly to `build()`.
     constant_operands: HashSet<u32>,
     /// Sanitized + raw ONNX names registered as graph inputs.
     input_names: HashSet<String>,
@@ -159,7 +159,7 @@ impl<'a, 'ctx, 'bld> OnnxBuilder<'a, 'ctx, 'bld> {
 
     /// Resolve an ONNX graph output for `build()`.
     ///
-    /// WebNN rejects graph outputs that are still inputs or constants (see § 8.9.4 `build()`).
+    /// WebNN rejects graph outputs that are still inputs or constants (see section 8.9.4 `build()`).
     /// Insert `identity` only for those cases; regular op outputs already have graph-safe names.
     pub fn output_operand(&mut self, name: &str) -> Result<MLOperand, OnnxError> {
         let op = self.resolve_operand(name)?;

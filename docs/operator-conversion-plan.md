@@ -215,11 +215,11 @@ These appear in graphs but become constants or metadata during `--optimize` / co
 | MatMulNBits | uint4/uint8 reinterpret + dequantizeLinear + transpose + matmul | Implemented — bits=4/8; reject g_idx |
 | MatMulInteger | centered float `matmul` + `int32` cast (mirrors ConvInteger) | Implemented — scalar or 1-D zero points |
 | Einsum | reduceSum + transpose/reshape + batched `matmul` | Implemented — ≤2 inputs; reject ellipsis/diagonals |
-| MatMulBnb4 | conversion-time FP4/NF4 codebook dequantization → float constant + `matmul` | Implemented — trades 4-bit footprint for dense constants |
+| MatMulBnb4 | packed uint8 constant, nibbles unpacked with int32 div/sub, codebook `gather`, per-block absmax `mul`, `matmul` | Implemented; weight stays 4-bit in the graph, dense fallback when N*K is not a whole number of blocks |
 | GroupQueryAttention | reshape/transpose + KV-cache concat + scaled matmul + static causal mask + softmax | Implemented — unpadded batch assumption; reject packed QKV/do_rotary/softcap/local window |
 | MoE | dense expert evaluation (batched matmul) + iterative top-k mask + masked softmax blend | Implemented — fused interleaved swiglu/relu/gelu/sigmoid; reject fc3/sparse mixer; num_experts/k× FLOP overhead |
-| QMoE | conversion-time 4/8-bit blockwise dequantization → MoE lowering | Implemented — same restrictions as MoE |
-| GatherBlockQuantized | conversion-time 4/8-bit table dequantization → gather | Implemented — quantize_axis must be the last axis |
+| QMoE | uint4/uint8 expert constants with blockwise `dequantizeLinear`, then the MoE lowering | Implemented; same restrictions as MoE, dense fallback when `in` is not a whole number of blocks |
+| GatherBlockQuantized | `gather` packed rows, scales and zero points, unpack nibbles, `dequantizeLinear` on the gathered slice | Implemented; 2-D tables along axis 0 (uint8, INT4, UINT4), other layouts dequantize at conversion time |
 | SplitToSequence + SequenceAt | per-element slices registered as pseudo-operands, SequenceAt aliases by constant index | Implemented — torch split() export pattern; sequence graph outputs rejected |
 | If (constant condition) | branch inlined into the outer graph before conversion; a boolean graph input gate (optimum's `use_cache_branch`) becomes constant via `--pin-input` | Implemented — data-dependent conditions remain unsupported |
 | LSTM/GRU (direction=bidirectional/reverse) | WebNN native direction support + [dirs,...] bias split and Y layout | Implemented — LSTM initial_h/initial_c wired; sequence_lens/peephole rejected |

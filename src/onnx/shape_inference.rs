@@ -694,7 +694,7 @@ pub fn infer_node_output_shape(
                 .unwrap_or_else(|| (0..input_shape.len()).rev().collect());
 
             // A tracked shape whose rank disagrees with the permutation is a
-            // stale guess from partial propagation — refuse rather than panic.
+            // stale guess from partial propagation - refuse rather than panic.
             if perm.len() != input_shape.len() || perm.iter().any(|&i| i >= input_shape.len()) {
                 return None;
             }
@@ -1391,7 +1391,7 @@ pub fn infer_node_output_shape(
                     "VALID" if !transpose => (in_dim - dilated_k) / s + 1,
                     "VALID" if transpose => (in_dim - 1) * s + dilated_k,
                     _ => {
-                        // explicit pads (NOTSET) ΓÇö pads layout: [b1, b2, ..., bk, e1, e2, ..., ek]
+                        // explicit pads (NOTSET) - pads layout: [b1, b2, ..., bk, e1, e2, ..., ek]
                         let pad_begin = pads[i];
                         let pad_end = pads[i + spatial_rank];
                         if transpose {
@@ -1511,7 +1511,7 @@ pub fn infer_node_output_shape(
         }
 
         // Resize: when sizes/scales are known constants, output shape is computable.
-        // U-Net decoders (e.g. RMBG) chain Resize → Concat skip → Conv → Shape → Resize.
+        // U-Net decoders (e.g. RMBG) chain Resize -> Concat skip -> Conv -> Shape -> Resize.
         "Resize" => infer_resize_output_shape(node, value_shapes, initializers, const_values),
 
         _ => None,
@@ -2533,7 +2533,7 @@ fn constant_of_shape_fill(node: &NodeProto) -> (DataType, i64) {
     (dtype, fill_value)
 }
 
-/// Fold integer shape subgraphs (Shape/Gather/Concat/Range/Where/…).
+/// Fold integer shape subgraphs (Shape/Gather/Concat/Range/Where/...).
 fn fold_shape_constants(
     graph: &GraphProto,
     value_shapes: &mut HashMap<String, Vec<i64>>,
@@ -2552,7 +2552,7 @@ fn fold_shape_constants(
         .collect();
     let initializers = &initializers;
 
-    // Cascade Shape → Slice → Concat → Cast within one propagation pass.
+    // Cascade Shape -> Slice -> Concat -> Cast within one propagation pass.
     for _ in 0..16 {
         let pass_before = const_values.len();
 
@@ -3022,7 +3022,7 @@ fn fold_shape_constants(
                     }
                 }
             } else if op_type == "Cast" {
-                // Integer Cast is common in Resize sizes subgraphs (Gather/Concat → Cast → Concat).
+                // Integer Cast is common in Resize sizes subgraphs (Gather/Concat -> Cast -> Concat).
                 if let (Some(inp), Some(out)) = (
                     node.input.as_slice().first(),
                     node.output.as_slice().first(),
@@ -3869,7 +3869,7 @@ pub(crate) fn read_int_tensor(tensor: &TensorProto) -> Vec<i64> {
                 .map(|c| i64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
                 .collect(),
             // Never reinterpret non-integer payloads (float weights, bool
-            // masks were handled above) as packed i64 — it poisons folding.
+            // masks were handled above) as packed i64 - it poisons folding.
             _ => Vec::new(),
         }
     } else if !tensor.int64_data.as_slice().is_empty() {
@@ -4115,7 +4115,7 @@ pub fn propagate_shapes_and_fold_constants(
         // matmul/reshape resolution in decoder graphs that lost batch/seq dims.
         // Tensors whose rank the model declares (value_info/inputs/outputs) or
         // that are initializers keep their genuine 1-D shapes (e.g. a rotary
-        // Range output) — only speculatively-shaped values are upgraded.
+        // Range output) - only speculatively-shaped values are upgraded.
         if let Some(ids_shape) = value_shapes.get("input_ids") {
             if ids_shape.len() == 2 {
                 let declared_rank1: HashSet<&str> = graph
