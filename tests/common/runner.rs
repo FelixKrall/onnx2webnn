@@ -657,15 +657,35 @@ fn compare_outputs(
             assert_same_bool_values(&out.name, expected_bool, got);
             continue;
         }
+        if let Some(expected_int) = ort.int64_data.as_ref() {
+            // Integer semantics: any nonzero difference is a real bug; don't let
+            // the relative float tolerance absorb off-by-one at large magnitudes
+            // (its threshold reaches 1 once |expected| >= 1e6).
+            assert_eq!(
+                expected_int.len(),
+                got.len(),
+                "output length mismatch for {}",
+                out.name
+            );
+            for (i, (e, a)) in expected_int.iter().zip(got.iter()).enumerate() {
+                assert!(
+                    (a - a.round()).abs() < 1e-6,
+                    "output {}[{i}] not integral: {a}",
+                    out.name
+                );
+                assert_eq!(
+                    *e,
+                    a.round() as i64,
+                    "output {}[{i}] mismatch: ORT={e}, rustnn={a}",
+                    out.name
+                );
+            }
+            continue;
+        }
         let expected = ort
             .float32_data
             .as_ref()
             .map(|data| data.iter().map(|&v| f64::from(v)).collect::<Vec<_>>())
-            .or_else(|| {
-                ort.int64_data
-                    .as_ref()
-                    .map(|data| data.iter().map(|&v| v as f64).collect())
-            })
             .unwrap_or_else(|| ort.data.clone());
         let is_float16 = value_info_elem_type(out) == Some(TensorProto_DataType::Float16 as i32);
         assert_same_values(&out.name, &expected, got, is_float16);
@@ -708,9 +728,17 @@ fn assert_same_values(name: &str, expected: &[f64], actual: &[f64], is_float16: 
         }
         let rounded_e = (e * 1_000_000.0).round() / 1_000_000.0;
         let rounded_a = (a * 1_000_000.0).round() / 1_000_000.0;
-        let abs_tolerance = if is_float16 { 1e-2 } else { 1e-5 };
+        // Absolute floor for near-zero values plus a relative term so values of
+        // large magnitude tolerate backend rounding differences (CoreML's
+        // FMA/accumulation order differs from ORT's by a few float32 ULPs).
+        let (abs_tolerance, rel_tolerance) = if is_float16 {
+            (1e-2, 1e-3)
+        } else {
+            (1e-5, 1e-6)
+        };
+        let tolerance = abs_tolerance + rel_tolerance * e.abs();
         assert!(
-            (rounded_e - rounded_a).abs() <= abs_tolerance,
+            (rounded_e - rounded_a).abs() <= tolerance,
             "output {name}[{i}] mismatch: ORT={rounded_e}, rustnn={rounded_a}"
         );
     }

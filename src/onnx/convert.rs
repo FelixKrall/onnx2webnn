@@ -325,6 +325,82 @@ fn prune_empty_graph_outputs(model: &mut ModelProto) {
     );
 }
 
+/// Drop nodes whose outputs nothing consumes, transitively — e.g. the
+/// shape-derived `Shape → Gather → Equal → Cast` condition chain left behind
+/// after a constant `If` is inlined. Dead ops are not just waste: backends may
+/// reject them (CoreML fails to compile a scalar `equal` the graph never uses).
+/// ONNX nodes are pure, so removal is side-effect free.
+fn prune_dead_nodes(graph: &mut crate::protos::onnx::GraphProto) {
+    /// Names a subgraph reads from enclosing scopes: anything referenced by its
+    /// nodes/outputs that the subgraph does not define itself. Locals of
+    /// intermediate scopes are over-approximated as captures, which only
+    /// over-keeps — safe for pruning.
+    fn collect_subgraph_captures(
+        g: &crate::protos::onnx::GraphProto,
+        needed: &mut HashSet<String>,
+    ) {
+        let mut local: HashSet<&str> = g.input.iter().map(|vi| vi.name.as_str()).collect();
+        local.extend(g.initializer.iter().map(|t| t.name.as_str()));
+        for n in &g.node {
+            local.extend(n.output.iter().map(|s| s.as_str()));
+        }
+        for n in &g.node {
+            for i in &n.input {
+                if !i.is_empty() && !local.contains(i.as_str()) {
+                    needed.insert(i.clone());
+                }
+            }
+            for a in &n.attribute {
+                if let Some(sg) = a.g.as_ref() {
+                    collect_subgraph_captures(sg, needed);
+                }
+                for sg in &a.graphs {
+                    collect_subgraph_captures(sg, needed);
+                }
+            }
+        }
+        for o in &g.output {
+            if !local.contains(o.name.as_str()) {
+                needed.insert(o.name.clone());
+            }
+        }
+    }
+
+    let mut needed: HashSet<String> = graph.output.iter().map(|o| o.name.clone()).collect();
+    let mut kept = vec![false; graph.node.len()];
+    // Nodes are topologically sorted per the ONNX spec, so one reverse pass
+    // reaches every transitive producer.
+    for (idx, node) in graph.node.iter().enumerate().rev() {
+        if node.output.iter().any(|o| needed.contains(o)) {
+            kept[idx] = true;
+            needed.extend(node.input.iter().filter(|i| !i.is_empty()).cloned());
+            // Control-flow bodies (If/Loop/Scan) read outer values that never
+            // appear in node.input; keep their producers and initializers.
+            for a in &node.attribute {
+                if let Some(sg) = a.g.as_ref() {
+                    collect_subgraph_captures(sg, &mut needed);
+                }
+                for sg in &a.graphs {
+                    collect_subgraph_captures(sg, &mut needed);
+                }
+            }
+        }
+    }
+    if kept.iter().all(|&k| k) {
+        return;
+    }
+    let dropped = kept.iter().filter(|&&k| !k).count();
+    let mut it = kept.iter();
+    graph.node.retain(|_| *it.next().unwrap());
+    // Drop initializers only dead nodes referenced; keep any that double as
+    // graph inputs (older opsets) so declared feeds stay well-formed.
+    let input_names: HashSet<&str> = graph.input.iter().map(|vi| vi.name.as_str()).collect();
+    graph
+        .initializer
+        .retain(|t| needed.contains(&t.name) || input_names.contains(t.name.as_str()));
+    crate::debug_println!("[if-inline] pruned {dropped} dead node(s)");
+}
+
 /// Drop graph inputs no node consumes (e.g. the KV cache of an inlined
 /// no-cache branch). Inputs wired straight to a graph output are kept.
 fn prune_unused_graph_inputs(model: &mut ModelProto) {
@@ -1766,6 +1842,8 @@ fn inline_constant_ifs(model: &mut ModelProto, options: &ConvertOptions) {
         if let Some(g) = model.graph.as_mut() {
             g.node = new_nodes;
             g.initializer.extend(new_initializers);
+            // Drop the now-dead condition chain the splice orphaned.
+            prune_dead_nodes(g);
         }
     }
 }
@@ -1989,6 +2067,105 @@ mod pin_input_tests {
         }
         let pinned = HashMap::from([("ids".to_string(), 7i64)]);
         assert!(pin_graph_inputs(&mut m, &pinned).is_err());
+    }
+
+    #[test]
+    fn prune_dead_nodes_drops_dead_chain_and_keeps_input_initializers() {
+        use crate::onnx::test_models::prelude::*;
+        let mut m = model(
+            17,
+            graph(
+                "prune_dead",
+                vec![f32_input("x", &[2, 3]), i64_input("kept_in", &[1])],
+                vec![f32_output("y", &[2, 3])],
+                vec![
+                    node("Add", "live", &["x", "x"], &["y"], &[]),
+                    // Dead chain: nothing consumes `cond`.
+                    node("Shape", "shape", &["x"], &["xs"], &[]),
+                    node(
+                        "Gather",
+                        "gather",
+                        &["xs", "idx"],
+                        &["d0"],
+                        &[attr_int("axis", 0)],
+                    ),
+                    node("Equal", "eq", &["d0", "two"], &["cond"], &[]),
+                ],
+                vec![
+                    i64_init("idx", &[], &[0]),
+                    i64_init("two", &[], &[2]),
+                    // Doubles as a graph input; must survive even though only
+                    // dead nodes referenced it.
+                    i64_init("kept_in", &[1], &[5]),
+                ],
+            ),
+        );
+        prune_dead_nodes(m.graph.as_mut().unwrap());
+        let g = m.graph.as_ref().unwrap();
+        let names: Vec<&str> = g.node.iter().map(|n| n.name.as_str()).collect();
+        assert_eq!(names, vec!["live"]);
+        assert!(g
+            .initializer
+            .iter()
+            .all(|t| t.name != "idx" && t.name != "two"));
+        assert!(g.initializer.iter().any(|t| t.name == "kept_in"));
+    }
+
+    #[test]
+    fn prune_dead_nodes_keeps_producers_captured_by_if_subgraphs() {
+        use crate::onnx::test_models::prelude::*;
+        use crate::protos::onnx::AttributeProto;
+
+        // `captured` is produced at top level but consumed ONLY implicitly
+        // inside the If's branch bodies — it must survive pruning.
+        let branch = |tag: &str| {
+            graph(
+                &format!("{tag}_g"),
+                vec![],
+                vec![f32_output("branch_out", &[2, 3])],
+                vec![node(
+                    "Identity",
+                    &format!("{tag}_id"),
+                    &["captured"],
+                    &["branch_out"],
+                    &[],
+                )],
+                vec![],
+            )
+        };
+        let mut if_node = node("If", "test_if", &["cond"], &["y"], &[]);
+        for (name, g) in [
+            ("then_branch", branch("then")),
+            ("else_branch", branch("else")),
+        ] {
+            if_node.attribute.push(AttributeProto {
+                name: name.to_string(),
+                r#type: 5, // GRAPH
+                g: Some(g),
+                ..Default::default()
+            });
+        }
+        let mut m = model(
+            17,
+            graph(
+                "prune_captures",
+                vec![f32_input("x", &[2, 3]), bool_input("cond", &[])],
+                vec![f32_output("y", &[2, 3])],
+                vec![
+                    node("Add", "capture_producer", &["x", "x"], &["captured"], &[]),
+                    if_node,
+                ],
+                vec![],
+            ),
+        );
+        prune_dead_nodes(m.graph.as_mut().unwrap());
+        let g = m.graph.as_ref().unwrap();
+        let names: Vec<&str> = g.node.iter().map(|n| n.name.as_str()).collect();
+        assert!(
+            names.contains(&"capture_producer"),
+            "producer consumed only inside If branches was pruned: {names:?}"
+        );
+        assert!(names.contains(&"test_if"));
     }
 
     #[test]

@@ -7,17 +7,21 @@ on:
     branches: [main, transformers]
 
 env:
-  # Keep in sync with the `ort` crate version pinned by rustnn.
+  # ONNX Runtime dylib for the reference backend. rustnn pins ort 2.0.0-rc.13
+  # with the `api-27` feature, so this must be >= 1.27 (any newer 1.x works).
   ORT_VERSION: 1.29.0
-  # rustnn checkout. Pinned to the fork branch carrying the ONNX exporter
-  # fixes (Squeeze axes, f16 casts, bidirectional LSTM/GRU) until they land
-  # upstream; then switch back to rustnn/rustnn @ main.
+  # rustnn checkout. Pinned to the fork branch carrying (a) the ONNX exporter
+  # fixes (Squeeze axes, f16 casts, bidirectional LSTM/GRU) and (b) the CoreML
+  # fixes the macOS --release + --features coreml job requires (ARC
+  # __bridge_retained ownership in compile/load/predict, converter gaps).
+  # Do not switch back to rustnn/rustnn @ main until BOTH have landed upstream
+  # (rustnn/rustnn#219).
   RUSTNN_REPO: mklimenko-nv/rustnn
   RUSTNN_REF: private/mklimenko/onnx2webnn-fixes
 
 jobs:
   test:
-    name: Build & Test (${{ matrix.os }}${{ matrix.cargo_flags && ', coreml' || '' }}${{ matrix.profile == '' && ', debug' || '' }})
+    name: Build & Test (${{ matrix.os }}${{ matrix.cargo_flags && ', coreml' || '' }})
     runs-on: ${{ matrix.os }}
     # The CoreML job dispatches every integration test through Apple's CoreML
     # backend; op coverage there may lag the ORT backend, so it reports
@@ -32,12 +36,10 @@ jobs:
             ort_archive: onnxruntime-linux-x64
             ort_ext: tgz
             ort_dylib: lib/libonnxruntime.so
-            profile: --release
           - os: windows-latest
             ort_archive: onnxruntime-win-x64
             ort_ext: zip
             ort_dylib: lib/onnxruntime.dll
-            profile: --release
           - os: macos-latest
             ort_archive: onnxruntime-osx-arm64
             ort_ext: tgz
@@ -45,10 +47,6 @@ jobs:
             # rustnn selects the CoreML backend automatically on macOS when
             # the feature is compiled in (ORT still serves as the reference).
             cargo_flags: --features coreml
-            # Debug profile until rustnn/rustnn#216 lands: optimized builds
-            # crash in MLContext::dispatch() on CoreML (provider ownership in
-            # the Objective-C shim). Switch to --release afterwards.
-            profile: ""
             experimental: true
     defaults:
       run:
@@ -117,7 +115,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Build
-        run: cargo build ${{ matrix.profile }} --locked ${{ matrix.cargo_flags }}
+        run: cargo build --release --locked ${{ matrix.cargo_flags }}
 
       # tests/model_skeletons.rs converts the transformers.js exports in
       # tests/models/manifest.json. With CI set it builds weight-stripped
@@ -139,4 +137,4 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           O2W_MODEL_TEST_JOBS: 2
           O2W_MODEL_TEST_SKIP_HEAVY: 1
-        run: cargo test ${{ matrix.profile }} --locked ${{ matrix.cargo_flags }}
+        run: cargo test --release --locked ${{ matrix.cargo_flags }}
