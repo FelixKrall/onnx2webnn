@@ -33,36 +33,15 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use common::manifest::{load_manifest, Entry};
 use common::skeleton::{strip_model, FileSource, HubSource, KEEP_BYTES};
 use onnx2webnn::protos::onnx::ModelProto;
 use onnx2webnn::{convert_model_proto, convert_onnx, ConvertOptions};
 use prost::Message;
-use serde::Deserialize;
 
 /// Large models recurse deeply in shape inference; the default 2 MB thread
 /// stack is not enough.
 const WORKER_STACK_BYTES: usize = 256 << 20;
-
-#[derive(Deserialize)]
-struct Entry {
-    file: String,
-    #[serde(default)]
-    heavy: bool,
-    /// Reason this model cannot build on the CoreML backend (e.g. a hard
-    /// backend limit like max tensor rank 5). Skipped when built with
-    /// `--features coreml`; still exercised on the ORT backend.
-    #[serde(default)]
-    coreml_unsupported: Option<String>,
-    /// Reason this model, while it does build on CoreML, takes so long there
-    /// that it would dominate the sweep (e.g. pathological Espresso compile
-    /// times). Skipped like `coreml_unsupported`.
-    #[serde(default)]
-    coreml_slow: Option<String>,
-    #[serde(default)]
-    override_dims: HashMap<String, u32>,
-    #[serde(default)]
-    pin_inputs: HashMap<String, i64>,
-}
 
 enum Source {
     Hub,
@@ -152,10 +131,7 @@ impl Sweep {
     }
 
     fn convert(&self, idx: usize, entry: &Entry) {
-        let label = format!(
-            "#{idx} {} dims={:?} pins={:?}",
-            entry.file, entry.override_dims, entry.pin_inputs
-        );
+        let label = entry.label(idx);
         let options = ConvertOptions {
             free_dim_overrides: entry.override_dims.clone(),
             optimize: true,
@@ -245,16 +221,7 @@ impl Sweep {
 fn manifest_models_convert_and_build() {
     // Backend build errors are only visible through `log` (RUST_LOG=error).
     let _ = pretty_env_logger::try_init();
-    // O2W_MANIFEST points at another manifest (e.g. candidates under evaluation).
-    let manifest_path = std::env::var_os("O2W_MANIFEST")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/models/manifest.json")
-        });
-    let manifest = std::fs::read_to_string(&manifest_path)
-        .unwrap_or_else(|e| panic!("read {}: {e}", manifest_path.display()));
-    let entries: Vec<Entry> = serde_json::from_str(&manifest).expect("parse manifest");
+    let entries = load_manifest().unwrap_or_else(|error| panic!("{error}"));
     let Some(source) = source() else {
         eprintln!("skipping model sweep: set O2W_MODELS=hub, dir=<path> or strip=<path>");
         return;
