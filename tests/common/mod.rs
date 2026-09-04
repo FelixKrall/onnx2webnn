@@ -5,6 +5,8 @@
 
 //! Shared helpers for ONNX op conversion integration tests.
 
+pub mod full_model;
+pub mod manifest;
 mod runner;
 pub mod skeleton;
 
