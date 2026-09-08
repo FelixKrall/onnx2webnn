@@ -712,10 +712,6 @@ Provide --override-dim {}=<value> or enable --experimental-dynamic-inputs.",
                         )));
                     };
 
-                    if shape.is_empty() {
-                        continue;
-                    }
-
                     b.register_input(&raw_name, data_type, &shape)?;
 
                     value_name_map.insert(raw_name.clone(), name.clone());
