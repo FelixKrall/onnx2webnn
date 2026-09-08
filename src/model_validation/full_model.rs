@@ -7,7 +7,7 @@
 
 #![allow(dead_code)]
 
-use onnx2webnn::protos::onnx::{GraphProto, ModelProto};
+use crate::protos::onnx::{GraphProto, ModelProto};
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -280,7 +280,7 @@ fn external_locations(model: &ModelProto) -> Result<Vec<PathBuf>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use onnx2webnn::protos::onnx::{StringStringEntryProto, TensorProto};
+    use crate::protos::onnx::{StringStringEntryProto, TensorProto};
 
     #[test]
     fn rejects_external_paths_that_escape_the_model_directory() {

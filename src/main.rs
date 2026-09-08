@@ -20,6 +20,8 @@ use clap::{Parser, Subcommand};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use onnx2webnn::model_validation::manifest::Selection;
+use onnx2webnn::model_validation::{run_manifest_validation, RunOptions, WeightMode};
 use onnx2webnn::ConvertOptions;
 use onnx2webnn::{cache_onnx_model, convert_onnx, validate_cached_model_with_overrides};
 
@@ -83,6 +85,25 @@ enum Command {
         /// Validate existing cache artifacts only; does not read or convert the source ONNX.
         #[arg(long, conflicts_with_all = ["validate", "output"])]
         validate_cached: bool,
+    },
+
+    /// Numerically validate manifest models against reloaded WebNN artifacts
+    ValidateModels {
+        /// Manifest selection: smoke, extended, all, or match=<text>
+        #[arg(long, default_value = "smoke")]
+        selection: String,
+
+        /// Use publisher weights or deterministic generated replacements
+        #[arg(long, default_value_t = WeightMode::Real)]
+        weights: WeightMode,
+
+        /// Override tests/models/manifest.json
+        #[arg(long)]
+        manifest: Option<PathBuf>,
+
+        /// Number of parallel light-model workers; heavy models remain sequential
+        #[arg(long, default_value_t = 1)]
+        jobs: usize,
     },
 }
 
@@ -240,6 +261,24 @@ fn main() -> anyhow::Result<()> {
                     );
                 }
             }
+        }
+        Command::ValidateModels {
+            selection,
+            weights,
+            manifest,
+            jobs,
+        } => {
+            let selection = Selection::parse(&selection).map_err(anyhow::Error::msg)?;
+            let mut options = RunOptions::new(selection, weights);
+            options.jobs = jobs;
+            if let Some(manifest) = manifest {
+                options.manifest = manifest;
+            }
+            let summary = run_manifest_validation(options).map_err(anyhow::Error::msg)?;
+            println!(
+                "✓ {} of {} selected models passed ({weights} weights)",
+                summary.passed, summary.selected
+            );
         }
     }
 
