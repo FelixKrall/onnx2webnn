@@ -63,7 +63,7 @@ impl Selection {
                 Ok(Self::Match(value["match=".len()..].to_string()))
             }
             _ => Err(format!(
-                "O2W_MODEL_VALIDATION={value}: expected smoke, extended, all, or match=<text>"
+                "invalid selection {value:?}: expected smoke, extended, all, or match=<text>"
             )),
         }
     }
@@ -128,12 +128,14 @@ pub fn manifest_path() -> PathBuf {
 }
 
 pub fn load_manifest() -> Result<Vec<Entry>, String> {
-    let path = manifest_path();
-    let text =
-        std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
-    parse_manifest(&text).map_err(|e| format!("parse {}: {e}", path.display()))
+    load_manifest_from(&manifest_path())
 }
 
+pub fn load_manifest_from(path: &Path) -> Result<Vec<Entry>, String> {
+    let text =
+        std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    parse_manifest(&text).map_err(|e| format!("parse {}: {e}", path.display()))
+}
 pub fn parse_manifest(text: &str) -> Result<Vec<Entry>, String> {
     let entries: Vec<Entry> = serde_json::from_str(text).map_err(|e| e.to_string())?;
     for (index, entry) in entries.iter().enumerate() {

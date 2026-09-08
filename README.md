@@ -10,6 +10,28 @@ Supported ONNX opset range: **1–26** (see `MIN_SUPPORTED_OPSET` / `MAX_SUPPORT
 
 ## Build
 
+### Prerequisites
+
+- A stable Rust toolchain.
+- The Protocol Buffers compiler (`protoc`). On Debian/Ubuntu install
+  `protobuf-compiler`; on macOS install `protobuf` with Homebrew. Cargo uses it
+  while building the ONNX and CoreML protobuf bindings.
+- A sibling `rustnn` checkout at `../rustnn`. This is the path dependency used
+  by `Cargo.toml` while the stacked RustNN changes are under review.
+- ONNX Runtime 1.27 or newer when running conversions or tests with the ORT
+  backend. RustNN can download the pinned version into its own ignored
+  `target/onnxruntime` directory:
+
+```powershell
+make -C ../rustnn onnxruntime-download
+```
+
+Set `ORT_DYLIB_PATH` to the downloaded `libonnxruntime` shared library before
+running the CLI or tests. The exact filename is platform-specific; examples
+are `libonnxruntime.so.1.29.0` on Linux, `libonnxruntime.1.29.0.dylib` on macOS,
+and `onnxruntime.dll` on Windows. The CI workflow in `.github/workflows/ci.yml`
+contains the complete cross-platform provisioning sequence.
+
 ```powershell
 cargo build
 # or

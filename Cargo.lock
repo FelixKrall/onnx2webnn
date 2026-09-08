@@ -1413,6 +1413,7 @@ dependencies = [
  "rustnn",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 1.0.69",
  "ureq 2.12.1",
