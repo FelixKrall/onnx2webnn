@@ -40,6 +40,7 @@ pub struct ValidationConfig {
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ValidationTier {
+    Untriaged,
     Smoke,
     Extended,
     Blocked,
@@ -181,6 +182,12 @@ mod tests {
         extended.validation.as_mut().unwrap().tier = ValidationTier::Extended;
         assert!(!Selection::Smoke.includes(0, &extended));
         assert!(Selection::Extended.includes(0, &extended));
+
+        let mut untriaged = smoke.clone();
+        untriaged.validation.as_mut().unwrap().tier = ValidationTier::Untriaged;
+        assert!(!Selection::Smoke.includes(0, &untriaged));
+        assert!(!Selection::Extended.includes(0, &untriaged));
+        assert!(Selection::All.includes(0, &untriaged));
     }
 
     #[test]
