@@ -1,8 +1,149 @@
 # Full-model numerical validation status
 
-This document tracks full-model numerical validation independently from the skeleton sweep. The skeleton manifest contains 63 cases that construct an ORT-backed graph successfully; this validation additionally exports the converted graph, reloads its `.webnn` and Safetensors artifacts, executes both the original ONNX model and the reloaded graph on CPU ORT, and compares their outputs.
+This document tracks full-model numerical validation independently from the skeleton sweep. The skeleton manifest contains cases that construct an ORT-backed graph successfully; this validation additionally exports the converted graph, reloads its `.webnn` and Safetensors artifacts, executes both the original ONNX model and the reloaded graph on CPU ORT, and compares their outputs.
 
-## Baseline
+## Current post-rebase baseline
+
+- Sweep date: 2026-09-09
+- onnx2webnn: `e5a5f88c` on `fkrall/cache-backed-validation`
+- rustnn: `2783a191` on `fkrall/executable-webnn-reload`
+- ORT: repository-local Linux x64 1.29.0 build
+- Manifest: `tests/models/manifest.json` (52 cases, 45 unique ONNX files)
+- Execution: one validation worker; ORT may use multiple CPU threads inside a case
+
+The same `validate-models --selection all --jobs 1` command shown in the historical baseline below was used for both `--weights generated` and `--weights real`.
+
+### Current summary
+
+| Weight mode | Pass | Functional fail | Download skipped | Result |
+| --- | ---: | ---: | ---: | --- |
+| Generated (`g4`) | 7 | 45 | 0 | Complete (52/52) |
+| Real | 6 | 45 | 1 | Functional results for all cache-complete cases (51/52) |
+
+Every case that reached output comparison passed. There were no numerical mismatches. The generated-only pass is Voxtral `embed_tokens_fp16.onnx`; its real external-data sidecar repeatedly timed out while reading the HTTP response, so the real result is unknown rather than failed.
+
+The six passes in both modes are:
+
+- FastVLM `embed_tokens_quantized.onnx`
+- Janus `lm_head.onnx`
+- Janus `gen_head.onnx`
+- Janus `gen_img_embeds.onnx`
+- Qwen2.5-VL `embed_tokens_quantized.onnx`
+- Tiny RoFormer `model.onnx`
+
+Voxtral `embed_tokens_fp16.onnx` additionally passes with generated weights.
+
+### Rebase comparison
+
+The preceding manifest had 63 cases. The rebased manifest has 52: 21 exact cases were retained, 31 were added, and 42 were removed. Identity includes the file, sorted dimension overrides, and pinned inputs. All 21 retained cases preserved their generated and real pass/fail status and first-blocker family. Therefore the change from 6/63 generated and 7/63 real passes to 7/52 generated and 6/51 evaluated real cases reflects manifest replacement and the skipped download, not a regression in retained cases.
+
+Generated and real weights expose different first blockers in eleven functional cases: generated-model safeguards reject unused or ambiguous initializers before conversion, while real weights proceed to zero-sized-input or reload blockers. This remains a reachability difference; it did not produce a numerical mismatch.
+
+### Cached timing and storage
+
+| Run | Cases | Wall time | User + system CPU | Max RSS |
+| --- | ---: | ---: | ---: | ---: |
+| Generated, post-rebase cache fill | 52 | 16m 24.7s | 718.2s | 27.3 GB |
+| Generated, warm | 52 | 7m 7.6s | 800.4s | 27.3 GB |
+| Real, warm and cache-complete | 51 | 3m 24.4s | 988.3s | 27.3 GB |
+
+The initial real migration required about 1h 32m 53s across a timed-out run and a resume, mostly because large Hugging Face transfers stalled and each retry restarted its `.part` file from byte zero. Chronos and Qwen eventually completed. Voxtral `embed_tokens_fp16.onnx_data` remained incomplete after five 300-second attempts and was excluded from the warm real timing. Stable SSH connectivity does not rule this out: the failures occurred while reading individual HTTP responses from the Hugging Face large-file path. The downloader currently has neither HTTP Range resume nor preservation of partial progress across retries.
+
+At the end of the sweep `.onnx-cache` and `.webnn-cache` each occupied about 75 GB, with about 129 GiB free on the filesystem. Warm runs remain compute-bound because selected cases are still reconverted, overwritten, reloaded, and executed through both CPU ORT paths.
+
+### Current failure families
+
+Each code is the first observed blocker. A graph may reveal later blockers once it is fixed.
+
+| Code | Generated | Real | Stage | Likely owner | Cause and next action |
+| --- | ---: | ---: | --- | --- | --- |
+| R1 | 1 | 1 | Reload | RustNN | `resample2d` output shape is not inferred during JSON reload. Add the reload inference case using the existing shape helper. |
+| R2 | 16 | 21 | Reload | RustNN | Quantization expansion first leaves `roundEven`/`clamp` results unresolved. Normalize the lowercased operation name and infer these shape-preserving unary operations. |
+| R3 | 2 | 2 | Reload | RustNN | `conv2d` output shape is not inferred during JSON reload. Reuse normal builder inference with serialized options. |
+| R4 | 2 | 3 | Reload | RustNN | `logicalNot` becomes `logicalnot`, but reload accepts a different spelling. Normalize operation names consistently. |
+| R5 | 1 | 1 | Reload | RustNN | `logicalAnd` becomes `logicaland`, but reload accepts a different spelling. Normalize operation names consistently. |
+| E1 | 4 | 4 | Export | RustNN serialization | Uint4 constants cannot be represented in the current Safetensors mapping. Define an explicit packed representation and metadata. |
+| G1 | 10 | 0 | Generated model preparation | Generated fixture | An initializer has no recorded consumers. Extend graph/subgraph consumer analysis or prove it is prunable; keep generation fail-closed. |
+| G2 | 1 | 0 | Generated model preparation | Generated fixture | A large tensor-valued `Constant` has an ambiguous role. Preserve or classify it rather than randomizing blindly. |
+| I1 | 3 | 3 | Native ORT input | Validator/manifest | Deterministic integer input `2` exceeds a two-row token-type embedding. Pin semantic IDs or derive valid Gather bounds. |
+| I2 | 2 | 7 | Native ORT input | Validator | Zero-sized past-key tensors receive one generated element because element count is forced to at least one. Preserve empty buffers. |
+| I3 | 1 | 1 | Native ORT input | Validator/manifest | Arbitrary deterministic sequence metadata is invalid for `GroupQueryAttention` (`seqlens_k`). Generate semantic values or pin them. |
+| O1 | 2 | 2 | Native ORT model load | Upstream model/export | Both Chronos ONNX files are rejected by native ORT because a float `ConstantOfShape` result feeds `Gather` indices. Confirm exporter/opset compatibility before judging WebNN conversion. |
+| D1 | 0 | 1 | Download | Downloader | Voxtral's external-data response repeatedly stalled. Add resumable Range downloads and retain partial bytes between attempts. |
+
+Generated totals: 22 reload, 4 export, 11 generated-model preparation, 8 native-ORT input/model-load failures, and 7 passes. Real totals: 28 reload, 4 export, 13 native-ORT input/model-load failures, 1 skipped download, and 6 passes.
+
+### Current case ledger
+
+`PASS` means export, reload, both executions, and comparison completed. Other entries contain the first-blocker code above.
+
+| # | Manifest case | Generated | Real |
+| ---: | --- | --- | --- |
+| 0 | `briaai--RMBG-1.4 :: model_quantized.onnx` | R2 | R2 |
+| 1 | `openai--privacy-filter :: model_quantized.onnx` | R5 | R5 |
+| 2 | `nomic-ai--nomic-embed-text-v1.5 :: model_quantized.onnx` | I1 | I1 |
+| 3 | `mixedbread-ai--mxbai-embed-large-v1 :: model_quantized.onnx` | I1 | I1 |
+| 4 | `HuggingFaceTB--SmolLM2-1.7B-Instruct :: model_q4.onnx` (`sequence=64`, `past=0`) | E1 | E1 |
+| 5 | `HuggingFaceTB--SmolLM2-1.7B-Instruct :: model_q4.onnx` (`sequence=1`, `past=64`) | E1 | E1 |
+| 6 | `distil-whisper--distil-large-v2 :: encoder_model_quantized.onnx` | R2 | R2 |
+| 7 | `distil-whisper--distil-large-v2 :: decoder_model_merged_quantized.onnx` (`cache=0`) | G1 | I2 |
+| 8 | `distil-whisper--distil-large-v2 :: decoder_model_merged_quantized.onnx` (`cache=1`) | G1 | R2 |
+| 9 | `jinaai--jina-reranker-v2-base-multilingual :: model_quantized.onnx` | R4 | R4 |
+| 10 | `onnx-community--FastVLM-0.5B-ONNX :: embed_tokens_quantized.onnx` | PASS | PASS |
+| 11 | `onnx-community--FastVLM-0.5B-ONNX :: decoder_model_merged_quantized.onnx` (`sequence=64`, `past=0`) | I2 | I2 |
+| 12 | `onnx-community--FastVLM-0.5B-ONNX :: decoder_model_merged_quantized.onnx` (`sequence=1`, `past=64`) | I3 | I3 |
+| 13 | `onnx-community--FastVLM-0.5B-ONNX :: vision_encoder_quantized.onnx` | R2 | R2 |
+| 14 | `Marqo--marqo-fashionSigLIP :: text_model_quantized.onnx` | R2 | R2 |
+| 15 | `Marqo--marqo-fashionSigLIP :: vision_model_quantized.onnx` | R2 | R2 |
+| 16 | `AdamCodd--vit-base-nsfw-detector :: model_quantized.onnx` | R2 | R2 |
+| 17 | `Xenova--nllb-200-distilled-600M :: encoder_model_quantized.onnx` | G2 | R4 |
+| 18 | `onnx-community--Janus-Pro-1B-ONNX :: language_model_q4.onnx` | E1 | E1 |
+| 19 | `onnx-community--Janus-Pro-1B-ONNX :: lm_head.onnx` | PASS | PASS |
+| 20 | `onnx-community--Janus-Pro-1B-ONNX :: gen_head.onnx` | PASS | PASS |
+| 21 | `onnx-community--Janus-Pro-1B-ONNX :: gen_img_embeds.onnx` | PASS | PASS |
+| 22 | `onnx-community--Janus-Pro-1B-ONNX :: image_decode.onnx` | R3 | R3 |
+| 23 | `Xenova--musicgen-small :: text_encoder_quantized.onnx` | R2 | R2 |
+| 24 | `Xenova--musicgen-small :: decoder_model_merged_quantized.onnx` (`cache=0`) | G1 | I2 |
+| 25 | `Xenova--musicgen-small :: decoder_model_merged_quantized.onnx` (`cache=1`) | G1 | R2 |
+| 26 | `Mozilla--distilvit :: encoder_model_quantized.onnx` | R2 | R2 |
+| 27 | `onnx-community--Voxtral-Mini-3B-2507-ONNX :: embed_tokens_fp16.onnx` | PASS | D1 |
+| 28 | `onnx-community--Voxtral-Mini-3B-2507-ONNX :: decoder_model_merged_q4.onnx` | E1 | E1 |
+| 29 | `onnx-community--Voxtral-Mini-3B-2507-ONNX :: audio_encoder_quantized.onnx` | R2 | R2 |
+| 30 | `Xenova--LaMini-Flan-T5-783M :: encoder_model_quantized.onnx` | R2 | R2 |
+| 31 | `Xenova--LaMini-Flan-T5-783M :: decoder_model_merged_quantized.onnx` (`cache=0`) | G1 | I2 |
+| 32 | `Xenova--LaMini-Flan-T5-783M :: decoder_model_merged_quantized.onnx` (`cache=1`) | G1 | R2 |
+| 33 | `Xenova--detr-resnet-50 :: model_quantized.onnx` | R2 | R2 |
+| 34 | `Xenova--donut-base-finetuned-docvqa :: encoder_model_quantized.onnx` | R4 | R4 |
+| 35 | `Xenova--donut-base-finetuned-docvqa :: decoder_model_merged_quantized.onnx` (`cache=0`) | G1 | I2 |
+| 36 | `Xenova--donut-base-finetuned-docvqa :: decoder_model_merged_quantized.onnx` (`cache=1`) | G1 | R2 |
+| 37 | `onnx-community--dinov3-vits16-pretrain-lvd1689m-ONNX :: model.onnx` | R3 | R3 |
+| 38 | `Xenova--distilbart-cnn-6-6 :: encoder_model_quantized.onnx` | R2 | R2 |
+| 39 | `Xenova--distilbart-cnn-6-6 :: decoder_model_merged_quantized.onnx` (`cache=0`) | G1 | I2 |
+| 40 | `Xenova--distilbart-cnn-6-6 :: decoder_model_merged_quantized.onnx` (`cache=1`) | G1 | R2 |
+| 41 | `prithivMLmods--Common-Voice-Gender-Detection-ONNX :: model_quantized.onnx` | R2 | R2 |
+| 42 | `Xenova--bert-base-multilingual-cased :: model_quantized.onnx` | I1 | I1 |
+| 43 | `Xenova--distilbert-base-cased-distilled-squad :: model_quantized.onnx` | R2 | R2 |
+| 44 | `onnx-community--vitpose-base-simple :: model_quantized.onnx` | R2 | R2 |
+| 45 | `kashif--chronos-2-onnx :: encoder_model.onnx` | O1 | O1 |
+| 46 | `kashif--chronos-2-onnx :: decoder_model_merged.onnx` | O1 | O1 |
+| 47 | `huggingworld--Qwen2.5-VL-3B-Instruct-ONNX :: embed_tokens_quantized.onnx` | PASS | PASS |
+| 48 | `huggingworld--Qwen2.5-VL-3B-Instruct-ONNX :: decoder_model_merged_quantized.onnx` | I2 | I2 |
+| 49 | `onnx-community--timesformer-base-finetuned-k400 :: model_quantized.onnx` | R1 | R1 |
+| 50 | `Xenova--tiny-random-RoFormerForMultipleChoice :: model_quantized.onnx` | R2 | R2 |
+| 51 | `Xenova--tiny-random-RoFormerForMultipleChoice :: model.onnx` | PASS | PASS |
+
+### Current suggested repair order
+
+1. Fix I2 zero-element input generation and add semantic pinned/generated values for I1/I3. These validator fixes expose later converter/reload behavior without changing model semantics.
+2. Fix reload operation-name normalization and shape inference: R2, then R4/R5, `conv2d`, and `resample2d`. R2 currently blocks the largest group.
+3. Design explicit Int4/Uint4 external-weight encoding for E1.
+4. Extend generated-weight graph/subgraph analysis for G1/G2 while retaining fail-closed behavior.
+5. Verify or regenerate the two Chronos exports accepted by the skeleton path but rejected by native ORT.
+6. Add resumable HTTP Range downloads before relying on unattended real-weight sweeps.
+
+## Historical pre-rebase baseline (63 cases)
+
+### Baseline
 
 - Generated sweep: 2026-09-08
 - Real sweep: 2026-09-09
@@ -25,7 +166,7 @@ Repeat the command with `--weights real` for the real-weight sweep.
 
 The real sweep started with 250.9 GB available and completed with 196.2 GB available; the safety stop was not needed. Generated ONNX artifacts use 29.9 GB and generated WebNN artifacts use 21.6 GB. Real ONNX artifacts use 31.6 GB and real WebNN artifacts use 23.1 GB. The real run therefore added 54.7 GB, about 3.2 GB more than the generated run because it materialized models and exports that generated-fixture checks had rejected.
 
-## Summary
+### Summary
 
 | Weight mode | Pass | Fail | Not run | Result |
 | --- | ---: | ---: | ---: | --- |
@@ -49,7 +190,7 @@ The additional real-only pass is:
 
 These are marked explicitly in the case ledger below. Tiny RoFormer remains the existing `smoke` manifest case; this report does not change manifest tiers.
 
-## Differences between generated and real weights
+### Differences between generated and real weights
 
 Fifty-five cases retained the same pass or first-blocker family. Eight changed outcome or stage:
 
@@ -68,7 +209,7 @@ There was no evidence that real tensor values changed numerical behavior: every 
 
 Operational note: FastVLM vision encoder exhausted five non-resuming HTTP attempts during the main sweep. An immediate single-case retry downloaded successfully and reproduced R3. This did not change the functional result, but resumable downloads would avoid repeating large transfers after transient timeouts.
 
-## Failure families
+### Failure families
 
 Each code identifies the first blocker observed. Large graphs often contain later operations that could reveal additional issues after the first blocker is fixed.
 
@@ -88,7 +229,7 @@ Each code identifies the first blocker observed. Large graphs often contain late
 
 Generated totals: 24 reload, 16 export, 8 generated-model preparation, 6 native-ORT input, and 3 missing-dimension failures. Real totals: 28 reload, 18 export, 7 native-ORT input, and 3 missing-dimension failures.
 
-## Case ledger
+### Case ledger
 
 `PASS` means the complete numerical round trip passed in that mode. `FAIL` is followed by the first-blocker code above.
 
@@ -158,7 +299,7 @@ Generated totals: 24 reload, 16 export, 8 generated-model preparation, 6 native-
 | 61 | `huggingworld--Qwen2.5-VL-3B-Instruct-ONNX :: decoder_model_merged_q4f16.onnx` | FAIL (E1) | FAIL (E1) |
 | 62 | `Xenova--tiny-random-RoFormerForMultipleChoice :: model.onnx` | PASS | PASS |
 
-## Suggested repair order
+### Suggested repair order
 
 1. Fix M1 and I1 with manifest/input semantics; these are small validator setup changes and may unlock nine cases without converter work.
 2. Fix RustNN reload inference in focused tests: operation-name normalization and `clamp`, then `conv2d`, then `resample2d`. Rerun the affected subsets after each fix because the reported operand is only the first blocker.
