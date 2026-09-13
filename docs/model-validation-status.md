@@ -46,6 +46,28 @@ All five families were directly resolved by RustNN commit `2e22b3db` (`Unify gra
 
 RustNN commit `7f07a5e1` (`Make empty shapes unambiguously scalar`) followed the unification by enforcing that every completed operand descriptor has a known shape and that `[]` means a rank-0 scalar. It strengthens the shared recorder/loader inference path and removes remaining placeholder ambiguity, but it did not add the operator dispatch that directly cleared R1-R5. This attribution is based on the code changes between the two recorded RustNN revisions; the full manifest was run at `7f07a5e1`, not bisected at the intermediate commit.
 
+### RustNN WebNN reload performance
+
+An isolated benchmark compared the pre-unification RustNN revision `2783a191` with `7f07a5e1` using the same seven generated-weight artifacts that passed the previous generated sweep: FastVLM token embedding; Janus LM head, generation head, and image embedding; Qwen2.5-VL token embedding; Tiny RoFormer; and Voxtral FP16 token embedding. Both revisions were exported to temporary directories and compiled in release mode against the same locked dependencies. Every artifact loaded successfully at both revisions and produced the same operand and operation counts.
+
+The primary measurement parsed and sanitized each `.webnn` file once, then timed only repeated `webnn_json::from_graph_json` calls. This isolates GraphJSON-to-`GraphInfo` reconstruction and shape/type inference from text parsing, Safetensors I/O, and inference execution. Results below are the median of three fixed-core process medians, with 2,000 timed iterations per model in each process.
+
+| Model | Operations / operands | `2783a191` | `7f07a5e1` | Change |
+| --- | ---: | ---: | ---: | ---: |
+| FastVLM token embedding | 2 / 6 | 2.244 us | 1.697 us | 24.4% faster |
+| Janus LM head | 1 / 3 | 1.119 us | 0.916 us | 18.1% faster |
+| Janus generation head | 9 / 17 | 10.077 us | 8.289 us | 17.7% faster |
+| Janus image embedding | 10 / 19 | 11.154 us | 9.330 us | 16.4% faster |
+| Qwen2.5-VL token embedding | 4 / 11 | 4.989 us | 3.583 us | 28.2% faster |
+| Tiny RoFormer | 440 / 930 | 645.464 us | 611.037 us | 5.3% faster |
+| Voxtral FP16 token embedding | 2 / 4 | 2.031 us | 1.630 us | 19.7% faster |
+| Seven-model sum | 468 / 990 | 677.078 us | 636.482 us | 6.0% faster |
+
+The public `load_graph_from_path` path was also measured after a warm-up. It includes reading and parsing `.webnn` plus resolving and copying about 2.7 GB of Safetensors data. Across two reverse-order, three-iteration seven-model rounds, the sum of per-model medians averaged 4.451 seconds before unification and 4.423 seconds after it: 0.6% faster, which is small enough to treat as unchanged under normal system noise. A fixed-core 500-iteration full-load test of Tiny RoFormer, the graph-heavy artifact with only 6.6 MB of weights, improved from 5.332 ms to 5.218 ms, or 2.1%.
+
+Conclusion: there is no evidence of a WebNN reload regression. The unified recorder improves the changed graph-reconstruction/inference stage by about 6% on this subset. End-to-end reload is neutral for weight-heavy graphs because external-weight loading dominates, while the graph-heavy Tiny RoFormer case retains a smaller roughly 2% full-loader improvement. These are local microbenchmark results on a non-dedicated machine, not a CI performance threshold.
+
+
 
 The deeper reachability exposes numerical differences that were not observable in the previous run. Eight generated cases and two real cases fail comparison. Seven mismatches occur only with generated weights, one only with real weights, and Donut encoder mismatches in both modes. These are validation failures, not tolerance-level passes.
 
