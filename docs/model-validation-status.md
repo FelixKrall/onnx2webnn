@@ -2,7 +2,103 @@
 
 This document tracks full-model numerical validation independently from the skeleton sweep. The skeleton manifest contains cases that construct an ORT-backed graph successfully; this validation additionally exports the converted graph, reloads its `.webnn` and Safetensors artifacts, executes both the original ONNX model and the reloaded graph on CPU ORT, and compares their outputs.
 
-## Current post-rebase baseline
+## Current post-refactor baseline
+
+- Sweep date: 2026-09-12
+- onnx2webnn: `4926c3e` on `fkrall/cache-backed-validation`
+- rustnn: `7f07a5e1` on `fkrall/executable-webnn-reload`
+- ORT: repository-local Linux x64 1.29.0 build
+- Manifest: `tests/models/manifest.json` (52 cases, 45 unique ONNX files)
+- Execution: one validation worker; ORT may use multiple CPU threads inside a case
+
+Both modes were run from `onnx2webnn/` with the current release binary:
+
+```sh
+ORT_DYLIB_PATH=../tools/onnxruntime/onnxruntime-linux-x64-1.29.0/lib/libonnxruntime.so.1.29.0 \
+  target/release/onnx2webnn validate-models \
+  --selection all --weights generated --jobs 1
+
+ORT_DYLIB_PATH=../tools/onnxruntime/onnxruntime-linux-x64-1.29.0/lib/libonnxruntime.so.1.29.0 \
+  target/release/onnx2webnn validate-models \
+  --selection all --weights real --jobs 1
+```
+
+### Current summary
+
+| Weight mode | Pass | Functional fail | Download skipped | Result |
+| --- | ---: | ---: | ---: | --- |
+| Generated (`g4`) | 21 | 31 | 0 | Complete (52/52) |
+| Real | 28 | 24 | 0 | Complete (52/52) |
+
+Twenty cases pass in both modes. All five former RustNN reload families (R1-R5) are cleared: the affected graphs now reload and proceed to execution or comparison. Relative to the 2026-09-09 baseline, generated passes increased from 7 to 21 and real passes from 6 to 28; the previously skipped real Voxtral embedding now passes from the completed cache.
+
+### Resolved RustNN reload families
+
+All five families were directly resolved by RustNN commit `2e22b3db` (`Unify graph recording and WebNN loader inference`). Before that commit, GraphJSON reload used a separate string-based, ten-pass `infer_output_shapes` implementation. It lowercased `Operation::op_type()` and then compared it with inconsistent spellings, and it lacked shape branches for some operations. The commit removed that loader-only inference loop. Both `MLGraphBuilder` and GraphJSON loading now use `GraphRecorder::record_operation`, which calls the typed `infer_operation_descriptors` dispatcher before inserting an operation or its outputs.
+
+| Family | Previous generated / real | Previously affected cases | Removed defect | RustNN fix and current reachability |
+| --- | ---: | --- | --- | --- |
+| R1 | 1 / 1 | 49, TimeSformer | Reload had no `resample2d` output-shape branch. | Typed `Operation::Resample2d` now calls the builder's `resample2d_shape` path and `infer_resample2d_shape`. The case reaches comparison: generated N1, real PASS. |
+| R2 | 16 / 21 | 0, 6, 8, 13-16, 23, 25-26, 29-30, 32-33, 36, 38, 40-41, 43-44, 50 | Reload lowercased `roundEven` to `roundeven` but matched `roundEven`; `clamp` was absent from the shape-preserving unary set. | Typed `Operation::RoundEven` and `Operation::Clamp` both use canonical `same_shape` inference. The former R2 cases now pass, reach comparison, or expose the later V1 cache-interface blocker; generated G1 cases remain blocked before reload. |
+| R3 | 2 / 2 | 22, Janus image decoder; 37, DINOv3 | Reload had no `conv2d` output-shape branch. | Typed `Operation::Conv2d` now calls the builder's `conv2d_shape` path and `infer_conv2d_shape` with serialized options. Both cases pass in both modes. |
+| R4 | 2 / 3 | 9, Jina reranker; 17 real, NLLB encoder; 34, Donut encoder | Reload lowercased `logicalNot` to `logicalnot` but matched only `logical_not`. | Typed `Operation::LogicalNot` now uses canonical `unary_element_wise_logical_shape` inference. Cases 9 and 17 real pass; case 34 reaches comparison and exposes N1 in both modes. Case 17 generated remains blocked earlier by G2. |
+| R5 | 1 / 1 | 1, privacy filter | Reload lowercased `logicalAnd` to `logicaland` but matched only `logical_and`. | Typed `Operation::LogicalAnd` now uses canonical `element_wise_logical_shape` inference. The case reaches comparison: generated N1, real PASS. |
+
+RustNN commit `7f07a5e1` (`Make empty shapes unambiguously scalar`) followed the unification by enforcing that every completed operand descriptor has a known shape and that `[]` means a rank-0 scalar. It strengthens the shared recorder/loader inference path and removes remaining placeholder ambiguity, but it did not add the operator dispatch that directly cleared R1-R5. This attribution is based on the code changes between the two recorded RustNN revisions; the full manifest was run at `7f07a5e1`, not bisected at the intermediate commit.
+
+
+The deeper reachability exposes numerical differences that were not observable in the previous run. Eight generated cases and two real cases fail comparison. Seven mismatches occur only with generated weights, one only with real weights, and Donut encoder mismatches in both modes. These are validation failures, not tolerance-level passes.
+
+### Result differences by case
+
+| Cases | Generated | Real | Detail |
+| --- | --- | --- | --- |
+| 1, 6, 15, 26, 29, 41, 49 | Numerical mismatch | PASS | Generated-only semantic disagreement |
+| 33 | PASS | Numerical mismatch | DETR real weights |
+| 34 | Numerical mismatch | Numerical mismatch | Donut encoder; both modes |
+| 7, 24, 31, 35, 39 | Generated preparation | Zero-sized input | Real weights reach the existing empty-buffer bug |
+| 8, 25, 36, 40 | Generated preparation | Missing input descriptor | `encoder_hidden_states` absent from cached graph metadata |
+| 32 | Generated preparation | Missing output descriptor | `present_0_encoder_key` absent from cached graph metadata |
+| 17 | Generated preparation | PASS | Large tensor-valued `Constant` remains generator-only |
+| 27 | PASS | PASS | Real Voxtral sidecar is now cache-complete |
+
+All other cases either pass in both modes or retain the same first-blocker family recorded in the case ledger below. The current per-case outcomes that differ from that 2026-09-09 ledger are exactly the rows summarized above plus former R1-R5 entries that now pass.
+
+### Current failure families
+
+| Code | Generated | Real | Stage | Cause and next action |
+| --- | ---: | ---: | --- | --- |
+| N1 | 8 | 2 | Comparison | Native ORT and reloaded WebNN output differ beyond tolerance. Localize the first divergent operation, beginning with case 34 because both weight modes reproduce it. |
+| V1 | 0 | 5 | Cached graph validation | Four cache-branch decoders lose the `encoder_hidden_states` input descriptor and one loses `present_0_encoder_key` output metadata. Reconcile optimized ONNX and serialized graph interfaces. |
+| E1 | 4 | 4 | Export | Uint4 constants cannot be represented in the current Safetensors mapping. |
+| G1 | 10 | 0 | Generated preparation | An initializer has no recorded consumers; keep generation fail-closed while extending consumer analysis. |
+| G2 | 1 | 0 | Generated preparation | A large tensor-valued `Constant` has an ambiguous role. |
+| I1 | 3 | 3 | Native ORT input | Deterministic token-type ID `2` exceeds a two-row embedding. |
+| I2 | 2 | 7 | Native ORT input | Zero-sized past-key tensors receive one generated element. |
+| I3 | 1 | 1 | Native ORT input | Generated `seqlens_k` is invalid for `GroupQueryAttention`. |
+| O1 | 2 | 2 | Native ORT load | Both Chronos models feed a float `ConstantOfShape` result to `Gather` indices. |
+
+Generated totals: 11 generated-model preparation, 4 export, 6 native-ORT input, 2 native-ORT model-load, 8 comparison failures, and 21 passes. Real totals: 4 export, 5 cached-graph interface, 11 native-ORT input, 2 native-ORT model-load, 2 comparison failures, and 28 passes.
+
+### Cached timing and storage
+
+| Run | Cases | Wall time |
+| --- | ---: | ---: |
+| Generated, warm | 52 | 7m 47.5s |
+| Real, warm and cache-complete | 52 | 6m 47.2s |
+
+After the sweeps, `.onnx-cache` occupied 76 GB and `.webnn-cache` occupied 75 GB. No download was needed or skipped in either completed result.
+
+### Current suggested repair order
+
+1. Investigate N1 first because the refactors now expose actual numerical disagreement. Start with Donut encoder, then DETR's real-only mismatch and the seven generated-only cases.
+2. Reconcile cached WebNN input/output descriptors for the five V1 cache-branch failures.
+3. Fix I2 zero-element input generation and add semantic pinned/generated values for I1/I3.
+4. Design explicit Int4/Uint4 external-weight encoding for E1.
+5. Extend generated-weight graph analysis for G1/G2 while retaining fail-closed behavior.
+6. Verify or regenerate the two Chronos exports.
+
+## Previous post-rebase baseline (2026-09-09)
 
 - Sweep date: 2026-09-09
 - onnx2webnn: `e5a5f88c` on `fkrall/cache-backed-validation`
@@ -13,7 +109,7 @@ This document tracks full-model numerical validation independently from the skel
 
 The same `validate-models --selection all --jobs 1` command shown in the historical baseline below was used for both `--weights generated` and `--weights real`.
 
-### Current summary
+### Previous summary
 
 | Weight mode | Pass | Functional fail | Download skipped | Result |
 | --- | ---: | ---: | ---: | --- |
@@ -51,7 +147,7 @@ The initial real migration required about 1h 32m 53s across a timed-out run and 
 
 At the end of the sweep `.onnx-cache` and `.webnn-cache` each occupied about 75 GB, with about 129 GiB free on the filesystem. Warm runs remain compute-bound because selected cases are still reconverted, overwritten, reloaded, and executed through both CPU ORT paths.
 
-### Current failure families
+### Previous failure families
 
 Each code is the first observed blocker. A graph may reveal later blockers once it is fixed.
 
@@ -73,7 +169,7 @@ Each code is the first observed blocker. A graph may reveal later blockers once 
 
 Generated totals: 22 reload, 4 export, 11 generated-model preparation, 8 native-ORT input/model-load failures, and 7 passes. Real totals: 28 reload, 4 export, 13 native-ORT input/model-load failures, 1 skipped download, and 6 passes.
 
-### Current case ledger
+### Previous case ledger
 
 `PASS` means export, reload, both executions, and comparison completed. Other entries contain the first-blocker code above.
 
@@ -132,7 +228,7 @@ Generated totals: 22 reload, 4 export, 11 generated-model preparation, 8 native-
 | 50 | `Xenova--tiny-random-RoFormerForMultipleChoice :: model_quantized.onnx` | R2 | R2 |
 | 51 | `Xenova--tiny-random-RoFormerForMultipleChoice :: model.onnx` | PASS | PASS |
 
-### Current suggested repair order
+### Previous suggested repair order
 
 1. Fix I2 zero-element input generation and add semantic pinned/generated values for I1/I3. These validator fixes expose later converter/reload behavior without changing model semantics.
 2. Fix reload operation-name normalization and shape inference: R2, then R4/R5, `conv2d`, and `resample2d`. R2 currently blocks the largest group.
