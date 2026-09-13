@@ -10,9 +10,23 @@ WEBNN_SUPPORTED_ONNX_OPS: frozenset[str] = frozenset(
         # matmul.rs
         "MatMul",
         "Gemm",
+        "MatMulNBits",
+        "MatMulInteger",
+        "MatMulBnb4",
+        # attention.rs
+        "GroupQueryAttention",
+        # moe.rs
+        "MoE",
+        # convert.rs inline_constant_ifs: If with a constant condition is
+        # inlined; runtime conditions remain unsupported.
+        "If",
+        "QMoE",
+        # einsum.rs
+        "Einsum",
         # conv.rs
         "Conv",
         "ConvTranspose",
+        "ConvInteger",
         # pool.rs
         "MaxPool",
         "AveragePool",
@@ -49,6 +63,8 @@ WEBNN_SUPPORTED_ONNX_OPS: frozenset[str] = frozenset(
         "Softmax",
         "GroupNormalization",
         "RMSNormalization",
+        "SimplifiedLayerNormalization",
+        "SkipSimplifiedLayerNormalization",
         "LogSoftmax",
         "Hardmax",
         # reshape.rs
@@ -67,9 +83,12 @@ WEBNN_SUPPORTED_ONNX_OPS: frozenset[str] = frozenset(
         "Constant",
         "QuantizeLinear",
         "DequantizeLinear",
+        "DynamicQuantizeLinear",
         # utility.rs
         "Shape",
+        "OneHot",
         "Gather",
+        "GatherBlockQuantized",
         "GatherND",
         "GatherElements",
         "ReverseSequence",
@@ -144,6 +163,7 @@ WEBNN_SUPPORTED_ONNX_OPS: frozenset[str] = frozenset(
         # rnn.rs
         "GRU",
         "LSTM",
+        "RotaryEmbedding",
     }
 )
 

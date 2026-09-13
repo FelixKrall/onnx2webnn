@@ -4,10 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-//! ONNX → [`MLGraphBuilder`] bridge (operand map, naming, rustnn error mapping).
+//! ONNX -> [`MLGraphBuilder`] bridge (operand map, naming, rustnn error mapping).
 
 use crate::onnx::convert::{map_onnx_data_type, sanitize_identifier, OnnxError};
-use crate::protos::onnx::TensorProto;
+use crate::protos::onnx::{TensorProto, TensorProto_DataType};
 use rustnn::error::{Error as RustnnError, GraphBuilderError};
 use rustnn::graph::Dimension;
 use rustnn::mlcontext::MLOperandDescriptor;
@@ -20,12 +20,18 @@ use std::collections::{HashMap, HashSet};
 pub struct OnnxBuilder<'a, 'ctx, 'bld> {
     pub builder: &'a mut MLGraphBuilder<'ctx, 'bld>,
     operands: HashMap<String, MLOperand>,
-    /// Operand ids registered via `input()` — cannot be passed directly to `build()`.
+    /// Operand ids registered via `input()` - cannot be passed directly to `build()`.
     input_operands: HashSet<u32>,
-    /// Operand ids registered via `constant()` — cannot be passed directly to `build()`.
+    /// Operand ids registered via `constant()` - cannot be passed directly to `build()`.
     constant_operands: HashSet<u32>,
     /// Sanitized + raw ONNX names registered as graph inputs.
     input_names: HashSet<String>,
+    /// Zero-element optional-input placeholders (e.g. empty `Resize` roi/scales).
+    /// These are not materialized as WebNN constants because 0-sized dims are invalid.
+    empty_optional_values: HashSet<String>,
+    /// ONNX sequence values (SplitToSequence outputs) -> element count. The
+    /// elements themselves are registered as `{name}__seq{i}` operands.
+    sequences: HashMap<String, usize>,
 }
 
 /// Operand index inside the builder graph (`MLOperand::id` is `pub(crate)` in rustnn).
@@ -47,11 +53,59 @@ impl<'a, 'ctx, 'bld> OnnxBuilder<'a, 'ctx, 'bld> {
             input_operands: HashSet::new(),
             constant_operands: HashSet::new(),
             input_names: HashSet::new(),
+            empty_optional_values: HashSet::new(),
+            sequences: HashMap::new(),
         }
+    }
+
+    /// Name under which sequence element `i` of sequence `name` is registered.
+    pub fn sequence_element_key(name: &str, index: usize) -> String {
+        format!("{}__seq{index}", sanitize_identifier(name))
+    }
+
+    pub fn record_sequence(&mut self, name: &str, count: usize) {
+        self.sequences.insert(name.to_string(), count);
+        self.sequences.insert(sanitize_identifier(name), count);
+    }
+
+    pub fn sequence_element_count(&self, name: &str) -> Option<usize> {
+        self.sequences
+            .get(name)
+            .or_else(|| self.sequences.get(&sanitize_identifier(name)))
+            .copied()
     }
 
     pub fn webnn_id(onnx_name: &str) -> String {
         sanitize_identifier(onnx_name)
+    }
+
+    fn insert_name_aliases(set: &mut HashSet<String>, name: &str) {
+        if name.is_empty() {
+            return;
+        }
+        set.insert(name.to_string());
+        set.insert(sanitize_identifier(name));
+        let trimmed = name.trim_start_matches('/');
+        if trimmed != name {
+            set.insert(trimmed.to_string());
+        }
+    }
+
+    /// Record a zero-element optional-input placeholder that must not become a WebNN constant.
+    pub fn mark_empty_optional(&mut self, name: &str) {
+        Self::insert_name_aliases(&mut self.empty_optional_values, name);
+    }
+
+    pub fn is_empty_optional(&self, name: &str) -> bool {
+        if self.empty_optional_values.contains(name) {
+            return true;
+        }
+        let sanitized = sanitize_identifier(name);
+        if self.empty_optional_values.contains(&sanitized) {
+            return true;
+        }
+        let trimmed = name.trim_start_matches('/');
+        self.empty_optional_values.contains(trimmed)
     }
 
     pub fn record_operand(&mut self, keys: &[&str], op: MLOperand) {
@@ -66,6 +120,11 @@ impl<'a, 'ctx, 'bld> OnnxBuilder<'a, 'ctx, 'bld> {
     }
 
     pub fn resolve_operand(&self, name: &str) -> Result<MLOperand, OnnxError> {
+        if self.is_empty_optional(name) {
+            return Err(OnnxError::InvalidShape(format!(
+                "ONNX value '{name}' is an empty optional-input placeholder and has no WebNN operand"
+            )));
+        }
         if let Some(&op) = self.operands.get(name) {
             return Ok(op);
         }
@@ -100,7 +159,7 @@ impl<'a, 'ctx, 'bld> OnnxBuilder<'a, 'ctx, 'bld> {
 
     /// Resolve an ONNX graph output for `build()`.
     ///
-    /// WebNN rejects graph outputs that are still inputs or constants (see § 8.9.4 `build()`).
+    /// WebNN rejects graph outputs that are still inputs or constants (see section 8.9.4 `build()`).
     /// Insert `identity` only for those cases; regular op outputs already have graph-safe names.
     pub fn output_operand(&mut self, name: &str) -> Result<MLOperand, OnnxError> {
         let op = self.resolve_operand(name)?;
@@ -130,45 +189,38 @@ impl<'a, 'ctx, 'bld> OnnxBuilder<'a, 'ctx, 'bld> {
         }
     }
 
+    /// Register a constant, handing the byte buffer to rustnn without a copy.
+    /// Weight tensors reach hundreds of MB and the buffer stays alive for the
+    /// whole backend compile, so every avoided copy matters. rustnn stores
+    /// plain little-endian bytes, so no typed round-trip is needed.
     pub fn register_constant_from_bytes(
         &mut self,
         name: &str,
         data_type: DataType,
         shape: &[u32],
-        bytes: &[u8],
+        bytes: Vec<u8>,
     ) -> Result<(), OnnxError> {
         let id = Self::webnn_id(name);
         let desc = descriptor_static(data_type, shape)?;
-        let op = match data_type {
-            DataType::Float32 => self.builder.constant_from_slice(
-                &desc,
-                bytemuck::try_cast_slice::<_, f32>(bytes)
-                    .map_err(|e| OnnxError::InvalidShape(e.to_string()))?,
-            ),
-            DataType::Float16 => self.builder.constant_from_slice(
-                &desc,
-                bytemuck::try_cast_slice::<_, u16>(bytes)
-                    .map_err(|e| OnnxError::InvalidShape(e.to_string()))?,
-            ),
-            DataType::Int32 => self.builder.constant_from_slice(
-                &desc,
-                bytemuck::try_cast_slice::<_, i32>(bytes)
-                    .map_err(|e| OnnxError::InvalidShape(e.to_string()))?,
-            ),
-            DataType::Int64 => self.builder.constant_from_slice(
-                &desc,
-                bytemuck::try_cast_slice::<_, i64>(bytes)
-                    .map_err(|e| OnnxError::InvalidShape(e.to_string()))?,
-            ),
-            DataType::Uint8 => self.builder.constant_from_slice(&desc, bytes),
-            DataType::Int8 => self.builder.constant_from_slice(&desc, bytes),
+        match data_type {
+            DataType::Float32
+            | DataType::Float16
+            | DataType::Int32
+            | DataType::Int64
+            | DataType::Uint8
+            | DataType::Int8
+            | DataType::Uint4
+            | DataType::Int4 => {}
             other => {
                 return Err(OnnxError::InvalidShape(format!(
                     "unsupported constant data type for builder: {other:?}"
                 )));
             }
         }
-        .map_err(map_rustnn_error)?;
+        let op = self
+            .builder
+            .constant_from_bytes(&desc, bytes)
+            .map_err(map_rustnn_error)?;
         self.constant_operands.insert(operand_index(op));
         self.record_operand(&[name, &id], op);
         Ok(())
@@ -184,6 +236,7 @@ impl<'a, 'ctx, 'bld> OnnxBuilder<'a, 'ctx, 'bld> {
         &mut self,
         outputs: HashMap<&str, MLOperand>,
     ) -> Result<MLGraph<'ctx>, OnnxError> {
+        let outputs: std::collections::BTreeMap<&str, MLOperand> = outputs.into_iter().collect();
         self.builder.build(&outputs).map_err(map_rustnn_error)
     }
 }
@@ -232,11 +285,8 @@ pub fn map_ast_data_type(dt: DataType) -> Result<MLOperandDataType, OnnxError> {
         DataType::Uint64 => MLOperandDataType::Uint64,
         DataType::Int8 => MLOperandDataType::Int8,
         DataType::Uint8 => MLOperandDataType::Uint8,
-        DataType::Int4 | DataType::Uint4 => {
-            return Err(OnnxError::InvalidShape(
-                "int4/uint4 not supported on MLGraphBuilder path".to_string(),
-            ));
-        }
+        DataType::Int4 => MLOperandDataType::Int4,
+        DataType::Uint4 => MLOperandDataType::Uint4,
     })
 }
 
@@ -244,8 +294,39 @@ pub fn map_onnx_tensor_type(onnx_type: i32) -> Result<MLOperandDataType, OnnxErr
     map_ast_data_type(map_onnx_data_type(onnx_type)?)
 }
 
+/// Number of elements implied by `TensorProto.dims`.
+///
+/// An empty `dims` list is treated as a scalar (1 element). A dimension of `0`
+/// yields an empty tensor (0 elements), which ONNX exporters commonly use as a
+/// placeholder for unused optional inputs such as `Resize`'s `roi`/`scales`.
+pub fn tensor_element_count(tensor: &TensorProto) -> usize {
+    if tensor.dims.is_empty() {
+        return 1;
+    }
+    tensor
+        .dims
+        .iter()
+        .fold(1usize, |acc, &d| acc.saturating_mul(d.max(0) as usize))
+}
+
 /// Extract initializer / constant tensor bytes for `constant_from_slice`.
 pub fn tensor_proto_to_bytes(tensor: &TensorProto) -> Result<Vec<u8>, OnnxError> {
+    if tensor.data_type == TensorProto_DataType::Double as i32 {
+        // float64 is lowered to float32 (WebNN has no float64).
+        let values: Vec<f64> = if !tensor.raw_data.is_empty() {
+            tensor
+                .raw_data
+                .chunks_exact(8)
+                .map(|c| f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
+                .collect()
+        } else {
+            tensor.double_data.clone()
+        };
+        return Ok(values
+            .iter()
+            .flat_map(|&v| (v as f32).to_le_bytes())
+            .collect());
+    }
     if !tensor.raw_data.is_empty() {
         return Ok(tensor.raw_data.clone());
     }
@@ -257,11 +338,30 @@ pub fn tensor_proto_to_bytes(tensor: &TensorProto) -> Result<Vec<u8>, OnnxError>
             .collect());
     }
     if !tensor.int32_data.is_empty() {
-        return Ok(tensor
-            .int32_data
-            .iter()
-            .flat_map(|v| v.to_le_bytes())
-            .collect());
+        return Ok(match tensor.data_type {
+            x if x == TensorProto_DataType::Uint8 as i32
+                || x == TensorProto_DataType::Int8 as i32
+                || x == TensorProto_DataType::Bool as i32 =>
+            {
+                tensor.int32_data.iter().map(|&v| v as u8).collect()
+            }
+            x if x == TensorProto_DataType::Float16 as i32
+                || x == TensorProto_DataType::Bfloat16 as i32
+                || x == TensorProto_DataType::Uint16 as i32
+                || x == TensorProto_DataType::Int16 as i32 =>
+            {
+                tensor
+                    .int32_data
+                    .iter()
+                    .flat_map(|&v| (v as u16).to_le_bytes())
+                    .collect()
+            }
+            _ => tensor
+                .int32_data
+                .iter()
+                .flat_map(|v| v.to_le_bytes())
+                .collect(),
+        });
     }
     if !tensor.int64_data.is_empty() {
         return Ok(tensor
@@ -277,6 +377,10 @@ pub fn tensor_proto_to_bytes(tensor: &TensorProto) -> Result<Vec<u8>, OnnxError>
             .flat_map(|v| v.to_le_bytes())
             .collect());
     }
+    // Empty optional-input placeholders: dims contain a 0, so there is no payload.
+    if tensor_element_count(tensor) == 0 {
+        return Ok(Vec::new());
+    }
     Err(OnnxError::InvalidShape(format!(
         "tensor '{}' has no payload",
         tensor.name
@@ -290,6 +394,37 @@ mod tests {
         tensor_shape_proto, type_proto, GraphProto, ModelProto, NodeProto, TensorProto_DataType,
         TensorShapeProto, ValueInfoProto,
     };
+
+    #[test]
+    fn test_empty_optional_tensor_proto_to_bytes() {
+        use super::{tensor_element_count, tensor_proto_to_bytes};
+        use crate::protos::onnx::{TensorProto, TensorProto_DataType};
+
+        let tensor = TensorProto {
+            name: String::new(),
+            dims: vec![0],
+            data_type: TensorProto_DataType::Float16 as i32,
+            raw_data: Vec::new(),
+            ..Default::default()
+        };
+        assert_eq!(tensor_element_count(&tensor), 0);
+        let bytes = tensor_proto_to_bytes(&tensor).expect("empty tensor should be valid");
+        assert!(bytes.is_empty());
+    }
+
+    #[test]
+    fn test_uint8_scalar_int32_payload_uses_one_byte() {
+        use super::tensor_proto_to_bytes;
+        use crate::protos::onnx::{TensorProto, TensorProto_DataType};
+
+        let tensor = TensorProto {
+            name: "zero_point".to_string(),
+            data_type: TensorProto_DataType::Uint8 as i32,
+            int32_data: vec![127],
+            ..Default::default()
+        };
+        assert_eq!(tensor_proto_to_bytes(&tensor).unwrap(), vec![127]);
+    }
 
     #[test]
     fn test_add_ort_build_succeeds() {

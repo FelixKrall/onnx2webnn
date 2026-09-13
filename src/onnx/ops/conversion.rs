@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// Type conversion and constant operators: Cast, Constant, QuantizeLinear, DequantizeLinear
+// Type conversion and constant operators: Cast, Constant, QuantizeLinear,
+// DequantizeLinear, DynamicQuantizeLinear
 
 use crate::onnx::builder::{
     map_ast_data_type, map_onnx_tensor_type, map_op_error, tensor_proto_to_bytes, OnnxBuilder,
@@ -14,6 +15,10 @@ use crate::onnx::convert::{sanitize_identifier, OnnxError};
 use crate::onnx::ops::{ConversionContext, ConversionResult, OpHandler};
 use crate::protos::onnx::NodeProto;
 use rustnn::mlcontext::MLOperand;
+use rustnn::operator_enums::MLOperandDataType;
+use rustnn::operator_options::{MLClampOptions, MLReduceOptions};
+use rustnn::DataType;
+use serde_json::json;
 
 pub struct ConversionHandler;
 
@@ -21,7 +26,12 @@ impl OpHandler for ConversionHandler {
     fn supports(&self, op_type: &str) -> bool {
         matches!(
             op_type,
-            "Cast" | "Constant" | "QuantizeLinear" | "DequantizeLinear" | "CastLike"
+            "Cast"
+                | "Constant"
+                | "QuantizeLinear"
+                | "DequantizeLinear"
+                | "DynamicQuantizeLinear"
+                | "CastLike"
         )
     }
 
@@ -39,11 +49,12 @@ impl OpHandler for ConversionHandler {
         };
 
         match op_type {
-            "Cast" => self.convert_cast(node, &node_name, b),
+            "Cast" => self.convert_cast(node, &node_name, context, b),
             "CastLike" => self.convert_cast_like(node, &node_name, context, b),
             "Constant" => self.convert_constant(node, &node_name, b),
             "QuantizeLinear" => self.convert_quantize_linear(node, &node_name, context, b),
             "DequantizeLinear" => self.convert_dequantize_linear(node, &node_name, context, b),
+            "DynamicQuantizeLinear" => self.convert_dynamic_quantize_linear(node, &node_name, b),
             _ => Err(OnnxError::unsupported_op(op_type.to_string(), node_name)),
         }
     }
@@ -54,6 +65,7 @@ impl ConversionHandler {
         &self,
         node: &NodeProto,
         node_name: &str,
+        context: &ConversionContext,
         b: &mut OnnxBuilder<'_, '_, '_>,
     ) -> Result<ConversionResult, OnnxError> {
         let inputs = node.input.as_slice();
@@ -77,9 +89,37 @@ impl ConversionHandler {
             });
         }
 
+        // Empty optional placeholders (e.g. Resize roi/scales) propagate without WebNN ops.
+        if b.is_empty_optional(&inputs[0]) {
+            let output_name = output_label(node, node_name);
+            b.mark_empty_optional(&output_name);
+            if let Some(onnx_out) = node.output.first() {
+                b.mark_empty_optional(onnx_out);
+            }
+            return Ok(ConversionResult::default());
+        }
+
         let output_name = output_label(node, node_name);
         let input = b.resolve_operand(&inputs[0])?;
-        let target_type = map_onnx_tensor_type(to_type.unwrap() as i32)?;
+        // float64 is lowered to float32 (WebNN has no float64).
+        let mut to_type = to_type.unwrap() as i32;
+        if to_type == crate::protos::onnx::TensorProto_DataType::Double as i32 {
+            to_type = crate::protos::onnx::TensorProto_DataType::Float as i32;
+        }
+        // A cast to the operand's own type is a no-op; ORT rejects some
+        // identity casts, so alias the input instead.
+        let same_type = crate::onnx::convert::map_onnx_data_type(to_type)
+            .ok()
+            .is_some_and(|target| context.value_types.get(inputs[0].as_str()) == Some(&target));
+        if same_type {
+            if let Some(onnx_out) = node.output.first() {
+                record_node_output(b, onnx_out, &output_name, input);
+            } else {
+                b.record_operand(&[&output_name], input);
+            }
+            return Ok(ConversionResult::default());
+        }
+        let target_type = map_onnx_tensor_type(to_type)?;
         let opts = OnnxBuilder::labeled_options(&output_name);
         let out = b
             .builder
@@ -161,10 +201,17 @@ impl ConversionHandler {
                 op: "Constant".to_string(),
             })?;
 
+        // Zero-element tensors are optional-input placeholders (common for Resize).
+        // WebNN rejects 0-sized dimensions, so keep them as logical absences.
+        if crate::onnx::builder::tensor_element_count(tensor) == 0 {
+            b.mark_empty_optional(onnx_out);
+            return Ok(ConversionResult::default());
+        }
+
         let data_type = crate::onnx::convert::map_onnx_data_type(tensor.data_type)?;
         let shape: Vec<u32> = tensor.dims.iter().map(|&d| d.max(0) as u32).collect();
         let bytes = tensor_proto_to_bytes(tensor)?;
-        b.register_constant_from_bytes(onnx_out, data_type, &shape, &bytes)?;
+        b.register_constant_from_bytes(onnx_out, data_type, &shape, bytes)?;
         Ok(ConversionResult::default())
     }
 
@@ -239,6 +286,172 @@ impl ConversionHandler {
         }
         Ok(ConversionResult::default())
     }
+
+    fn convert_dynamic_quantize_linear(
+        &self,
+        node: &NodeProto,
+        node_name: &str,
+        b: &mut OnnxBuilder<'_, '_, '_>,
+    ) -> Result<ConversionResult, OnnxError> {
+        let inputs = node.input.as_slice();
+        let outputs = node.output.as_slice();
+        if inputs.len() != 1 || outputs.len() != 3 {
+            return Err(OnnxError::InvalidShape(format!(
+                "DynamicQuantizeLinear expects 1 input and 3 outputs, got {} inputs and {} outputs",
+                inputs.len(),
+                outputs.len()
+            )));
+        }
+
+        let output_name = output_label(node, node_name);
+        let x = b.resolve_operand(&inputs[0])?;
+        let reduce_options = |suffix: &str| MLReduceOptions {
+            label: format!("{output_name}_{suffix}"),
+            axes: None,
+            keep_dimensions: false,
+        };
+        let x_min = b
+            .builder
+            .reduce_min_with_options(x, reduce_options("min"))
+            .map_err(map_op_error)?;
+        let x_max = b
+            .builder
+            .reduce_max_with_options(x, reduce_options("max"))
+            .map_err(map_op_error)?;
+        let zero = register_f32_scalar(b, &format!("{output_name}_zero"), 0.0)?;
+        // ONNX includes zero in the dynamic range. This is essential for
+        // all-positive/all-negative tensors: using raw min/max would choose a
+        // scale that saturates the quantized values.
+        let adjusted_min = b
+            .builder
+            .min_with_options(
+                x_min,
+                zero,
+                OnnxBuilder::labeled_options(&format!("{output_name}_adjusted_min")),
+            )
+            .map_err(map_op_error)?;
+        let adjusted_max = b
+            .builder
+            .max_with_options(
+                x_max,
+                zero,
+                OnnxBuilder::labeled_options(&format!("{output_name}_adjusted_max")),
+            )
+            .map_err(map_op_error)?;
+        let range = b
+            .builder
+            .sub_with_options(
+                adjusted_max,
+                adjusted_min,
+                OnnxBuilder::labeled_options(&format!("{output_name}_range")),
+            )
+            .map_err(map_op_error)?;
+
+        let one = register_f32_scalar(b, &format!("{output_name}_one"), 1.0)?;
+        let two_fifty_five = register_f32_scalar(b, &format!("{output_name}_255"), 255.0)?;
+        let scale_raw = b
+            .builder
+            .div_with_options(
+                range,
+                two_fifty_five,
+                OnnxBuilder::labeled_options(&format!("{output_name}_scale_raw")),
+            )
+            .map_err(map_op_error)?;
+        let zero_range = b
+            .builder
+            .equal_with_options(
+                range,
+                zero,
+                OnnxBuilder::labeled_options(&format!("{output_name}_zero_range")),
+            )
+            .map_err(map_op_error)?;
+        let scale = b
+            .builder
+            .where_with_options(
+                zero_range,
+                one,
+                scale_raw,
+                OnnxBuilder::labeled_options(&format!("{output_name}_scale")),
+            )
+            .map_err(map_op_error)?;
+
+        let neg_min = b
+            .builder
+            .sub_with_options(
+                zero,
+                adjusted_min,
+                OnnxBuilder::labeled_options(&format!("{output_name}_neg_min")),
+            )
+            .map_err(map_op_error)?;
+        let zero_point_raw = b
+            .builder
+            .div_with_options(
+                neg_min,
+                scale,
+                OnnxBuilder::labeled_options(&format!("{output_name}_zp_raw")),
+            )
+            .map_err(map_op_error)?;
+        let zero_point_rounded = b
+            .builder
+            .round_even_with_options(
+                zero_point_raw,
+                OnnxBuilder::labeled_options(&format!("{output_name}_zp_rounded")),
+            )
+            .map_err(map_op_error)?;
+        let zero_point_clamped = b
+            .builder
+            .clamp_with_options(
+                zero_point_rounded,
+                MLClampOptions {
+                    label: format!("{output_name}_zp_clamped"),
+                    min_value: Some(json!(0.0)),
+                    max_value: Some(json!(255.0)),
+                },
+            )
+            .map_err(map_op_error)?;
+        let zero_point = b
+            .builder
+            .cast_with_options(
+                zero_point_clamped,
+                MLOperandDataType::Uint8,
+                OnnxBuilder::labeled_options(&format!("{output_name}_zero_point")),
+            )
+            .map_err(map_op_error)?;
+        let y = b
+            .builder
+            .quantize_linear_with_zeropoint(x, scale, zero_point)
+            .map_err(map_op_error)?;
+
+        record_node_output(b, &outputs[0], &format!("{output_name}_y"), y);
+        record_node_output(b, &outputs[1], &format!("{output_name}_y_scale"), scale);
+        record_node_output(
+            b,
+            &outputs[2],
+            &format!("{output_name}_y_zero_point"),
+            zero_point,
+        );
+
+        let mut result = ConversionResult::default();
+        result
+            .output_types
+            .insert(outputs[0].clone(), DataType::Uint8);
+        result
+            .output_types
+            .insert(outputs[1].clone(), DataType::Float32);
+        result
+            .output_types
+            .insert(outputs[2].clone(), DataType::Uint8);
+        Ok(result)
+    }
+}
+
+fn register_f32_scalar(
+    b: &mut OnnxBuilder<'_, '_, '_>,
+    name: &str,
+    value: f32,
+) -> Result<MLOperand, OnnxError> {
+    b.register_constant_from_bytes(name, DataType::Float32, &[], value.to_le_bytes().to_vec())?;
+    b.resolve_operand(name)
 }
 
 fn parse_quantize_axis(node: &NodeProto) -> i64 {
@@ -398,6 +611,7 @@ mod tests {
         let handler = ConversionHandler;
         assert!(handler.supports("Cast"));
         assert!(handler.supports("CastLike"));
+        assert!(handler.supports("DynamicQuantizeLinear"));
     }
 
     #[test]

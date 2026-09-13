@@ -16,7 +16,7 @@
  * limitations under the License.
  */
 
-// Convolution operators: Conv, ConvTranspose
+// Convolution operators: Conv, ConvTranspose, ConvInteger
 //
 // Maps ONNX Conv/ConvTranspose to WebNN conv2d/convTranspose2d (NCHW layout).
 //
@@ -43,13 +43,16 @@ use crate::onnx::builder_helpers::{
 use crate::onnx::convert::{sanitize_identifier, OnnxError};
 use crate::onnx::ops::{ConversionContext, ConversionResult, OpHandler};
 use crate::protos::onnx::NodeProto;
+use rustnn::mlcontext::MLOperand;
+use rustnn::operator_enums::MLOperandDataType;
 use rustnn::operator_options::{MLConv2dOptions, MLConvTranspose2dOptions};
+use rustnn::DataType;
 
 pub struct ConvHandler;
 
 impl OpHandler for ConvHandler {
     fn supports(&self, op_type: &str) -> bool {
-        matches!(op_type, "Conv" | "ConvTranspose")
+        matches!(op_type, "Conv" | "ConvTranspose" | "ConvInteger")
     }
 
     fn convert(
@@ -68,6 +71,7 @@ impl OpHandler for ConvHandler {
         match op_type {
             "Conv" => self.convert_conv(node, &node_name, context, b, false),
             "ConvTranspose" => self.convert_conv(node, &node_name, context, b, true),
+            "ConvInteger" => self.convert_conv_integer(node, &node_name, context, b),
             _ => Err(OnnxError::unsupported_op(op_type.to_string(), node_name)),
         }
     }
@@ -134,7 +138,7 @@ fn parse_conv_attrs(node: &NodeProto) -> ConvAttrs {
     attrs
 }
 
-fn lookup_shape(name: &str, context: &ConversionContext) -> Option<Vec<i64>> {
+pub(crate) fn lookup_shape(name: &str, context: &ConversionContext) -> Option<Vec<i64>> {
     if let Some(s) = context.value_shapes.get(name) {
         return Some(s.clone());
     }
@@ -295,6 +299,223 @@ fn conv2d_spatial_out(
 }
 
 impl ConvHandler {
+    fn convert_conv_integer(
+        &self,
+        node: &NodeProto,
+        node_name: &str,
+        context: &ConversionContext,
+        b: &mut OnnxBuilder<'_, '_, '_>,
+    ) -> Result<ConversionResult, OnnxError> {
+        let inputs = node.input.as_slice();
+        if inputs.len() < 2 || inputs.len() > 4 {
+            return Err(OnnxError::InvalidShape(format!(
+                "ConvInteger expects 2 to 4 inputs (X, W[, x_zero_point, w_zero_point]), got {}",
+                inputs.len()
+            )));
+        }
+
+        let input_raw = inputs[0].as_str();
+        let filter_raw = inputs[1].as_str();
+        let input_shape = lookup_shape(input_raw, context).ok_or_else(|| {
+            OnnxError::InvalidShape(format!(
+                "ConvInteger requires known input shape for '{input_raw}'"
+            ))
+        })?;
+        let filter_shape = lookup_shape(filter_raw, context).ok_or_else(|| {
+            OnnxError::InvalidShape(format!(
+                "ConvInteger requires known filter shape for '{filter_raw}'"
+            ))
+        })?;
+        let rank = input_shape.len();
+        if !(rank == 3 || rank == 4) || filter_shape.len() != rank {
+            return Err(OnnxError::unsupported_op(
+                format!("ConvInteger{}D", input_shape.len().saturating_sub(2)),
+                node_name,
+            ));
+        }
+
+        let output_name = output_label(node, node_name);
+        let input = self.center_quantized_operand(
+            b,
+            input_raw,
+            inputs
+                .get(2)
+                .filter(|name| !name.is_empty())
+                .map(String::as_str),
+            context,
+            false,
+            &input_shape,
+            &format!("{output_name}_input"),
+        )?;
+        let filter = self.center_quantized_operand(
+            b,
+            filter_raw,
+            inputs
+                .get(3)
+                .filter(|name| !name.is_empty())
+                .map(String::as_str),
+            context,
+            true,
+            &filter_shape,
+            &format!("{output_name}_filter"),
+        )?;
+
+        let mut attrs = parse_conv_attrs(node);
+        // 1-D ConvInteger: run the centered float operands through the same
+        // trailing-unit-dim conv2d emulation regular 1-D Conv uses.
+        let (input, filter) = if rank == 3 {
+            attrs.strides = Some(extend_with_one(attrs.strides.as_deref(), 1, 2));
+            attrs.dilations = Some(extend_with_one(attrs.dilations.as_deref(), 1, 2));
+            attrs.pads = Some(extend_pads_to_2d(attrs.pads.as_deref()));
+            attrs.kernel_shape = attrs
+                .kernel_shape
+                .as_ref()
+                .map(|ks| extend_with_one(Some(ks.as_slice()), 1, 2));
+            let x4d = b
+                .builder
+                .reshape_with_options(
+                    input,
+                    i64_slice_to_mldim(&[input_shape[0], input_shape[1], input_shape[2], 1])?,
+                    OnnxBuilder::labeled_options(&format!("{output_name}_x4d")),
+                )
+                .map_err(map_op_error)?;
+            let w4d = b
+                .builder
+                .reshape_with_options(
+                    filter,
+                    i64_slice_to_mldim(&[filter_shape[0], filter_shape[1], filter_shape[2], 1])?,
+                    OnnxBuilder::labeled_options(&format!("{output_name}_w4d")),
+                )
+                .map_err(map_op_error)?;
+            (x4d, w4d)
+        } else {
+            (input, filter)
+        };
+        let conv = b
+            .builder
+            .conv2_with_options(
+                input,
+                filter,
+                build_conv2d_options(&attrs, &format!("{output_name}_conv2d"))?,
+            )
+            .map_err(map_op_error)?;
+        let mut out = b
+            .builder
+            .cast_with_options(
+                conv,
+                MLOperandDataType::Int32,
+                OnnxBuilder::labeled_options(&format!("{output_name}_i32")),
+            )
+            .map_err(map_op_error)?;
+        if rank == 3 {
+            let strides = attrs.strides.clone().unwrap_or_else(|| vec![1, 1]);
+            let dilations = attrs.dilations.clone().unwrap_or_else(|| vec![1, 1]);
+            let pads = attrs.pads.clone().unwrap_or_else(|| vec![0, 0, 0, 0]);
+            let effective_pads = if attrs.auto_pad == "VALID" {
+                vec![0, 0, 0, 0]
+            } else if map_auto_pad(&attrs.auto_pad) == "explicit" {
+                onnx_pads_to_webnn(&pads, 2)
+            } else {
+                vec![0, 0, 0, 0]
+            };
+            let spatial_out = conv2d_spatial_out(
+                input_shape[2],
+                filter_shape[2],
+                strides[0],
+                dilations[0],
+                effective_pads[0],
+                effective_pads[1],
+            );
+            out = b
+                .builder
+                .reshape_with_options(
+                    out,
+                    i64_slice_to_mldim(&[input_shape[0], filter_shape[0], spatial_out])?,
+                    OnnxBuilder::labeled_options(&output_name),
+                )
+                .map_err(map_op_error)?;
+        }
+
+        if let Some(onnx_out) = node.output.first() {
+            record_node_output(b, onnx_out, &output_name, out);
+        } else {
+            b.record_operand(&[&output_name], out);
+        }
+        let mut result = ConversionResult::default();
+        if let Some(onnx_out) = node.output.first() {
+            result
+                .output_types
+                .insert(onnx_out.clone(), DataType::Int32);
+        }
+        Ok(result)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn center_quantized_operand(
+        &self,
+        b: &mut OnnxBuilder<'_, '_, '_>,
+        operand_name: &str,
+        zero_point_name: Option<&str>,
+        context: &ConversionContext,
+        is_filter: bool,
+        operand_shape: &[i64],
+        label: &str,
+    ) -> Result<MLOperand, OnnxError> {
+        let operand = b.resolve_operand(operand_name)?;
+        let as_float = b
+            .builder
+            .cast_with_options(
+                operand,
+                MLOperandDataType::Float32,
+                OnnxBuilder::labeled_options(&format!("{label}_float")),
+            )
+            .map_err(map_op_error)?;
+        let Some(zero_point_name) = zero_point_name else {
+            return Ok(as_float);
+        };
+
+        let zero_point = b.resolve_operand(zero_point_name)?;
+        let zero_point_float = b
+            .builder
+            .cast_with_options(
+                zero_point,
+                MLOperandDataType::Float32,
+                OnnxBuilder::labeled_options(&format!("{label}_zero_point_float")),
+            )
+            .map_err(map_op_error)?;
+        let zero_point_shape = if is_filter
+            && lookup_shape(zero_point_name, context).is_some_and(|shape| shape.len() == 1)
+        {
+            // ONNX permits a scalar or one zero point per output channel. WebNN
+            // broadcasting aligns trailing dimensions, so reshape [M] to
+            // [M, 1, 1, ...] for OIHW filters.
+            let mut shape = vec![1i64; operand_shape.len()];
+            shape[0] = operand_shape[0];
+            Some(shape)
+        } else {
+            None
+        };
+        let centered_zero_point = if let Some(shape) = zero_point_shape {
+            b.builder
+                .reshape_with_options(
+                    zero_point_float,
+                    i64_slice_to_mldim(&shape)?,
+                    OnnxBuilder::labeled_options(&format!("{label}_zero_point_reshape")),
+                )
+                .map_err(map_op_error)?
+        } else {
+            zero_point_float
+        };
+
+        b.builder
+            .sub_with_options(
+                as_float,
+                centered_zero_point,
+                OnnxBuilder::labeled_options(&format!("{label}_centered")),
+            )
+            .map_err(map_op_error)
+    }
+
     fn convert_conv(
         &self,
         node: &NodeProto,
@@ -348,7 +569,7 @@ impl ConvHandler {
             }
         } else {
             return Err(OnnxError::InvalidShape(format!(
-                "{}: cannot determine spatial rank — provide kernel_shape attribute or filter/input shape info",
+                "{}: cannot determine spatial rank - provide kernel_shape attribute or filter/input shape info",
                 op_label,
             )));
         };
@@ -628,6 +849,7 @@ mod tests {
         let h = ConvHandler;
         assert!(h.supports("Conv"));
         assert!(h.supports("ConvTranspose"));
+        assert!(h.supports("ConvInteger"));
         assert!(!h.supports("MatMul"));
         assert!(!h.supports("Pool"));
     }
