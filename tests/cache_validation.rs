@@ -219,3 +219,94 @@ fn external_data_model_round_trips_without_embedding_weights() {
     validate_cached_model(&source, &cached_webnn)
         .expect("path-based native ORT resolves external weights");
 }
+
+fn validate_semantic_index_input(input_name: &str, length: i64) {
+    let dir = tempfile::tempdir().expect("temporary cache");
+    let source = dir.path().join(format!("{input_name}.onnx"));
+    let cached_webnn = dir.path().join(format!("{input_name}.webnn"));
+    let model = model(
+        17,
+        graph(
+            input_name,
+            vec![i64_input(input_name, &[length])],
+            vec![f32_output("y", &[length, 1])],
+            vec![node(
+                "Gather",
+                "gather",
+                &["table", input_name],
+                &["y"],
+                &[],
+            )],
+            vec![f32_init("table", &[2, 1], &[0.25, 0.75])],
+        ),
+    );
+    fs::write(&source, model.encode_to_vec()).expect("write semantic-input model");
+    convert_onnx(
+        &source,
+        ConvertOptions {
+            output_path: Some(cached_webnn.clone()),
+            ..ConvertOptions::default()
+        },
+    )
+    .expect("convert semantic-input model");
+    validate_cached_model(&source, &cached_webnn).expect("semantic input stays in range");
+}
+
+#[test]
+fn token_type_ids_stay_within_a_two_row_embedding() {
+    validate_semantic_index_input("token_type_ids", 4);
+}
+
+#[test]
+fn attention_mask_is_binary_and_valid_for_indexing() {
+    validate_semantic_index_input("attention_mask", 65);
+}
+
+#[test]
+fn zero_element_input_round_trips_without_becoming_a_scalar() {
+    use onnx2webnn::protos::onnx::{
+        tensor_shape_proto::dimension::Value as DimensionValue, type_proto::Value as TypeValue,
+    };
+
+    let dir = tempfile::tempdir().expect("temporary cache");
+    let source = dir.path().join("zero-element-input.onnx");
+    let cached_webnn = dir.path().join("zero-element-input.webnn");
+    let mut empty_cache = f32_input("past_key", &[1, 2, 1, 4]);
+    let Some(TypeValue::TensorType(tensor)) =
+        empty_cache.r#type.as_mut().and_then(|ty| ty.value.as_mut())
+    else {
+        panic!("tensor input");
+    };
+    tensor.shape.as_mut().unwrap().dim[2].value =
+        Some(DimensionValue::DimParam("past_sequence_length".into()));
+    let model = model(
+        17,
+        graph(
+            "zero-element-input",
+            vec![empty_cache, f32_input("x", &[1])],
+            vec![f32_output("y", &[1])],
+            vec![node("Identity", "identity", &["x"], &["y"], &[])],
+            vec![],
+        ),
+    );
+    fs::write(&source, model.encode_to_vec()).expect("write zero-element-input model");
+    let overrides = std::collections::HashMap::from([("past_sequence_length".to_string(), 0)]);
+    convert_onnx(
+        &source,
+        ConvertOptions {
+            free_dim_overrides: overrides.clone(),
+            output_path: Some(cached_webnn.clone()),
+            ..ConvertOptions::default()
+        },
+    )
+    .expect("convert zero-element-input model");
+    let summary = validate_cached_model_with_options(
+        &source,
+        &cached_webnn,
+        &overrides,
+        &std::collections::HashMap::new(),
+    )
+    .expect("zero-element input survives native and cached execution");
+    assert_eq!(summary.input_count, 2);
+    assert_eq!(summary.output_count, 1);
+}

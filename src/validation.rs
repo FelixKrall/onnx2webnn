@@ -63,10 +63,11 @@ pub fn validate_cached_model_with_options(
         .rustnn_build_graph(graph_info)
         .map_err(|e| OnnxError::Validation(format!("cached graph build failed: {e}")))?;
     let mut validated = ValidatedGraph { context, graph };
+    let input_count = validated.graph.input_descriptors.len();
     let actual = dispatch_and_collect(&mut validated, &model, &inputs, pinned_inputs)?;
     compare_outputs(&model, &reference, &actual)?;
     Ok(ValidationSummary {
-        input_count: inputs.len() - pinned_inputs.len(),
+        input_count,
         pinned_input_count: pinned_inputs.len(),
         output_count: reference.len(),
     })
@@ -135,76 +136,28 @@ fn feedable_inputs(model: &ModelProto) -> Result<Vec<&ValueInfoProto>, OnnxError
         .collect())
 }
 
-fn deterministic_inputs(
-    model: &ModelProto,
-    free_dim_overrides: &HashMap<String, u32>,
-    pinned_inputs: &HashMap<String, i64>,
-) -> Result<Vec<OnnxInput>, OnnxError> {
-    let feedable = feedable_inputs(model)?;
-    let feedable_names: HashSet<&str> = feedable.iter().map(|input| input.name.as_str()).collect();
-    for name in pinned_inputs.keys() {
-        if !feedable_names.contains(name.as_str()) {
-            return Err(OnnxError::Validation(format!(
-                "pinned input {name} is not a feedable graph input"
-            )));
-        }
+fn checked_element_count(name: &str, shape: &[usize]) -> Result<usize, OnnxError> {
+    if shape.contains(&0) {
+        return Ok(0);
     }
-    feedable
-        .into_iter()
-        .map(|input| {
-            let (elem_type, shape) = tensor_dims(input, free_dim_overrides)?;
-            let count = shape.iter().product::<usize>().max(1);
-            let data = if let Some(value) = pinned_inputs.get(&input.name) {
-                pinned_data(elem_type, count, *value, &input.name)?
-            } else {
-                match elem_type {
-                    x if x == TensorProto_DataType::Float as i32 => TensorData::Float32(
-                        (0..count).map(|i| ((i % 17) as f32 - 8.0) / 16.0).collect(),
-                    ),
-                    x if x == TensorProto_DataType::Float16 as i32 => TensorData::Float16(
-                        (0..count)
-                            .map(|i| f16::from_f32(((i % 17) as f32 - 8.0) / 16.0).to_bits())
-                            .collect(),
-                    ),
-                    x if x == TensorProto_DataType::Int8 as i32 => {
-                        TensorData::Int8((0..count).map(|i| (i % 7) as i8).collect())
-                    }
-                    x if x == TensorProto_DataType::Uint8 as i32 => {
-                        TensorData::Uint8((0..count).map(|i| (i % 7) as u8).collect())
-                    }
-                    x if x == TensorProto_DataType::Int32 as i32 => {
-                        TensorData::Int32((0..count).map(|i| (i % 7) as i32).collect())
-                    }
-                    x if x == TensorProto_DataType::Uint32 as i32 => {
-                        TensorData::Uint32((0..count).map(|i| (i % 7) as u32).collect())
-                    }
-                    x if x == TensorProto_DataType::Int64 as i32 => {
-                        TensorData::Int64((0..count).map(|i| (i % 7) as i64).collect())
-                    }
-                    x if x == TensorProto_DataType::Uint64 as i32 => {
-                        TensorData::Uint64((0..count).map(|i| (i % 7) as u64).collect())
-                    }
-                    x if x == TensorProto_DataType::Bool as i32 => {
-                        TensorData::Uint8((0..count).map(|i| u8::from(i % 2 == 0)).collect())
-                    }
-                    other => {
-                        return Err(OnnxError::Validation(format!(
-                            "unsupported deterministic input dtype {other} for {}",
-                            input.name
-                        )))
-                    }
-                }
-            };
-            Ok(OnnxInput {
-                name: input.name.clone(),
-                shape,
-                data,
-            })
+    shape.iter().try_fold(1usize, |count, &dimension| {
+        count.checked_mul(dimension).ok_or_else(|| {
+            OnnxError::Validation(format!(
+                "input {name} shape {shape:?} overflows element count"
+            ))
         })
-        .collect()
+    })
 }
 
-fn pinned_data(
+fn semantic_input_value(name: &str) -> Option<i64> {
+    match name {
+        "token_type_ids" => Some(0),
+        "attention_mask" => Some(1),
+        _ => None,
+    }
+}
+
+fn repeated_data(
     elem_type: i32,
     count: usize,
     value: i64,
@@ -214,9 +167,7 @@ fn pinned_data(
         ($variant:ident, $type:ty) => {
             TensorData::$variant(vec![
                 <$type>::try_from(value).map_err(|_| {
-                    OnnxError::Validation(format!(
-                        "pinned value {value} is out of range for {name}"
-                    ))
+                    OnnxError::Validation(format!("value {value} is out of range for {name}"))
                 })?;
                 count
             ])
@@ -240,15 +191,101 @@ fn pinned_data(
         }
         x if x == TensorProto_DataType::Bool as i32 => {
             return Err(OnnxError::Validation(format!(
-                "pinned bool input {name} must be 0 or 1, got {value}"
-            )));
+                "bool input {name} must be 0 or 1, got {value}"
+            )))
         }
         other => {
             return Err(OnnxError::Validation(format!(
-                "unsupported pinned input dtype {other} for {name}"
-            )));
+                "unsupported deterministic input dtype {other} for {name}"
+            )))
         }
     })
+}
+
+fn deterministic_data(elem_type: i32, count: usize, name: &str) -> Result<TensorData, OnnxError> {
+    Ok(match elem_type {
+        x if x == TensorProto_DataType::Float as i32 => {
+            TensorData::Float32((0..count).map(|i| ((i % 17) as f32 - 8.0) / 16.0).collect())
+        }
+        x if x == TensorProto_DataType::Float16 as i32 => TensorData::Float16(
+            (0..count)
+                .map(|i| f16::from_f32(((i % 17) as f32 - 8.0) / 16.0).to_bits())
+                .collect(),
+        ),
+        x if x == TensorProto_DataType::Int8 as i32 => {
+            TensorData::Int8((0..count).map(|i| (i % 7) as i8).collect())
+        }
+        x if x == TensorProto_DataType::Uint8 as i32 => {
+            TensorData::Uint8((0..count).map(|i| (i % 7) as u8).collect())
+        }
+        x if x == TensorProto_DataType::Int32 as i32 => {
+            TensorData::Int32((0..count).map(|i| (i % 7) as i32).collect())
+        }
+        x if x == TensorProto_DataType::Uint32 as i32 => {
+            TensorData::Uint32((0..count).map(|i| (i % 7) as u32).collect())
+        }
+        x if x == TensorProto_DataType::Int64 as i32 => {
+            TensorData::Int64((0..count).map(|i| (i % 7) as i64).collect())
+        }
+        x if x == TensorProto_DataType::Uint64 as i32 => {
+            TensorData::Uint64((0..count).map(|i| (i % 7) as u64).collect())
+        }
+        x if x == TensorProto_DataType::Bool as i32 => {
+            TensorData::Uint8((0..count).map(|i| u8::from(i % 2 == 0)).collect())
+        }
+        other => {
+            return Err(OnnxError::Validation(format!(
+                "unsupported deterministic input dtype {other} for {name}"
+            )))
+        }
+    })
+}
+
+fn input_data(
+    elem_type: i32,
+    count: usize,
+    name: &str,
+    pinned_value: Option<i64>,
+) -> Result<TensorData, OnnxError> {
+    if let Some(value) = pinned_value.or_else(|| semantic_input_value(name)) {
+        repeated_data(elem_type, count, value, name)
+    } else {
+        deterministic_data(elem_type, count, name)
+    }
+}
+
+fn deterministic_inputs(
+    model: &ModelProto,
+    free_dim_overrides: &HashMap<String, u32>,
+    pinned_inputs: &HashMap<String, i64>,
+) -> Result<Vec<OnnxInput>, OnnxError> {
+    let feedable = feedable_inputs(model)?;
+    let feedable_names: HashSet<&str> = feedable.iter().map(|input| input.name.as_str()).collect();
+    for name in pinned_inputs.keys() {
+        if !feedable_names.contains(name.as_str()) {
+            return Err(OnnxError::Validation(format!(
+                "pinned input {name} is not a feedable graph input"
+            )));
+        }
+    }
+    feedable
+        .into_iter()
+        .map(|input| {
+            let (elem_type, shape) = tensor_dims(input, free_dim_overrides)?;
+            let count = checked_element_count(&input.name, &shape)?;
+            let data = input_data(
+                elem_type,
+                count,
+                &input.name,
+                pinned_inputs.get(&input.name).copied(),
+            )?;
+            Ok(OnnxInput {
+                name: input.name.clone(),
+                shape,
+                data,
+            })
+        })
+        .collect()
 }
 
 fn clone_inputs(inputs: &[OnnxInput]) -> Vec<OnnxInput> {
@@ -290,6 +327,9 @@ fn write_input(
     tensor: &MLTensor,
     input: &OnnxInput,
 ) -> Result<(), OnnxError> {
+    if checked_element_count(&input.name, &input.shape)? == 0 {
+        return Ok(());
+    }
     let result = match &input.data {
         TensorData::Float32(data) => context.write_tensor(tensor, data),
         TensorData::Float16(data) => context.write_tensor(tensor, data),
@@ -324,13 +364,17 @@ fn read_output(
     tensor: &MLTensor,
     desc: &OperandDescriptor,
 ) -> Result<CollectedOutput, OnnxError> {
-    let count = desc.element_count().unwrap_or(1).max(1);
+    let count = desc
+        .element_count()
+        .ok_or_else(|| OnnxError::Validation("output shape overflows element count".to_string()))?;
     macro_rules! read_numeric {
         ($type:ty) => {{
             let mut data = vec![<$type>::default(); count];
-            context
-                .read_tensor(tensor, &mut data)
-                .map_err(|e| OnnxError::Validation(format!("failed to read output: {e}")))?;
+            if count != 0 {
+                context
+                    .read_tensor(tensor, &mut data)
+                    .map_err(|e| OnnxError::Validation(format!("failed to read output: {e}")))?;
+            }
             CollectedOutput::Numeric(data.into_iter().map(|v| v as f64).collect())
         }};
     }
@@ -338,9 +382,11 @@ fn read_output(
         rustnn::DataType::Float32 => read_numeric!(f32),
         rustnn::DataType::Float16 => {
             let mut data = vec![0u16; count];
-            context
-                .read_tensor(tensor, &mut data)
-                .map_err(|e| OnnxError::Validation(format!("failed to read output: {e}")))?;
+            if count != 0 {
+                context
+                    .read_tensor(tensor, &mut data)
+                    .map_err(|e| OnnxError::Validation(format!("failed to read output: {e}")))?;
+            }
             CollectedOutput::Numeric(
                 data.into_iter()
                     .map(|v| f64::from(f16::from_bits(v).to_f32()))
@@ -351,18 +397,22 @@ fn read_output(
         rustnn::DataType::Int32 => read_numeric!(i32),
         rustnn::DataType::Int64 => {
             let mut data = vec![0i64; count];
-            context
-                .read_tensor(tensor, &mut data)
-                .map_err(|e| OnnxError::Validation(format!("failed to read output: {e}")))?;
+            if count != 0 {
+                context
+                    .read_tensor(tensor, &mut data)
+                    .map_err(|e| OnnxError::Validation(format!("failed to read output: {e}")))?;
+            }
             CollectedOutput::Int64(data)
         }
         rustnn::DataType::Uint8 => read_numeric!(u8),
         rustnn::DataType::Uint32 => read_numeric!(u32),
         rustnn::DataType::Uint64 => {
             let mut data = vec![0u64; count];
-            context
-                .read_tensor(tensor, &mut data)
-                .map_err(|e| OnnxError::Validation(format!("failed to read output: {e}")))?;
+            if count != 0 {
+                context
+                    .read_tensor(tensor, &mut data)
+                    .map_err(|e| OnnxError::Validation(format!("failed to read output: {e}")))?;
+            }
             CollectedOutput::Uint64(data)
         }
         other => {
@@ -392,9 +442,14 @@ fn dispatch_and_collect(
             continue;
         }
         let key = OnnxBuilder::webnn_id(&input.name);
-        let desc = validated.graph.input_descriptors.get(&key).ok_or_else(|| {
-            OnnxError::Validation(format!("cached graph missing input descriptor {key}"))
-        })?;
+        let Some(desc) = validated.graph.input_descriptors.get(&key) else {
+            if checked_element_count(&input.name, &input.shape)? == 0 {
+                continue;
+            }
+            return Err(OnnxError::Validation(format!(
+                "cached graph missing input descriptor {key}"
+            )));
+        };
         let tensor = validated
             .context
             .create_tensor(&tensor_descriptor(desc))
@@ -536,4 +591,73 @@ fn compare_outputs(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn element_count_distinguishes_scalars_zero_dimensions_and_overflow() {
+        assert_eq!(checked_element_count("scalar", &[]).unwrap(), 1);
+        assert_eq!(checked_element_count("empty", &[1, 2, 0, 64]).unwrap(), 0);
+        assert_eq!(
+            checked_element_count("empty", &[usize::MAX, 2, 0]).unwrap(),
+            0
+        );
+        let TensorData::Float32(empty) =
+            input_data(TensorProto_DataType::Float as i32, 0, "past_key", None).unwrap()
+        else {
+            panic!("expected float32 empty input");
+        };
+        assert!(empty.is_empty());
+        assert!(checked_element_count("huge", &[usize::MAX, 2]).is_err());
+    }
+
+    #[test]
+    fn semantic_inputs_use_valid_deterministic_values() {
+        let TensorData::Int64(token_types) = input_data(
+            TensorProto_DataType::Int64 as i32,
+            4,
+            "token_type_ids",
+            None,
+        )
+        .unwrap() else {
+            panic!("expected int64 token types");
+        };
+        assert_eq!(token_types, vec![0; 4]);
+
+        let TensorData::Int64(mask) = input_data(
+            TensorProto_DataType::Int64 as i32,
+            65,
+            "attention_mask",
+            None,
+        )
+        .unwrap() else {
+            panic!("expected int64 attention mask");
+        };
+        assert_eq!(mask, vec![1; 65]);
+        assert_eq!(mask.iter().sum::<i64>() - 1, 64);
+    }
+
+    #[test]
+    fn generic_pattern_and_pinned_precedence_are_preserved() {
+        let TensorData::Int64(generic) =
+            input_data(TensorProto_DataType::Int64 as i32, 9, "input_ids", None).unwrap()
+        else {
+            panic!("expected int64 generic input");
+        };
+        assert_eq!(generic, vec![0, 1, 2, 3, 4, 5, 6, 0, 1]);
+
+        let TensorData::Int64(pinned) = input_data(
+            TensorProto_DataType::Int64 as i32,
+            3,
+            "attention_mask",
+            Some(0),
+        )
+        .unwrap() else {
+            panic!("expected int64 pinned input");
+        };
+        assert_eq!(pinned, vec![0; 3]);
+    }
 }
