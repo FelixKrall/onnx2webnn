@@ -6,14 +6,14 @@ ledger remain in [Full-model numerical validation status](model-validation-statu
 
 ## Recorded run
 
-- Date: 2026-09-14
-- Tested executable: onnx2webnn `aaa33e2` plus current uncommitted validator fixes
+- Date: 2026-09-15
+- Tested executable: onnx2webnn `ec5ba275` plus current uncommitted validator fixes
 - RustNN: `7f07a5e1`
 - Manifest: `tests/models/manifest.json` (52 cases)
 - Runtime: CPU ONNX Runtime 1.29.0
 - Cache state: complete; no model downloads or skips
-- Result: 32 passed and 20 failed
-- Warm wall time: 5m 8.8s, one validation worker
+- Result: 42 passed and 10 failed
+- Warm wall time: 5m 9.9s, one validation worker
 
 ```bash
 ORT_DYLIB_PATH=../rustnn/target/onnxruntime/onnxruntime-linux-x64-1.29.0/lib/libonnxruntime.so.1.29.0 \
@@ -30,13 +30,12 @@ observable.
 | Code | Cases | Furthest stage | Classification | Current ownership |
 |------|------:|----------------|----------------|-------------------|
 | N1 | 4 | Output comparison | Confirmed numerical disagreement | Localize between onnx2webnn lowering, RustNN serialization/reload, and the RustNN ORT backend. |
-| V1 | 10 | Cached-interface validation | Cached graph interface differs from the source ONNX interface | Determine whether each descriptor is intentionally pruned or lost during the cache round trip. |
 | E1 | 4 | WebNN export | Uint4 constants cannot be represented by the current Safetensors export | RustNN graph serialization/external-weight format. |
 | O1 | 2 | Native ORT model load | The source ONNX is rejected before conversion can be compared | Source model/export or ORT compatibility. |
 
-The real sweep has no remaining deterministic-input failures. Only N1 proves that both execution
-paths completed and returned different values. V1 and E1 are conversion/cache-path limitations or
-bugs. O1 fails in the reference model itself.
+The real sweep has no deterministic-input or cached-interface failures. N1 proves that both
+execution paths completed and returned different values. E1 is a cache export limitation, while O1
+fails in the reference model itself.
 
 ## N1: numerical disagreement
 
@@ -50,33 +49,6 @@ bugs. O1 fails in the reference model itself.
 Compare intermediate tensors to locate the first divergent operation. Donut remains the strongest
 first target because its mismatch also occurs with generated weights. FastVLM and Qwen became
 observable only after zero-element input generation was corrected.
-
-## V1: cached graph interface mismatch
-
-The five prefill cases now pass valid empty cache tensors to native ORT, then discover a non-empty
-source input absent from the cached graph. The five cache-enabled cases retain the previously known
-interface differences.
-
-| # | Case | Missing descriptor |
-|--:|------|--------------------|
-| 7 | `distil-whisper--distil-large-v2 :: decoder_model_merged_quantized.onnx` (`cache=0`) | input `past_key_values_0_decoder_key` |
-| 8 | `distil-whisper--distil-large-v2 :: decoder_model_merged_quantized.onnx` (`cache=1`) | input `encoder_hidden_states` |
-| 24 | `Xenova--musicgen-small :: decoder_model_merged_quantized.onnx` (`cache=0`) | input `past_key_values_0_encoder_key` |
-| 25 | `Xenova--musicgen-small :: decoder_model_merged_quantized.onnx` (`cache=1`) | input `encoder_hidden_states` |
-| 31 | `Xenova--LaMini-Flan-T5-783M :: decoder_model_merged_quantized.onnx` (`cache=0`) | input `past_key_values_0_encoder_key` |
-| 32 | `Xenova--LaMini-Flan-T5-783M :: decoder_model_merged_quantized.onnx` (`cache=1`) | output `present_0_encoder_key` |
-| 35 | `Xenova--donut-base-finetuned-docvqa :: decoder_model_merged_quantized.onnx` (`cache=0`) | input `past_key_values_0_encoder_key` |
-| 36 | `Xenova--donut-base-finetuned-docvqa :: decoder_model_merged_quantized.onnx` (`cache=1`) | input `encoder_hidden_states` |
-| 39 | `Xenova--distilbart-cnn-6-6 :: decoder_model_merged_quantized.onnx` (`cache=0`) | input `past_key_values_0_encoder_key` |
-| 40 | `Xenova--distilbart-cnn-6-6 :: decoder_model_merged_quantized.onnx` (`cache=1`) | input `encoder_hidden_states` |
-
-Compare the converted `GraphInfo` interface before export with the reloaded interface:
-
-- A descriptor that disappears only after reload identifies a lossy RustNN cache round trip.
-- A descriptor already absent before export identifies conversion pruning; validation must then
-  distinguish the source ONNX feed interface from the converted branch's dispatch interface.
-- For the missing output, determine whether the branch aliases or intentionally omits the
-  encoder-cache output.
 
 ## E1: Uint4 external-weight serialization
 
@@ -110,9 +82,8 @@ against onnx2webnn correctness.
 ## Repair order
 
 1. Localize N1, beginning with Donut encoder.
-2. Determine whether each V1 descriptor is intentionally pruned or lost during serialization.
-3. Add lossless Uint4 cache serialization for E1.
-4. Resolve or replace the invalid Chronos reference exports for O1.
+2. Add lossless Uint4 cache serialization for E1.
+3. Resolve or replace the invalid Chronos reference exports for O1.
 
 ## Maintenance rule
 

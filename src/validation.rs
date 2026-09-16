@@ -430,32 +430,38 @@ fn dispatch_and_collect(
     pinned_inputs: &HashMap<String, i64>,
 ) -> Result<HashMap<String, CollectedOutput>, OnnxError> {
     let graph_proto = graph(model)?;
-    let input_names: HashSet<String> = feedable_inputs(model)?
+    let mut source_inputs = HashMap::new();
+    for input in inputs
         .iter()
         .filter(|input| !pinned_inputs.contains_key(&input.name))
-        .map(|input| OnnxBuilder::webnn_id(&input.name))
-        .collect();
+    {
+        let key = OnnxBuilder::webnn_id(&input.name);
+        if let Some(previous) = source_inputs.insert(key.clone(), input) {
+            return Err(OnnxError::Validation(format!(
+                "ONNX inputs {} and {} both map to cached input key {key}",
+                previous.name, input.name
+            )));
+        }
+    }
+
+    // Pinning a merged model's branch selector specializes the converted graph. Inputs used only
+    // by the other branch are deliberately absent from the cached interface, while native ORT
+    // still needs the complete source-model feed above. Drive WebNN from its actual interface and
+    // require every retained cached input to map back to the source model.
     let mut input_storage = Vec::new();
     let mut input_keys = Vec::new();
-    for input in inputs {
-        if pinned_inputs.contains_key(&input.name) {
-            continue;
-        }
-        let key = OnnxBuilder::webnn_id(&input.name);
-        let Some(desc) = validated.graph.input_descriptors.get(&key) else {
-            if checked_element_count(&input.name, &input.shape)? == 0 {
-                continue;
-            }
-            return Err(OnnxError::Validation(format!(
-                "cached graph missing input descriptor {key}"
-            )));
-        };
+    for (key, desc) in &validated.graph.input_descriptors {
+        let input = source_inputs.get(key).ok_or_else(|| {
+            OnnxError::Validation(format!(
+                "cached graph input {key} has no matching unpinned ONNX input"
+            ))
+        })?;
         let tensor = validated
             .context
             .create_tensor(&tensor_descriptor(desc))
             .map_err(|e| OnnxError::Validation(format!("failed to create {key}: {e}")))?;
         write_input(&mut validated.context, &tensor, input)?;
-        input_keys.push(key);
+        input_keys.push(key.clone());
         input_storage.push(tensor);
     }
     let input_bindings: BTreeMap<&str, &MLTensor> = input_keys
@@ -466,22 +472,31 @@ fn dispatch_and_collect(
     let mut output_storage = Vec::new();
     let mut output_keys = Vec::new();
     let mut output_map = HashMap::new();
+    let cached_input_names: HashSet<String> =
+        validated.graph.input_descriptors.keys().cloned().collect();
+    let mut source_outputs = HashMap::new();
     for output in &graph_proto.output {
-        let key = OnnxBuilder::output_key_for(&output.name, &input_names);
-        let desc = validated
-            .graph
-            .output_descriptors
-            .get(&key)
-            .ok_or_else(|| {
-                OnnxError::Validation(format!("cached graph missing output descriptor {key}"))
-            })?;
+        let key = OnnxBuilder::output_key_for(&output.name, &cached_input_names);
+        if let Some(previous) = source_outputs.insert(key.clone(), output.name.as_str()) {
+            return Err(OnnxError::Validation(format!(
+                "ONNX outputs {previous} and {} both map to cached output key {key}",
+                output.name
+            )));
+        }
+    }
+    for (key, desc) in &validated.graph.output_descriptors {
+        let onnx_name = source_outputs.get(key).ok_or_else(|| {
+            OnnxError::Validation(format!(
+                "cached graph output {key} has no matching ONNX output"
+            ))
+        })?;
         let tensor = validated
             .context
             .create_tensor(&tensor_descriptor(desc))
             .map_err(|e| OnnxError::Validation(format!("failed to create {key}: {e}")))?;
         output_keys.push(key.clone());
         output_storage.push(tensor);
-        output_map.insert(output.name.clone(), key);
+        output_map.insert((*onnx_name).to_string(), key.clone());
     }
     let output_bindings: BTreeMap<&str, &MLTensor> = output_keys
         .iter()
@@ -517,10 +532,35 @@ fn compare_outputs(
             "native ORT output count mismatch".to_string(),
         ));
     }
-    for (output, expected) in outputs.iter().zip(reference) {
-        let got = actual.get(&output.name).ok_or_else(|| {
-            OnnxError::Validation(format!("cached graph did not produce {}", output.name))
+    let mut reference_by_name = HashMap::new();
+    for expected in reference {
+        if reference_by_name
+            .insert(expected.name.as_str(), expected)
+            .is_some()
+        {
+            return Err(OnnxError::Validation(format!(
+                "native ORT returned duplicate output {}",
+                expected.name
+            )));
+        }
+    }
+    for output in outputs {
+        let expected = reference_by_name.get(output.name.as_str()).ok_or_else(|| {
+            OnnxError::Validation(format!(
+                "native ORT did not return declared output {}",
+                output.name
+            ))
         })?;
+        let Some(got) = actual.get(&output.name) else {
+            if expected.data.is_empty() {
+                continue;
+            }
+            return Err(OnnxError::Validation(format!(
+                "cached graph omitted non-empty ONNX output {} ({} elements)",
+                output.name,
+                expected.data.len()
+            )));
+        };
         let elem_type = output
             .r#type
             .as_ref()

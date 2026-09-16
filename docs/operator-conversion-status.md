@@ -119,7 +119,7 @@ ten direct handlers not yet mirrored there: `CumSum`, `GatherElements`, `GatherN
 | `HardSwish` | Direct WebNN | Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply. |
 | `Hardmax` | Decomposed | Comparison/mask decomposition; requires known input shape. |
 | `Identity` | Direct WebNN | Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply. |
-| `If` | Pattern-only | Only constant or pinned-constant conditions; selected branch is inlined because WebNN has no control flow. |
+| `If` | Folded/static | Only constant or pinned-constant conditions; the selected branch is resolved and inlined during conversion because WebNN has no control flow. Runtime-selectable models therefore require a separate `.webnn`/Safetensors pair per branch. Shared weights are not deduplicated, so keeping both compiled graphs resident may duplicate them in RAM and VRAM. |
 | `ImageDecoder` | Unsupported | No current lowering; the required vision/spatial primitive is absent or not implemented. |
 | `InstanceNormalization` | Direct WebNN | Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply. |
 | `IsInf` | Direct WebNN | Direct WebNN isInfinite; non-default ONNX detect_negative/detect_positive filtering is not implemented. |

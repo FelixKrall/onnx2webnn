@@ -71,6 +71,12 @@ cargo run -- convert --input decoder_model_merged.onnx --optimize `
 Pinned inputs become constants, the chosen `If` branch is inlined, and inputs the branch never
 reads (e.g. the KV cache in the prefill branch) and zero-size dummy outputs are dropped.
 
+Supporting both cache modes therefore produces two independent artifact pairs: one `.webnn` file
+and one Safetensors file for prefill, and another pair for cached decoding. Shared decoder weights
+are not deduplicated between the pairs. Loading both compiled graphs concurrently may duplicate
+those weights in RAM and VRAM; applications can instead keep only the active graph resident and
+manage graph selection and KV-cache handoff themselves.
+
 | Flag | Purpose |
 |------|---------|
 | `--input` | Input `.onnx` path (required) |

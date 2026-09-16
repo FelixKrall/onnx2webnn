@@ -164,6 +164,290 @@ fn pinned_input_name_reused_as_output_uses_the_converted_output_key() {
 }
 
 #[test]
+fn pinned_if_branches_validate_with_their_specialized_input_interfaces() {
+    use onnx2webnn::protos::onnx::{AttributeProto, GraphProto};
+
+    let branch = |name: &str, input: &str| GraphProto {
+        name: name.to_string(),
+        node: vec![node(
+            "Identity",
+            &format!("{name}_identity"),
+            &[input],
+            &["branch_output"],
+            &[],
+        )],
+        output: vec![f32_output("branch_output", &[2])],
+        ..Default::default()
+    };
+    let mut if_node = node("If", "gate", &["use_cache_branch"], &["y"], &[]);
+    if_node.attribute = vec![
+        AttributeProto {
+            name: "then_branch".to_string(),
+            r#type: 5,
+            g: Some(branch("then", "then_input")),
+            ..Default::default()
+        },
+        AttributeProto {
+            name: "else_branch".to_string(),
+            r#type: 5,
+            g: Some(branch("else", "else_input")),
+            ..Default::default()
+        },
+    ];
+    let model = model(
+        17,
+        graph(
+            "merged",
+            vec![
+                f32_input("then_input", &[2]),
+                f32_input("else_input", &[2]),
+                bool_input("use_cache_branch", &[1]),
+            ],
+            vec![f32_output("y", &[2])],
+            vec![if_node],
+            vec![],
+        ),
+    );
+
+    for branch_value in [0, 1] {
+        let dir = tempfile::tempdir().expect("temporary cache");
+        let source = dir.path().join("merged.onnx");
+        let cached_webnn = dir.path().join("merged.webnn");
+        fs::write(&source, model.encode_to_vec()).expect("write merged model");
+        let pins =
+            std::collections::HashMap::from([("use_cache_branch".to_string(), branch_value)]);
+        convert_onnx(
+            &source,
+            ConvertOptions {
+                pinned_inputs: pins.clone(),
+                output_path: Some(cached_webnn.clone()),
+                ..ConvertOptions::default()
+            },
+        )
+        .expect("convert selected branch");
+
+        let summary = validate_cached_model_with_options(
+            &source,
+            &cached_webnn,
+            &std::collections::HashMap::new(),
+            &pins,
+        )
+        .expect("validate selected branch");
+        assert_eq!(summary.input_count, 1);
+        assert_eq!(summary.output_count, 1);
+    }
+}
+
+#[test]
+fn specialized_cache_accepts_pruned_inputs_and_empty_outputs() {
+    let dir = tempfile::tempdir().expect("temporary cache");
+    let source = dir.path().join("specialized.onnx");
+    let cached_webnn = dir.path().join("specialized.webnn");
+    let model = model(
+        17,
+        graph(
+            "specialized",
+            vec![
+                f32_input("x", &[2]),
+                f32_input("dead_branch_input", &[2]),
+                bool_input("use_cache_branch", &[]),
+            ],
+            vec![f32_output("y", &[2]), f32_output("empty_cache", &[0])],
+            vec![node("Identity", "identity", &["x"], &["y"], &[])],
+            vec![f32_init("empty_cache", &[0], &[])],
+        ),
+    );
+    fs::write(&source, model.encode_to_vec()).expect("write specialized model");
+    let pins = std::collections::HashMap::from([("use_cache_branch".to_string(), 0)]);
+    convert_onnx(
+        &source,
+        ConvertOptions {
+            pinned_inputs: pins.clone(),
+            output_path: Some(cached_webnn.clone()),
+            ..ConvertOptions::default()
+        },
+    )
+    .expect("convert specialized model");
+
+    let summary = validate_cached_model_with_options(
+        &source,
+        &cached_webnn,
+        &std::collections::HashMap::new(),
+        &pins,
+    )
+    .expect("validate specialized interface");
+    assert_eq!(summary.input_count, 1);
+    assert_eq!(summary.output_count, 2);
+}
+
+#[test]
+fn specialized_cache_rejects_an_omitted_nonempty_output() {
+    let dir = tempfile::tempdir().expect("temporary cache");
+    let source = dir.path().join("source.onnx");
+    let cache_source = dir.path().join("cache-source.onnx");
+    let cached_webnn = dir.path().join("cached.webnn");
+    let source_model = model(
+        17,
+        graph(
+            "source",
+            vec![f32_input("x", &[2])],
+            vec![f32_output("y", &[2]), f32_output("z", &[2])],
+            vec![
+                node("Identity", "y", &["x"], &["y"], &[]),
+                node("Identity", "z", &["x"], &["z"], &[]),
+            ],
+            vec![],
+        ),
+    );
+    let cache_model = model(
+        17,
+        graph(
+            "cache",
+            vec![f32_input("x", &[2])],
+            vec![f32_output("y", &[2])],
+            vec![node("Identity", "y", &["x"], &["y"], &[])],
+            vec![],
+        ),
+    );
+    fs::write(&source, source_model.encode_to_vec()).expect("write source model");
+    fs::write(&cache_source, cache_model.encode_to_vec()).expect("write cache source");
+    convert_onnx(
+        &cache_source,
+        ConvertOptions {
+            output_path: Some(cached_webnn.clone()),
+            ..ConvertOptions::default()
+        },
+    )
+    .expect("convert cache source");
+
+    let error = validate_cached_model(&source, &cached_webnn)
+        .expect_err("non-empty source output must not be silently omitted");
+    assert!(error
+        .to_string()
+        .contains("cached graph omitted non-empty ONNX output z"));
+}
+
+#[test]
+fn specialized_cache_rejects_extra_inputs_and_outputs() {
+    let dir = tempfile::tempdir().expect("temporary cache");
+    let source = dir.path().join("source.onnx");
+    let extra_input_source = dir.path().join("extra-input.onnx");
+    let extra_output_source = dir.path().join("extra-output.onnx");
+    let extra_input_webnn = dir.path().join("extra-input.webnn");
+    let extra_output_webnn = dir.path().join("extra-output.webnn");
+    let source_model = model(
+        17,
+        graph(
+            "source",
+            vec![f32_input("x", &[2])],
+            vec![f32_output("y", &[2])],
+            vec![node("Identity", "y", &["x"], &["y"], &[])],
+            vec![],
+        ),
+    );
+    let extra_input_model = model(
+        17,
+        graph(
+            "extra-input",
+            vec![f32_input("x", &[2]), f32_input("extra", &[2])],
+            vec![f32_output("y", &[2])],
+            vec![node("Add", "y", &["x", "extra"], &["y"], &[])],
+            vec![],
+        ),
+    );
+    let extra_output_model = model(
+        17,
+        graph(
+            "extra-output",
+            vec![f32_input("x", &[2])],
+            vec![f32_output("y", &[2]), f32_output("extra", &[2])],
+            vec![
+                node("Identity", "y", &["x"], &["y"], &[]),
+                node("Identity", "extra", &["x"], &["extra"], &[]),
+            ],
+            vec![],
+        ),
+    );
+    fs::write(&source, source_model.encode_to_vec()).expect("write source model");
+    fs::write(&extra_input_source, extra_input_model.encode_to_vec())
+        .expect("write extra-input model");
+    fs::write(&extra_output_source, extra_output_model.encode_to_vec())
+        .expect("write extra-output model");
+
+    convert_onnx(
+        &extra_input_source,
+        ConvertOptions {
+            output_path: Some(extra_input_webnn.clone()),
+            ..ConvertOptions::default()
+        },
+    )
+    .expect("convert extra-input model");
+    let error = validate_cached_model(&source, &extra_input_webnn)
+        .expect_err("cached-only input must be rejected");
+    assert!(error
+        .to_string()
+        .contains("cached graph input extra has no matching unpinned ONNX input"));
+
+    convert_onnx(
+        &extra_output_source,
+        ConvertOptions {
+            output_path: Some(extra_output_webnn.clone()),
+            ..ConvertOptions::default()
+        },
+    )
+    .expect("convert extra-output model");
+    let error = validate_cached_model(&source, &extra_output_webnn)
+        .expect_err("cached-only output must be rejected");
+    assert!(error
+        .to_string()
+        .contains("cached graph output extra has no matching ONNX output"));
+}
+
+#[test]
+fn sanitized_source_input_collisions_are_rejected() {
+    let dir = tempfile::tempdir().expect("temporary cache");
+    let source = dir.path().join("source.onnx");
+    let cache_source = dir.path().join("cache-source.onnx");
+    let cached_webnn = dir.path().join("cached.webnn");
+    let source_model = model(
+        17,
+        graph(
+            "source",
+            vec![f32_input("a/b", &[2]), f32_input("a_b", &[2])],
+            vec![f32_output("y", &[2])],
+            vec![node("Identity", "y", &["a/b"], &["y"], &[])],
+            vec![],
+        ),
+    );
+    let cache_model = model(
+        17,
+        graph(
+            "cache",
+            vec![f32_input("a_b", &[2])],
+            vec![f32_output("y", &[2])],
+            vec![node("Identity", "y", &["a_b"], &["y"], &[])],
+            vec![],
+        ),
+    );
+    fs::write(&source, source_model.encode_to_vec()).expect("write source model");
+    fs::write(&cache_source, cache_model.encode_to_vec()).expect("write cache source");
+    convert_onnx(
+        &cache_source,
+        ConvertOptions {
+            output_path: Some(cached_webnn.clone()),
+            ..ConvertOptions::default()
+        },
+    )
+    .expect("convert cache source");
+
+    let error = validate_cached_model(&source, &cached_webnn)
+        .expect_err("ambiguous source input mapping must be rejected");
+    assert!(error
+        .to_string()
+        .contains("both map to cached input key a_b"));
+}
+
+#[test]
 fn external_data_model_round_trips_without_embedding_weights() {
     use onnx2webnn::protos::onnx::StringStringEntryProto;
 
