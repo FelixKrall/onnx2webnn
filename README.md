@@ -2,8 +2,9 @@
 
 ONNX → WebNN lowering crate extracted from [webnn-graph](../webnn-graph). ONNX operators lower
 directly to [rustnn](../rustnn) `MLGraphBuilder`; full-graph validation runs via ORT CPU
-`build()` (`onnx-runtime` feature). There is no JSON IR and no on-disk graph export — success
-means `builder.build()` returns `Ok(MLGraph)`.
+`build()` (`onnx-runtime` feature). There is no intermediate JSON IR. Without `--output`,
+success means `builder.build()` returns `Ok(MLGraph)`; `--output` additionally writes a
+reloadable `.webnn` graph and sibling Safetensors archive.
 
 Supported ONNX opset range: **1–26** (see `MIN_SUPPORTED_OPSET` / `MAX_SUPPORTED_OPSET` in
 `src/onnx/convert.rs`).
@@ -58,6 +59,22 @@ cargo run -- convert --input model.onnx `
 If `model.dims.json` sits beside the ONNX file and no overrides were passed on the CLI, dimension
 bindings are loaded from that sidecar (`freeDimensionOverrides` or a flat JSON object).
 
+With `--output`, artifacts are overwritten in `.onnx-cache` and `.webnn-cache`; add
+`--validate` to reload the saved pair immediately and compare deterministic execution against
+native ORT. RustNN stores logical Int4/Uint4 constants as their original packed nibble bytes in a
+versioned U8 Safetensors extension while the `.webnn` declaration retains the logical dtype and
+shape. This is a RustNN archive convention, not a native Safetensors 4-bit dtype.
+
+`MatMulNBits` is lowered to `dequantizeLinear` followed by ordinary floating-point `matmul` because
+WebNN has no fused low-bit matmul operation. The dequantized weights and activations therefore use
+the scale dtype (`float16` or `float32`; the validated q4 models use `float32`). Native ORT may use
+a fused packed-weight kernel instead. In particular, `MatMulNBits accuracy_level=4` permits ORT to
+quantize activations to Int8 internally, which the WebNN lowering cannot represent; such models are
+recorded as validation-blocked rather than numerically supported.
+
+`--validate-cached` reuses existing cache artifacts and is exclusive with `--output` and
+`--validate`.
+
 Merged decoders (optimum's `decoder_model_merged*.onnx`) branch at runtime on `use_cache_branch`.
 WebNN has no runtime `If`, so pin the input and convert each branch separately:
 
@@ -87,6 +104,9 @@ manage graph selection and KV-cache handoff themselves.
 | `--allow-missing-external-data` | Zero-fill external tensors whose data file is absent (weight-stripped skeleton models) |
 | `--experimental-dynamic-inputs` | Preserve unresolved symbolic dims as dynamic metadata |
 | `--debug` | Verbose conversion logging (global) |
+| `--output` | Overwrite cache-backed `.onnx`, `.webnn`, and Safetensors artifacts |
+| `--validate` | After `--output`, reload and numerically compare against native ORT |
+| `--validate-cached` | Validate existing cache artifacts without reconverting |
 
 On success the CLI prints `✓ ORT graph build succeeded for …`.
 

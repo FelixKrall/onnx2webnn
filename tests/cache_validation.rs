@@ -49,6 +49,65 @@ fn saved_add_graph_reloads_and_matches_native_ort() {
 }
 
 #[test]
+fn packed_uint4_matmul_round_trips_and_matches_native_ort() {
+    let dir = tempfile::tempdir().expect("temporary cache");
+    let source = dir.path().join("matmul-nbits.onnx");
+    let cached_webnn = dir.path().join("matmul-nbits.webnn");
+    let (k, n, block_size) = (32i64, 2i64, 32i64);
+    let packed_weights = (0..n * block_size / 2)
+        .map(|index| ((index * 13 + 7) % 256) as u8)
+        .collect::<Vec<_>>();
+    let mut matmul = node(
+        "MatMulNBits",
+        "matmul_nbits",
+        &["A", "B", "scales"],
+        &["Y"],
+        &[
+            attr_int("K", k),
+            attr_int("N", n),
+            attr_int("bits", 4),
+            attr_int("block_size", block_size),
+        ],
+    );
+    matmul.domain = "com.microsoft".to_string();
+    let mut fixture = model(
+        17,
+        graph(
+            "packed_uint4_matmul",
+            vec![f32_input("A", &[1, k])],
+            vec![f32_output("Y", &[1, n])],
+            vec![matmul],
+            vec![
+                u8_init("B", &[n, 1, block_size / 2], &packed_weights),
+                f32_init("scales", &[n], &[0.05, 0.08]),
+            ],
+        ),
+    );
+    fixture
+        .opset_import
+        .push(onnx2webnn::protos::onnx::OperatorSetIdProto {
+            domain: "com.microsoft".to_string(),
+            version: 1,
+        });
+    fs::write(&source, fixture.encode_to_vec()).expect("write packed fixture");
+
+    convert_onnx(
+        &source,
+        ConvertOptions {
+            output_path: Some(cached_webnn.clone()),
+            ..ConvertOptions::default()
+        },
+    )
+    .expect("convert and export packed fixture");
+
+    assert!(cached_webnn.with_extension("safetensors").exists());
+
+    let summary = validate_cached_model(&source, &cached_webnn).expect("validate packed fixture");
+    assert_eq!(summary.input_count, 1);
+    assert_eq!(summary.output_count, 1);
+}
+
+#[test]
 fn accepted_integer_dtypes_round_trip_exactly() {
     use onnx2webnn::protos::onnx::TensorProto_DataType;
 

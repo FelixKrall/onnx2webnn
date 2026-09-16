@@ -225,6 +225,30 @@ mod tests {
     }
 
     #[test]
+    fn chronos_entries_are_recorded_blockers_but_remain_selectable() {
+        let entries = load_manifest().expect("load repository manifest");
+        let chronos = entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.file.starts_with("kashif--chronos-2-onnx/"))
+            .collect::<Vec<_>>();
+        assert_eq!(chronos.len(), 2);
+
+        for (index, entry) in chronos {
+            let validation = entry.validation.as_ref().expect("validation metadata");
+            assert_eq!(validation.tier, ValidationTier::Blocked);
+            assert!(validation
+                .reason
+                .as_deref()
+                .is_some_and(|reason| !reason.trim().is_empty()));
+            assert!(Selection::All.includes(index, entry));
+            assert!(Selection::Match("chronos-2-onnx".into()).includes(index, entry));
+            assert!(!Selection::Smoke.includes(index, entry));
+            assert!(!Selection::Extended.includes(index, entry));
+        }
+    }
+
+    #[test]
     fn selector_rejects_unknown_values() {
         assert!(Selection::parse("quick").is_err());
         assert!(Selection::parse("match=").is_err());
