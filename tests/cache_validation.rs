@@ -653,3 +653,88 @@ fn zero_element_input_round_trips_without_becoming_a_scalar() {
     assert_eq!(summary.input_count, 2);
     assert_eq!(summary.output_count, 1);
 }
+
+#[test]
+fn numeric_cast_to_bool_normalizes_nonzero_values() {
+    use onnx2webnn::protos::onnx::TensorProto_DataType;
+
+    let dir = tempfile::tempdir().expect("temporary cache");
+    let source = dir.path().join("cast-bool.onnx");
+    let cached_webnn = dir.path().join("cast-bool.webnn");
+    let fixture = model(
+        17,
+        graph(
+            "cast-bool",
+            vec![],
+            vec![f32_output("y", &[5])],
+            vec![
+                node(
+                    "Cast",
+                    "to_bool",
+                    &["x"],
+                    &["as_bool"],
+                    &[attr_int("to", TensorProto_DataType::Bool as i64)],
+                ),
+                node(
+                    "Cast",
+                    "to_float",
+                    &["as_bool"],
+                    &["y"],
+                    &[attr_int("to", TensorProto_DataType::Float as i64)],
+                ),
+            ],
+            vec![f32_init("x", &[5], &[0.0, 1.0, 2.0, -1.0, f32::NAN])],
+        ),
+    );
+    fs::write(&source, fixture.encode_to_vec()).expect("write cast-bool fixture");
+    convert_onnx(
+        &source,
+        ConvertOptions {
+            output_path: Some(cached_webnn.clone()),
+            ..ConvertOptions::default()
+        },
+    )
+    .expect("convert cast-bool fixture");
+    validate_cached_model(&source, &cached_webnn).expect("validate cast-bool fixture");
+}
+
+#[test]
+fn positive_step_slice_round_trips_with_extent_semantics() {
+    let dir = tempfile::tempdir().expect("temporary cache");
+    let source = dir.path().join("strided-slice.onnx");
+    let cached_webnn = dir.path().join("strided-slice.webnn");
+    let fixture = model(
+        17,
+        graph(
+            "strided-slice",
+            vec![f32_input("x", &[10])],
+            vec![f32_output("y", &[4])],
+            vec![node(
+                "Slice",
+                "slice",
+                &["x", "starts", "ends", "axes", "steps"],
+                &["y"],
+                &[],
+            )],
+            vec![
+                i64_init("starts", &[1], &[1]),
+                i64_init("ends", &[1], &[9]),
+                i64_init("axes", &[1], &[0]),
+                i64_init("steps", &[1], &[2]),
+            ],
+        ),
+    );
+    fs::write(&source, fixture.encode_to_vec()).expect("write strided-slice fixture");
+    convert_onnx(
+        &source,
+        ConvertOptions {
+            output_path: Some(cached_webnn.clone()),
+            ..ConvertOptions::default()
+        },
+    )
+    .expect("convert strided-slice fixture");
+    let serialized = fs::read_to_string(&cached_webnn).expect("read serialized graph");
+    assert!(serialized.contains("sizes=[8]"));
+    assert!(serialized.contains("strides=[2]"));
+    validate_cached_model(&source, &cached_webnn).expect("validate strided-slice fixture");
+}

@@ -1,19 +1,26 @@
 # Real-weight validation failures
 
+> **Last edited:** `2026-09-17T11:08:08Z`<br>
+> **Checkout:** `fkrall/cache-backed-validation` at `6f6ad8a`
+>
+> **Freshness:** Use this document only when this provenance is recent relative to the relevant
+> code and commits; otherwise verify the implementation, tests, and Git history before relying
+> on it.
+
 This document is the current triage record for failures from full-model validation with publisher
 weights. Generated-weight failures are intentionally out of scope. The summary and complete case
 ledger remain in [Full-model numerical validation status](model-validation-status.md).
 
 ## Recorded run
 
-- Date: 2026-09-16
-- Tested executable: onnx2webnn `24fdd50` plus the current packed-4-bit/manifest/tolerance worktree
-- RustNN: `7f07a5e1` plus the current packed-4-bit archive worktree
+- Date: 2026-09-17
+- Tested executable: onnx2webnn `6f6ad8a` plus the current Cast/Slice/comparison worktree
+- RustNN: `65e76e67` plus the current Slice-backend worktree
 - Manifest: `tests/models/manifest.json` (52 cases)
 - Runtime: CPU ONNX Runtime 1.29.0
 - Cache state: complete; no model downloads or skips
-- Result: 45 passed and 7 failed
-- Warm wall time: 11m 32s, one validation worker
+- Result: 48 passed and 4 failed
+- Warm wall time: 7m 13.1s, one validation worker
 
 ```bash
 ORT_DYLIB_PATH=../rustnn/target/onnxruntime/onnxruntime-linux-x64-1.29.0/lib/libonnxruntime.so.1.29.0 \
@@ -29,7 +36,7 @@ observable.
 
 | Code | Cases | Furthest stage | Classification | Current ownership |
 |------|------:|----------------|----------------|-------------------|
-| N1 | 4 | Output comparison | Confirmed numerical disagreement | Localize between onnx2webnn lowering and the RustNN ORT backend. |
+| N1 | 1 | Output comparison | Confirmed numerical disagreement | FastVLM prefill remains blocked; its decode specialization passes. |
 | Q1 | 1 | Output comparison | Unsupported `MatMulNBits accuracy_level=4` execution semantics | Requires a WebNN/backend mechanism for Int8-quantized activations with packed q4 weights; do not relax tolerance to hide it. |
 | O1 | 2 | Native ORT model load | The publisher ONNX is rejected before conversion can be compared | Blocked upstream pending a corrected publisher artifact. |
 
@@ -40,15 +47,13 @@ in the reference model itself.
 
 ## N1: numerical disagreement
 
-| # | Case | First mismatch |
-|--:|------|----------------|
-| 11 | `onnx-community--FastVLM-0.5B-ONNX :: decoder_model_merged_quantized.onnx` (`sequence=64`, `past=0`) | `logits[0]`: ORT `0.6691238284111023`, WebNN `1.2111917734146118`, tolerance `0.00007691238284111024` |
-| 33 | `Xenova--detr-resnet-50 :: model_quantized.onnx` | `logits[0]`: ORT `-15.032588958740234`, WebNN `-14.491597175598145`, tolerance `0.0015132588958740236` |
-| 34 | `Xenova--donut-base-finetuned-docvqa :: encoder_model_quantized.onnx` | `last_hidden_state[0]`: ORT `-0.06940168142318726`, WebNN `-0.6064815521240234`, tolerance `0.000016940168142318727` |
-| 48 | `huggingworld--Qwen2.5-VL-3B-Instruct-ONNX :: decoder_model_merged_quantized.onnx` (`past=0`) | `logits[152421]`: ORT `-0.12115895748138428`, WebNN `-0.11994504928588867`, tolerance `0.0011211589574813842` |
+| # | Case | Comparison diagnostics |
+|--:|------|------------------------|
+| 11 | `onnx-community--FastVLM-0.5B-ONNX :: decoder_model_merged_quantized.onnx` (`sequence=64`, `past=0`) | `9,702,133 / 9,705,344` logits exceed tolerance; maximum absolute error `10.0572`, mean absolute error `0.760946`, RMSE `1.05325`. |
 
-Compare intermediate tensors to locate the first divergent operation. Donut remains the strongest
-first target because its mismatch also occurs with generated weights.
+The source uses fused GroupQueryAttention while the WebNN path decomposes it, with repeated
+DynamicQuantizeLinear steps amplifying drift across prefill. The sequence-1 decode specialization
+passes, so only this fixed prefill specialization is recorded as blocked.
 
 ## Q1: unsupported `MatMulNBits accuracy_level=4`
 
@@ -83,7 +88,8 @@ provide a numerical oracle and are not evidence for or against onnx2webnn correc
 
 ## Repair order
 
-1. Localize N1, beginning with Donut encoder.
+1. Track or further localize the blocked FastVLM prefill disagreement without weakening
+   comparison tolerance.
 2. Track Q1 until WebNN or a backend-specific fusion can express Int8 activations with packed q4 weights.
 3. Monitor the upstream Chronos repository for corrected reference exports.
 

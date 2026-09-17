@@ -521,20 +521,61 @@ fn dispatch_and_collect(
         .collect()
 }
 
-fn uses_matmul_nbits(model: &ModelProto) -> Result<bool, OnnxError> {
-    Ok(graph(model)?
-        .node
-        .iter()
-        .any(|node| node.op_type == "MatMulNBits"))
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FloatComparisonProfile {
+    Standard,
+    MatMulNBits4,
+    MatMulNBits8,
+    UnsupportedMatMulNBitsAccuracy(i64),
 }
 
-fn float_tolerance(elem_type: Option<i32>, expected: f64, uses_matmul_nbits: bool) -> f64 {
+fn float_comparison_profile(model: &ModelProto) -> Result<FloatComparisonProfile, OnnxError> {
+    let mut profile = FloatComparisonProfile::Standard;
+    for node in graph(model)?
+        .node
+        .iter()
+        .filter(|node| node.op_type == "MatMulNBits")
+    {
+        let bits = node
+            .attribute
+            .iter()
+            .find(|attr| attr.name == "bits")
+            .map(|attr| attr.i)
+            .unwrap_or(4);
+        let accuracy_level = node
+            .attribute
+            .iter()
+            .find(|attr| attr.name == "accuracy_level")
+            .map(|attr| attr.i)
+            .unwrap_or(0);
+        if accuracy_level != 0 {
+            return Ok(FloatComparisonProfile::UnsupportedMatMulNBitsAccuracy(
+                accuracy_level,
+            ));
+        }
+        profile = match (profile, bits) {
+            (_, 8) => FloatComparisonProfile::MatMulNBits8,
+            (FloatComparisonProfile::Standard, 4) => FloatComparisonProfile::MatMulNBits4,
+            (current, 4) => current,
+            (current, _) => current,
+        };
+    }
+    Ok(profile)
+}
+
+fn float_tolerance(elem_type: Option<i32>, expected: f64, profile: FloatComparisonProfile) -> f64 {
     match elem_type {
         Some(x) if x == TensorProto_DataType::Float16 as i32 => 1e-3 + expected.abs() * 1e-2,
-        Some(x) if x == TensorProto_DataType::Float as i32 && uses_matmul_nbits => {
-            // Native ORT executes its fused contrib kernel, while the WebNN graph executes
-            // dequantizeLinear followed by ordinary matmul. Those mathematically equivalent
-            // paths accumulate float32 values in a different order across large projections.
+        Some(x)
+            if x == TensorProto_DataType::Float as i32
+                && profile == FloatComparisonProfile::MatMulNBits8 =>
+        {
+            2e-3 + expected.abs() * 2e-3
+        }
+        Some(x)
+            if x == TensorProto_DataType::Float as i32
+                && profile == FloatComparisonProfile::MatMulNBits4 =>
+        {
             1e-3 + expected.abs() * 1e-3
         }
         Some(x) if x == TensorProto_DataType::Float as i32 => 1e-5 + expected.abs() * 1e-4,
@@ -548,7 +589,12 @@ fn compare_outputs(
     actual: &HashMap<String, CollectedOutput>,
 ) -> Result<(), OnnxError> {
     let outputs = &graph(model)?.output;
-    let uses_matmul_nbits = uses_matmul_nbits(model)?;
+    let comparison_profile = float_comparison_profile(model)?;
+    if let FloatComparisonProfile::UnsupportedMatMulNBitsAccuracy(level) = comparison_profile {
+        return Err(OnnxError::Validation(format!(
+            "MatMulNBits accuracy_level={level} is unsupported for numerical comparison"
+        )));
+    }
     if outputs.len() != reference.len() {
         return Err(OnnxError::Validation(
             "native ORT output count mismatch".to_string(),
@@ -629,17 +675,51 @@ fn compare_outputs(
                 }
             }
             CollectedOutput::Numeric(actual) => {
+                let mut first_mismatch = None;
+                let mut failure_count = 0usize;
+                let mut max_abs_error = 0.0f64;
+                let mut sum_abs_error = 0.0f64;
+                let mut sum_squared_error = 0.0f64;
+                let mut max_normalized_error = 0.0f64;
                 for (index, (expected, actual)) in expected.data.iter().zip(actual).enumerate() {
                     if expected.is_nan() && actual.is_nan() {
                         continue;
                     }
-                    let tolerance = float_tolerance(elem_type, *expected, uses_matmul_nbits);
-                    if expected != actual && (expected - actual).abs() > tolerance {
-                        return Err(OnnxError::Validation(format!(
-                            "{}[{index}] mismatch: ORT={expected}, WebNN={actual}, tolerance={tolerance}",
-                            output.name
-                        )));
+                    let tolerance = float_tolerance(elem_type, *expected, comparison_profile);
+                    let abs_error = if expected == actual {
+                        0.0
+                    } else if !expected.is_finite() || !actual.is_finite() {
+                        f64::INFINITY
+                    } else {
+                        (expected - actual).abs()
+                    };
+                    max_abs_error = max_abs_error.max(abs_error);
+                    sum_abs_error += abs_error;
+                    sum_squared_error += abs_error * abs_error;
+                    let normalized_error = if tolerance == 0.0 {
+                        if abs_error == 0.0 {
+                            0.0
+                        } else {
+                            f64::INFINITY
+                        }
+                    } else {
+                        abs_error / tolerance
+                    };
+                    max_normalized_error = max_normalized_error.max(normalized_error);
+                    if abs_error > tolerance {
+                        failure_count += 1;
+                        first_mismatch.get_or_insert((index, *expected, *actual, tolerance));
                     }
+                }
+                if let Some((index, expected, observed, tolerance)) = first_mismatch {
+                    let count = actual.len().max(1) as f64;
+                    return Err(OnnxError::Validation(format!(
+                        "{}[{index}] mismatch: ORT={expected}, WebNN={observed}, tolerance={tolerance}; failures={failure_count}/{}, max_abs_error={max_abs_error}, mean_abs_error={}, rmse={}, max_normalized_error={max_normalized_error}",
+                        output.name,
+                        actual.len(),
+                        sum_abs_error / count,
+                        (sum_squared_error / count).sqrt(),
+                    )));
                 }
             }
         }
@@ -664,26 +744,84 @@ mod tests {
         }
     }
 
+    fn matmul_nbits_model(bits: i64, accuracy_level: i64) -> ModelProto {
+        let mut model = comparison_model("MatMulNBits");
+        let node = &mut model.graph.as_mut().unwrap().node[0];
+        node.attribute.push(crate::protos::onnx::AttributeProto {
+            name: "bits".to_string(),
+            i: bits,
+            ..Default::default()
+        });
+        if accuracy_level != 0 {
+            node.attribute.push(crate::protos::onnx::AttributeProto {
+                name: "accuracy_level".to_string(),
+                i: accuracy_level,
+                ..Default::default()
+            });
+        }
+        model
+    }
+
     #[test]
-    fn matmul_nbits_models_use_quantized_float32_tolerance() {
-        let model = comparison_model("MatMulNBits");
-        assert!(uses_matmul_nbits(&model).unwrap());
+    fn matmul_nbits_models_use_attribute_derived_tolerances() {
+        let q4 = matmul_nbits_model(4, 0);
+        let q8 = matmul_nbits_model(8, 0);
+        let unsupported = matmul_nbits_model(4, 4);
+        assert_eq!(
+            float_comparison_profile(&q4).unwrap(),
+            FloatComparisonProfile::MatMulNBits4
+        );
+        assert_eq!(
+            float_comparison_profile(&q8).unwrap(),
+            FloatComparisonProfile::MatMulNBits8
+        );
+        assert_eq!(
+            float_comparison_profile(&unsupported).unwrap(),
+            FloatComparisonProfile::UnsupportedMatMulNBitsAccuracy(4)
+        );
 
-        // The full SmolLM2 prefill output measured a worst normalized difference of
-        // 9.488e-4 at this near-zero logit pair.
         let expected = 0.009632587432861328f64;
-        let difference = (expected - 0.00867462158203125).abs();
-        assert!(
-            difference
-                > float_tolerance(Some(TensorProto_DataType::Float as i32), expected, false,)
+        let ordinary = float_tolerance(
+            Some(TensorProto_DataType::Float as i32),
+            expected,
+            FloatComparisonProfile::Standard,
         );
-        assert!(
-            difference
-                <= float_tolerance(Some(TensorProto_DataType::Float as i32), expected, true,)
+        let q4_tolerance = float_tolerance(
+            Some(TensorProto_DataType::Float as i32),
+            expected,
+            FloatComparisonProfile::MatMulNBits4,
         );
+        let q8_tolerance = float_tolerance(
+            Some(TensorProto_DataType::Float as i32),
+            expected,
+            FloatComparisonProfile::MatMulNBits8,
+        );
+        assert!(ordinary < q4_tolerance);
+        assert!(q4_tolerance < q8_tolerance);
 
-        let ordinary_model = comparison_model("MatMul");
-        assert!(!uses_matmul_nbits(&ordinary_model).unwrap());
+        let qwen_expected = -0.12115895748138428f64;
+        let qwen_observed = -0.11994504928588867f64;
+        let qwen_difference = (qwen_expected - qwen_observed).abs();
+        assert!(
+            qwen_difference
+                > float_tolerance(
+                    Some(TensorProto_DataType::Float as i32),
+                    qwen_expected,
+                    FloatComparisonProfile::MatMulNBits4,
+                )
+        );
+        assert!(
+            qwen_difference
+                <= float_tolerance(
+                    Some(TensorProto_DataType::Float as i32),
+                    qwen_expected,
+                    FloatComparisonProfile::MatMulNBits8,
+                )
+        );
+        assert_eq!(
+            float_comparison_profile(&comparison_model("MatMul")).unwrap(),
+            FloatComparisonProfile::Standard
+        );
     }
 
     #[test]

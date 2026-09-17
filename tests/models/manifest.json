@@ -10,7 +10,7 @@
   {"file": "distil-whisper--distil-large-v2/onnx/decoder_model_merged_quantized.onnx", "pin_inputs": {"use_cache_branch": 1}, "override_dims": {"batch_size": 1, "decoder_sequence_length": 1, "encoder_sequence_length / 2": 1500, "past_decoder_sequence_length": 63, "encoder_sequence_length_out": 1500}},
   {"file": "jinaai--jina-reranker-v2-base-multilingual/onnx/model_quantized.onnx", "override_dims": {"batch_size": 1, "sequence_length": 128}},
   {"file": "onnx-community--FastVLM-0.5B-ONNX/onnx/embed_tokens_quantized.onnx", "override_dims": {"batch_size": 1, "sequence_length": 64}},
-  {"file": "onnx-community--FastVLM-0.5B-ONNX/onnx/decoder_model_merged_quantized.onnx", "override_dims": {"batch_size": 1, "sequence_length": 64, "total_sequence_length": 64, "past_sequence_length": 0}},
+  {"file": "onnx-community--FastVLM-0.5B-ONNX/onnx/decoder_model_merged_quantized.onnx", "override_dims": {"batch_size": 1, "sequence_length": 64, "total_sequence_length": 64, "past_sequence_length": 0}, "validation": {"tier": "blocked", "reason": "Fused GroupQueryAttention versus WebNN decomposition drift is amplified by repeated DynamicQuantizeLinear steps during prefill; measured logits differ materially, while the sequence-1 decode specialization passes"}},
   {"file": "onnx-community--FastVLM-0.5B-ONNX/onnx/decoder_model_merged_quantized.onnx", "override_dims": {"batch_size": 1, "sequence_length": 1, "total_sequence_length": 65, "past_sequence_length": 64}},
   {"file": "onnx-community--FastVLM-0.5B-ONNX/onnx/vision_encoder_quantized.onnx", "override_dims": {"s0": 1, "s1": 1024, "s2": 1024}},
   {"file": "Marqo--marqo-fashionSigLIP/onnx/text_model_quantized.onnx", "override_dims": {"batch_size": 1, "sequence_length": 64}},

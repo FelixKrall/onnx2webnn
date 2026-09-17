@@ -1,5 +1,12 @@
 # ONNX → WebNN operator conversion status
 
+> **Last edited:** `2026-09-17T11:08:08Z`<br>
+> **Checkout:** `fkrall/cache-backed-validation` at `6f6ad8a`
+>
+> **Freshness:** Use this document only when this provenance is recent relative to the relevant
+> code and commits; otherwise verify the implementation, tests, and Git history before relying
+> on it.
+
 This document is a capability inventory for the current **onnx2webnn** branch. It contains no
 implementation phases or rollout plan. The baseline is the 198 non-deprecated standard
 `ai.onnx` operator names active at opset 26.
@@ -64,7 +71,7 @@ ten direct handlers not yet mirrored there: `CumSum`, `GatherElements`, `GatherN
 | `BitwiseOr` | Unsupported | WebNN has no corresponding bitwise/reinterpretation primitive. |
 | `BitwiseXor` | Unsupported | WebNN has no corresponding bitwise/reinterpretation primitive. |
 | `BlackmanWindow` | Unsupported | WebNN has no corresponding signal-processing primitive. |
-| `Cast` | Direct WebNN | Direct WebNN cast; unsupported ONNX/string element types are rejected. |
+| `Cast` | Direct WebNN | Direct WebNN cast where the target type supports it; numeric-to-Boolean casts normalize nonzero values through a WebNN comparison. Unsupported ONNX/string element types are rejected. |
 | `CastLike` | Decomposed | Infers the second input's type at conversion time, then emits WebNN cast. |
 | `Ceil` | Direct WebNN | Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply. |
 | `Celu` | Decomposed | Elementwise decomposition; no native WebNN celu. |
@@ -210,7 +217,7 @@ ten direct handlers not yet mirrored there: `CumSum`, `GatherElements`, `GatherN
 | `Sin` | Direct WebNN | Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply. |
 | `Sinh` | Decomposed | Elementwise decomposition; WebNN has no native sinh. |
 | `Size` | Unsupported | No current executable lowering. |
-| `Slice` | Direct WebNN | Direct WebNN slice/reverse; starts, sizes, axes, and steps must resolve at build time. |
+| `Slice` | Direct WebNN | Direct WebNN slice/reverse; starts, sizes, axes, and steps must resolve at build time. Positive steps are preserved as strides; negative steps support only the full-axis reverse pattern. |
 | `Softmax` | Direct WebNN | Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply. |
 | `SoftmaxCrossEntropyLoss` | Unsupported | No current inference lowering; exporters may remove applicable training artifacts. |
 | `Softplus` | Direct WebNN | Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply. |
