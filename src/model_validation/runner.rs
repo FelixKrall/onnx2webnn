@@ -5,7 +5,7 @@
 
 use super::full_model::cache_full_model;
 use super::generated::{cache_generated_model, GENERATOR_VERSION};
-use super::manifest::{load_manifest_from, Entry, Selection, ValidationTier};
+use super::manifest::{load_manifest_from, Entry, Selection};
 use crate::{convert_onnx, validate_cached_model_with_options, ConvertOptions};
 use std::collections::HashMap;
 use std::fmt;
@@ -128,32 +128,18 @@ struct Sweep {
 }
 
 impl Sweep {
-    fn model(&self, file: &str) -> Result<PathBuf, String> {
-        let key = format!("{}:{file}", self.options.weights);
+    fn model(&self, entry: &Entry) -> Result<PathBuf, String> {
+        let key = format!("{}:{}", self.options.weights, entry.source_key());
         let cell = self.models.lock().unwrap().entry(key).or_default().clone();
         cell.get_or_init(|| match self.options.weights {
-            WeightMode::Real => cache_full_model(file),
-            WeightMode::Generated => cache_generated_model(file),
+            WeightMode::Real => cache_full_model(entry),
+            WeightMode::Generated => cache_generated_model(&entry.file, entry.revision.as_deref()),
         })
         .clone()
     }
 
     fn validate(&self, index: usize, entry: &Entry) {
         let label = entry.label(index);
-        if entry
-            .validation
-            .as_ref()
-            .is_some_and(|v| v.tier == ValidationTier::Blocked)
-        {
-            eprintln!(
-                "TRY  {label}\n     recorded blocker: {}",
-                entry
-                    .validation
-                    .as_ref()
-                    .and_then(|v| v.reason.as_deref())
-                    .unwrap_or("missing reason")
-            );
-        }
         match self.validate_inner(entry) {
             Ok((inputs, pins, outputs)) => {
                 self.passed.fetch_add(1, Ordering::Relaxed);
@@ -174,7 +160,7 @@ impl Sweep {
 
     fn validate_inner(&self, entry: &Entry) -> Result<(usize, usize, usize), String> {
         let onnx_path = self
-            .model(&entry.file)
+            .model(entry)
             .map_err(|e| format!("model preparation: {e}"))?;
         let version = if self.options.weights == WeightMode::Generated {
             format!("-g{GENERATOR_VERSION}")

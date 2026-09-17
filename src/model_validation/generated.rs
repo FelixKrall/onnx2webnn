@@ -60,7 +60,10 @@ struct SourceLocation {
     inline_encoding: Option<String>,
 }
 
-pub fn cache_generated_model(file: &str) -> Result<PathBuf, String> {
+pub fn cache_generated_model(
+    file: &str,
+    requested_revision: Option<&str>,
+) -> Result<PathBuf, String> {
     let relative = safe_relative(file)?;
     let target = cache_root().join("generated").join(relative);
     let data_name = format!(
@@ -73,7 +76,7 @@ pub fn cache_generated_model(file: &str) -> Result<PathBuf, String> {
     let data_path = target.with_file_name(&data_name);
     let metadata_path = target.with_extension("generated.complete.json");
     let refresh = std::env::var_os("O2W_MODEL_CACHE_REFRESH").is_some();
-    if !refresh && complete(&target, &data_path, &metadata_path) {
+    if !refresh && complete(&target, &data_path, &metadata_path, requested_revision) {
         return Ok(target);
     }
     if metadata_path.exists() {
@@ -81,7 +84,10 @@ pub fn cache_generated_model(file: &str) -> Result<PathBuf, String> {
             .map_err(|e| format!("remove stale {}: {e}", metadata_path.display()))?;
     }
 
-    let revision = resolve_revision(file)?;
+    let revision = match requested_revision {
+        Some(revision) => revision.to_string(),
+        None => resolve_revision(file)?,
+    };
     let source = HubSource::open_revision(file, &revision)?;
     let (skeleton, _) = strip_model(source, KEEP_BYTES)?;
     let source_fingerprint = hex(&Sha256::digest(&skeleton));
@@ -121,7 +127,7 @@ pub fn cache_generated_model(file: &str) -> Result<PathBuf, String> {
     Ok(target)
 }
 
-fn complete(model: &Path, data: &Path, metadata: &Path) -> bool {
+fn complete(model: &Path, data: &Path, metadata: &Path, requested_revision: Option<&str>) -> bool {
     let Ok(bytes) = fs::read(metadata) else {
         return false;
     };
@@ -129,6 +135,7 @@ fn complete(model: &Path, data: &Path, metadata: &Path) -> bool {
         return false;
     };
     meta.format == GENERATOR_VERSION
+        && requested_revision.is_none_or(|revision| meta.revision == revision)
         && fs::metadata(model)
             .map(|m| m.len() == meta.model_length)
             .unwrap_or(false)

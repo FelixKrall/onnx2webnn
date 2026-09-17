@@ -86,23 +86,32 @@ struct Sweep {
 }
 
 impl Sweep {
-    fn skeleton(&self, file: &str) -> Skeleton {
+    fn skeleton(&self, entry: &Entry) -> Skeleton {
+        let file = entry.file.as_str();
         let cell = self
             .skeletons
             .lock()
             .unwrap()
-            .entry(file.to_string())
+            .entry(entry.source_key())
             .or_default()
             .clone();
         cell.get_or_init(|| {
             let started = std::time::Instant::now();
-            let cached = matches!(self.source, Source::Hub).then(|| cache_dir().join(file));
+            let cached = matches!(self.source, Source::Hub).then(|| {
+                entry
+                    .revision
+                    .as_deref()
+                    .map(|revision| cache_dir().join("revisions").join(revision).join(file))
+                    .unwrap_or_else(|| cache_dir().join(file))
+            });
             if let Some(bytes) = cached.as_ref().and_then(|path| std::fs::read(path).ok()) {
                 let note = format!("skeleton {:.2} MB (cached)", bytes.len() as f64 / 1e6);
                 return Ok((Arc::new(bytes), note));
             }
             let (bytes, stats) = match &self.source {
-                Source::Hub => strip_model(HubSource::open(file)?, KEEP_BYTES)?,
+                Source::Hub => {
+                    strip_model(HubSource::open_revision(file, entry.revision())?, KEEP_BYTES)?
+                }
                 Source::StripDir(dir) => strip_model(FileSource::open(&dir.join(file))?, KEEP_BYTES)?,
                 Source::Dir(_) => unreachable!("full models are converted from disk"),
             };
@@ -145,15 +154,13 @@ impl Sweep {
             Source::Dir(dir) => convert_onnx(dir.join(&entry.file), options)
                 .map(|_| String::new())
                 .map_err(|e| e.to_string()),
-            Source::Hub | Source::StripDir(_) => {
-                self.skeleton(&entry.file).and_then(|(bytes, note)| {
-                    let model = ModelProto::decode(&bytes[..])
-                        .map_err(|e| format!("decode skeleton: {e}"))?;
-                    convert_model_proto(model, &options)
-                        .map(|_| note)
-                        .map_err(|e| e.to_string())
-                })
-            }
+            Source::Hub | Source::StripDir(_) => self.skeleton(entry).and_then(|(bytes, note)| {
+                let model =
+                    ModelProto::decode(&bytes[..]).map_err(|e| format!("decode skeleton: {e}"))?;
+                convert_model_proto(model, &options)
+                    .map(|_| note)
+                    .map_err(|e| e.to_string())
+            }),
         };
         match result {
             Ok(note) => {
@@ -182,17 +189,17 @@ impl Sweep {
         if matches!(self.source, Source::Dir(_)) {
             return;
         }
-        let mut files: Vec<&str> = entries.iter().map(|(_, e)| e.file.as_str()).collect();
-        files.sort_unstable();
-        files.dedup();
-        let queue = Mutex::new(files);
+        let mut sources: Vec<&Entry> = entries.iter().map(|(_, entry)| *entry).collect();
+        sources.sort_unstable_by_key(|entry| entry.source_key());
+        sources.dedup_by(|left, right| left.source_key() == right.source_key());
+        let queue = Mutex::new(sources);
         std::thread::scope(|scope| {
             for _ in 0..workers {
                 scope.spawn(|| loop {
-                    let Some(file) = queue.lock().unwrap().pop() else {
+                    let Some(entry) = queue.lock().unwrap().pop() else {
                         break;
                     };
-                    let _ = self.skeleton(file);
+                    let _ = self.skeleton(entry);
                 });
             }
         });

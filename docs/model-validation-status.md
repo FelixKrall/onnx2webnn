@@ -1,7 +1,7 @@
 # Full-model numerical validation status
 
-> **Last edited:** `2026-09-17T15:25:28Z`<br>
-> **Checkout:** `fkrall/cache-backed-validation` at `d4d350b`
+> **Last edited:** `2026-09-17T16:56:50Z`<br>
+> **Checkout:** `fkrall/cache-backed-validation` at `25ea94c`
 >
 > **Freshness:** Use this document only when this provenance is recent relative to the relevant
 > code and commits; otherwise verify the implementation, tests, and Git history before relying
@@ -11,7 +11,9 @@ This document tracks the **latest recorded** full-model numerical-validation swe
 history of changes that materially altered coverage. Only the latest sweep keeps a complete
 per-case ledger; older ledgers and duplicated historical failure tables are intentionally omitted.
 
-The skeleton sweep establishes broad graph-construction coverage. Numerical validation additionally
+The skeleton sweep establishes broad graph-construction coverage. The manifest contains only model
+selection and execution configuration; numerical status and blocker triage live in this document and
+the linked failure analysis. Numerical validation additionally
 exports the converted graph, reloads its `.webnn` and Safetensors artifacts, executes both the
 original ONNX model and the reloaded graph on CPU ONNX Runtime, and compares matching outputs.
 
@@ -21,6 +23,28 @@ prefill-to-decode loop or growing KV-cache reuse. A decode artifact that
 accepts a fixed past length `N` normally produces a cache of length `N + 1`, which cannot be fed
 back into that same fixed-shape artifact. Repeated decoding therefore still requires proper dynamic
 cache shapes, separately specialized artifacts, or a fixed-capacity cache with an explicit position.
+
+## Validation automation
+
+Pull requests use `tests/models/ci-validation.json` as the required numerical-validation contract.
+Linux/ORT is blocking; macOS/CoreML runs the identical set as an experimental, non-blocking job;
+Windows does not run numerical validation. Membership is defined by the curated file itself and the
+runner invokes it with `--selection all`. Every entry must be suitable for hosted runners and include
+a full immutable Hugging Face commit revision and a lowercase SHA-256 for its primary ONNX file.
+The downloader verifies that digest both after download and on cache reuse.
+
+To add a required model, first confirm it passes on ORT and CoreML, then add its exact file, commit
+revision, downloaded-file digest, fixed dimension overrides, and any pinned inputs to
+`tests/models/ci-validation.json`. This file is hand-maintained. `scripts/generate_manifest.py` only
+regenerates `tests/models/manifest.json` and must not be used to update or carry CI pins.
+
+The `Full model validation` workflow is manually dispatched with either real or generated weights.
+It runs the entire generated manifest sequentially on a runner labeled `self-hosted`, `linux`,
+`x64`, and `onnx2webnn-validation`. The runner must provide network access, a writable persistent
+`/var/cache/onnx2webnn`, at least a 100 GiB filesystem, and approximately 32 GiB RAM. Model sources
+and generated fixtures persist; WebNN exports are temporary. Provisioning, storage checks, and
+build failures are fatal. Per-model validation failures remain diagnostic: the workflow emits a
+warning and uploads its complete log for 14 days. There is no scheduled or extended-tier sweep.
 
 ### Runtime dtypes and comparison tolerances
 
@@ -56,11 +80,16 @@ activations. Voxtral uses level 4 on all 211 `MatMulNBits` nodes and remains blo
 ## Latest recorded sweep
 
 - Generated sweep: 2026-09-12 at onnx2webnn `4926c3e`
-- Real sweep: 2026-09-17 at onnx2webnn `d4d350b`
-- RustNN: `724d076b`
+- Real sweep: 2026-09-17 at onnx2webnn `25ea94c`
+- RustNN: `28fb3bbe`
 - ORT: repository-local Linux x64 1.29.0 build
-- Manifest: `tests/models/manifest.json` (52 cases, 45 unique ONNX files)
+- Manifest: `tests/models/manifest.json` (51 cases, 44 unique ONNX files)
 - Execution: one validation worker; ORT may use multiple CPU threads inside a case
+- Skeleton verification: 51/51 passed as part of the complete 52-case pre-cleanup run, including heavy entries; that superset took 114.0s (135.8s including startup) and peaked at 26.4 GiB
+- Real verification: 47/51 passed as part of the complete 52-case pre-cleanup run, with the same four recorded blockers; that superset took 7m 2.3s and peaked at 26.4 GiB
+
+The current 51 cases are a strict subset of the completed 52-case runs: the removed FP32 Tiny
+RoFormer case passed in both modes. No result for a retained case is inferred without execution.
 
 These revisions identify the latest **tested** state for each weight mode. A newer checkout is not
 considered the baseline for a mode until that mode has been rerun and this section is replaced.
@@ -79,10 +108,10 @@ ORT_DYLIB_PATH=../rustnn/target/onnxruntime/onnxruntime-linux-x64-1.29.0/lib/lib
 
 | Weight mode | Pass | Fail | Download skipped | Result |
 |-------------|-----:|-----:|-----------------:|--------|
-| Generated (`g4`) | 21 | 31 | 0 | Complete (52/52) |
-| Real | 48 | 4 | 0 | Complete (52/52) |
+| Generated (`g4`) | 20 | 31 | 0 | Complete (51/51) |
+| Real | 47 | 4 | 0 | Complete (51/51) |
 
-Twenty cases pass in both modes. Eight generated cases reach comparison; in the current real sweep,
+Nineteen cases pass in both modes. Eight generated cases reach comparison; in the current real sweep,
 two cases exercise unsupported cross-backend execution modes: FastVLM precision-sensitive
 GQA/DQL prefill and Voxtral level-4 quantized matmul. The generated column remains the
 2026-09-12 baseline; only the real sweep was rerun for this change. Generated and real weights can
@@ -107,9 +136,9 @@ tracked in [Real-weight validation failures](real-weight-validation-failures.md)
 | O1 | 2 | 2 | Native ORT load | Upstream-blocked: both Chronos paths resolve to the same publisher artifact, which feeds a float ConstantOfShape result to Gather indices. |
 
 Generated totals: 11 generated-model preparation, 4 export, 6 native-ORT input, 2 native-ORT
-model-load, 8 comparison failures, and 21 passes. Real totals: no export, reload,
+model-load, 8 comparison failures, and 20 passes. Real totals: no export, reload,
 cached-interface, or native-ORT input failures, 2 native-ORT model-load failures, 2 unsupported execution-mode
-mismatches, and 48 passes.
+mismatches, and 47 passes.
 
 ### Current case ledger
 
@@ -174,14 +203,15 @@ RAM and VRAM. This is distinct from ordinary repeated cases that differ only in 
 | 48 | `huggingworld--Qwen2.5-VL-3B-Instruct-ONNX :: decoder_model_merged_quantized.onnx` | I2 | PASS | — |
 | 49 | `onnx-community--timesformer-base-finetuned-k400 :: model_quantized.onnx` | N1 | PASS | — |
 | 50 | `Xenova--tiny-random-RoFormerForMultipleChoice :: model_quantized.onnx` | PASS | PASS | — |
-| 51 | `Xenova--tiny-random-RoFormerForMultipleChoice :: model.onnx` | PASS | PASS | — |
 
 ### Current timing and storage
 
 | Run | Cases | Warm wall time |
 |-----|------:|---------------:|
-| Generated | 52 | 7m 47.5s |
-| Real, cache-complete | 52 | 7m 13.1s |
+| Generated (recorded superset) | 52 | 7m 47.5s |
+| Real, cache-complete (recorded superset) | 52 | 7m 2.3s |
+
+These timings are retained for the completed 52-case superset; removing one passing Tiny RoFormer case does not provide a separately measured 51-case duration.
 
 At the end of the sweep, `.onnx-cache` occupied 76 GB and `.webnn-cache` 86 GB. The increase
 is the newly exportable q4 artifacts. Neither completed run needed or skipped a download.
@@ -199,6 +229,8 @@ movement was not a functional improvement. Detailed obsolete ledgers are availab
 
 | Date / tested revisions | Change | Comparable coverage effect |
 |-------------------------|--------|----------------------------|
+| 2026-09-17 — validation-tier cleanup after `25ea94c` | Removed manifest validation tiers and the hand-added FP32 RoFormer smoke case, restoring the generator-owned upstream population. Status and blocker ownership now live only in these validation documents; the CLI selects `all` or `match=<text>`. | Population changed **52 → 51** by removing one passing duplicate-model variant. Comparable coverage is unchanged: skeleton **51/51**, generated **20/51**, and real **47/51** with the same four blockers. |
+| 2026-09-17 — onnx2webnn `25ea94c`, RustNN `28fb3bbe`, post-rebase complete rerun | Rebased both feature stacks onto `rustnn/onnx2webnn:main` and `rustnn/rustnn:main`, then ran all 52 skeleton cases and all 52 real-weight cases from warm caches, including heavy entries. | No regression: skeleton remained **52/52**; real validation remained **48/52** with the identical FastVLM U1, Voxtral Q1, and two Chronos O1 blockers. |
 | 2026-09-17 — onnx2webnn `d4d350b`, RustNN `724d076b`, targeted FastVLM probes | Exposed layer boundaries and compared ORT CPU flash/non-flash GQA against the WebNN decomposition. Layer 0 and external rotary matched; the first failing boundary followed layer-1 GQA dynamic quantization and output projection. Native ORT first-logit output changed from `0.669124` to `1.066261` when only its GQA kernel changed, while WebNN remained `1.211192`. | Reclassified FastVLM prefill from generic N1 to unsupported U1. Coverage remains **48/52**; no tolerance was weakened. |
 | 2026-09-17 — onnx2webnn `6f6ad8a` plus current Cast/Slice/comparison worktree, RustNN `65e76e67` plus Slice-backend worktree | Normalized ONNX numeric-to-Bool Cast through comparison, preserved positive Slice strides with WebNN extent semantics, and selected q4/q8 comparison envelopes from `MatMulNBits.bits`. | DETR, Donut encoder, and Qwen passed; real coverage rose **45 → 48** on the same 52 cases. FastVLM prefill, Voxtral level 4, and the two invalid Chronos artifacts remain blocked. |
 | 2026-09-16 — onnx2webnn `24fdd50` plus current validator/manifest worktree, RustNN `7f07a5e1` plus packed-4-bit archive worktree | Measured complete q4 output error distributions and applied a `1e-3` absolute/relative Float32 envelope only to source graphs containing `MatMulNBits`. Classified Voxtral's `accuracy_level=4` Int8-activation execution mode as unsupported. | SmolLM2 prefill/decode and Janus passed; Voxtral remained Q1. Real passes rose **42 → 45** on the same 52 cases. |

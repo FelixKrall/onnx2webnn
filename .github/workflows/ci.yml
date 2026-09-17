@@ -156,3 +156,16 @@ jobs:
           O2W_MODEL_TEST_JOBS: ${{ matrix.model_test_jobs || 2 }}
           O2W_MODEL_TEST_SKIP_HEAVY: 1
         run: cargo test --release --locked ${{ matrix.cargo_flags }}
+
+      - name: Validate curated full model
+        if: runner.os != 'Windows'
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          O2W_ONNX_CACHE: ${{ runner.temp }}/onnx2webnn-ci-models
+          O2W_WEBNN_CACHE: ${{ runner.temp }}/onnx2webnn-ci-webnn
+        run: |
+          target/release/onnx2webnn validate-models \
+            --manifest tests/models/ci-validation.json \
+            --selection all \
+            --weights real \
+            --jobs 1

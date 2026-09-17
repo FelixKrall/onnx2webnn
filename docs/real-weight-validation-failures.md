@@ -1,7 +1,7 @@
 # Real-weight validation failures
 
-> **Last edited:** `2026-09-17T15:25:28Z`<br>
-> **Checkout:** `fkrall/cache-backed-validation` at `d4d350b`
+> **Last edited:** `2026-09-17T16:52:20Z`<br>
+> **Checkout:** `fkrall/cache-backed-validation` at `25ea94c`
 >
 > **Freshness:** Use this document only when this provenance is recent relative to the relevant
 > code and commits; otherwise verify the implementation, tests, and Git history before relying
@@ -14,19 +14,23 @@ ledger remain in [Full-model numerical validation status](model-validation-statu
 ## Recorded run
 
 - Date: 2026-09-17
-- Tested executable: onnx2webnn `d4d350b`
-- RustNN: `724d076b`
-- Manifest: `tests/models/manifest.json` (52 cases)
+- Tested executable: onnx2webnn `25ea94c`
+- RustNN: `28fb3bbe`
+- Manifest: `tests/models/manifest.json` (51 current cases; verified within a completed 52-case superset)
 - Runtime: CPU ONNX Runtime 1.29.0
 - Cache state: complete; no model downloads or skips
-- Result: 48 passed and 4 failed
-- Warm wall time: 7m 13.1s, one validation worker
+- Disk guard: minimum observed free space 78.7 GiB; stop threshold 15 GiB was not approached
+- Result for the current manifest: 47 passed and 4 failed
+- Recorded 52-case superset wall time: 7m 2.3s, one validation worker; peak RSS 26.4 GiB
 
 ```bash
 ORT_DYLIB_PATH=../rustnn/target/onnxruntime/onnxruntime-linux-x64-1.29.0/lib/libonnxruntime.so.1.29.0 \
   target/release/onnx2webnn validate-models \
   --selection all --weights real --jobs 1
 ```
+
+The current manifest is the tested 52-case run minus the passing FP32 Tiny RoFormer case; every
+retained case was executed in that run.
 
 The recorded result for each case is its first blocker. A case that fails before comparison may
 contain further converter, serialization, reload, execution, or numerical issues that are not yet
@@ -82,7 +86,7 @@ generated `0x88` zero points were also correct. Direct output analysis found mea
 `0.0401`, maximum error `0.367`, and correlation `0.999502`. Changing only the source attributes
 to `accuracy_level=0` reduced those figures to `9.66e-6`, `9.32e-5`, and `0.99999999997`.
 
-The manifest marks case 28 as `blocked`, but `all` and `match` continue attempting it so a future
+This document records case 28 as Q1. Both `all` and `match` attempt it normally, so a future
 implementation becomes visible. It is not counted as numerically supported.
 
 ## O1: source ONNX rejected by native ORT
@@ -95,9 +99,9 @@ output of `ConstantOfShape`; Gather indices must be integer.
 | 45 | `kashif--chronos-2-onnx :: encoder_model.onnx` |
 | 46 | `kashif--chronos-2-onnx :: decoder_model_merged.onnx` |
 
-The two manifest paths resolve to the same invalid publisher artifact. They are explicitly marked
-`blocked` with this reason but remain attempted by `all` and `match` selections, so a future
-publisher correction will be visible. Until the source model runs in native ORT, these cases cannot
+The two manifest paths resolve to the same invalid publisher artifact. This document records them
+as O1; `all` and `match` still attempt them normally, so a future publisher correction will be
+visible. Until the source model runs in native ORT, these cases cannot
 provide a numerical oracle and are not evidence for or against onnx2webnn correctness.
 
 ## Repair order

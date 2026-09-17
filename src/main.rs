@@ -89,8 +89,8 @@ enum Command {
 
     /// Numerically validate manifest models against reloaded WebNN artifacts
     ValidateModels {
-        /// Manifest selection: smoke, extended, all, or match=<text>
-        #[arg(long, default_value = "smoke")]
+        /// Manifest selection: all or match=<text>
+        #[arg(long)]
         selection: String,
 
         /// Use publisher weights or deterministic generated replacements

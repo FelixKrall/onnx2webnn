@@ -12,8 +12,15 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct Entry {
     pub file: String,
+    /// Immutable Hugging Face revision for reproducible downloads.
+    #[serde(default)]
+    pub revision: Option<String>,
+    /// Expected SHA-256 of the primary ONNX file.
+    #[serde(default)]
+    pub sha256: Option<String>,
     #[serde(default)]
     pub heavy: bool,
     /// Reason this model cannot build on the CoreML backend.
@@ -26,30 +33,10 @@ pub struct Entry {
     pub override_dims: HashMap<String, u32>,
     #[serde(default)]
     pub pin_inputs: HashMap<String, i64>,
-    #[serde(default)]
-    pub validation: Option<ValidationConfig>,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-pub struct ValidationConfig {
-    pub tier: ValidationTier,
-    #[serde(default)]
-    pub reason: Option<String>,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ValidationTier {
-    Untriaged,
-    Smoke,
-    Extended,
-    Blocked,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Selection {
-    Smoke,
-    Extended,
     All,
     Match(String),
 }
@@ -57,28 +44,18 @@ pub enum Selection {
 impl Selection {
     pub fn parse(value: &str) -> Result<Self, String> {
         match value {
-            "smoke" => Ok(Self::Smoke),
-            "extended" => Ok(Self::Extended),
             "all" => Ok(Self::All),
             value if value.starts_with("match=") && value.len() > "match=".len() => {
                 Ok(Self::Match(value["match=".len()..].to_string()))
             }
             _ => Err(format!(
-                "invalid selection {value:?}: expected smoke, extended, all, or match=<text>"
+                "invalid selection {value:?}: expected all or match=<text>"
             )),
         }
     }
 
     pub fn includes(&self, index: usize, entry: &Entry) -> bool {
         match self {
-            Self::Smoke => matches!(
-                entry.validation.as_ref().map(|v| v.tier),
-                Some(ValidationTier::Smoke)
-            ),
-            Self::Extended => matches!(
-                entry.validation.as_ref().map(|v| v.tier),
-                Some(ValidationTier::Smoke | ValidationTier::Extended)
-            ),
             Self::All => true,
             Self::Match(needle) => entry.label(index).contains(needle),
         }
@@ -86,6 +63,19 @@ impl Selection {
 }
 
 impl Entry {
+    pub fn revision(&self) -> &str {
+        self.revision.as_deref().unwrap_or("main")
+    }
+
+    pub fn source_key(&self) -> String {
+        format!(
+            "{}@{}#{}",
+            self.file,
+            self.revision(),
+            self.sha256.as_deref().unwrap_or("")
+        )
+    }
+
     pub fn label(&self, index: usize) -> String {
         format!(
             "#{index} {} dims={:?} pins={:?}",
@@ -97,6 +87,12 @@ impl Entry {
     /// cases using the same file but different overrides or pins cannot clash.
     pub fn cache_key(&self) -> String {
         let mut canonical = format!("webnn-cache-v1\nfile={}\n", self.file);
+        if let Some(revision) = &self.revision {
+            canonical.push_str(&format!("revision={revision}\n"));
+        }
+        if let Some(sha256) = &self.sha256 {
+            canonical.push_str(&format!("sha256={sha256}\n"));
+        }
         let mut dims: Vec<_> = self.override_dims.iter().collect();
         dims.sort_unstable_by_key(|(name, _)| *name);
         for (name, value) in dims {
@@ -143,51 +139,58 @@ pub fn parse_manifest(text: &str) -> Result<Vec<Entry>, String> {
         if entry.file.is_empty() {
             return Err(format!("manifest entry #{index} has an empty file"));
         }
-        if let Some(validation) = &entry.validation {
-            match (validation.tier, validation.reason.as_deref()) {
-                (ValidationTier::Blocked, Some(reason)) if !reason.trim().is_empty() => {}
-                (ValidationTier::Blocked, _) => {
-                    return Err(format!(
-                        "manifest entry #{index} is validation-blocked without a reason"
-                    ));
-                }
-                _ => {}
+        if let Some(revision) = &entry.revision {
+            if revision.is_empty()
+                || !revision
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+            {
+                return Err(format!(
+                    "manifest entry #{index} has an invalid revision {revision:?}"
+                ));
+            }
+        }
+        if let Some(sha256) = &entry.sha256 {
+            if entry.revision.is_none() {
+                return Err(format!(
+                    "manifest entry #{index} has sha256 without an immutable revision"
+                ));
+            }
+            if !valid_sha256(sha256) {
+                return Err(format!(
+                    "manifest entry #{index} has an invalid lowercase sha256"
+                ));
             }
         }
     }
     Ok(entries)
 }
 
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     fn entry() -> Entry {
         serde_json::from_str(
-            r#"{"file":"org--repo/onnx/model.onnx","override_dims":{"b":1},"pin_inputs":{"branch":0},"validation":{"tier":"smoke"}}"#,
+            r#"{"file":"org--repo/onnx/model.onnx","override_dims":{"b":1},"pin_inputs":{"branch":0}}"#,
         )
         .unwrap()
     }
 
     #[test]
-    fn parses_and_selects_validation_tiers() {
-        let smoke = entry();
-        assert!(Selection::Smoke.includes(0, &smoke));
-        assert!(Selection::Extended.includes(0, &smoke));
-        assert!(Selection::All.includes(0, &smoke));
-        assert!(Selection::Match("model.onnx".into()).includes(0, &smoke));
-        assert!(!Selection::Match("missing".into()).includes(0, &smoke));
-
-        let mut extended = smoke.clone();
-        extended.validation.as_mut().unwrap().tier = ValidationTier::Extended;
-        assert!(!Selection::Smoke.includes(0, &extended));
-        assert!(Selection::Extended.includes(0, &extended));
-
-        let mut untriaged = smoke.clone();
-        untriaged.validation.as_mut().unwrap().tier = ValidationTier::Untriaged;
-        assert!(!Selection::Smoke.includes(0, &untriaged));
-        assert!(!Selection::Extended.includes(0, &untriaged));
-        assert!(Selection::All.includes(0, &untriaged));
+    fn parses_and_selects_manifest_cases() {
+        let entry = entry();
+        assert!(Selection::All.includes(0, &entry));
+        assert!(Selection::Match("model.onnx".into()).includes(0, &entry));
+        assert!(!Selection::Match("missing".into()).includes(0, &entry));
     }
 
     #[test]
@@ -205,51 +208,79 @@ mod tests {
         changed = first.clone();
         changed.pin_inputs.insert("branch".into(), 1);
         assert_ne!(first.cache_key(), changed.cache_key());
+
+        changed = first.clone();
+        changed.revision = Some("0123456789abcdef0123456789abcdef01234567".into());
+        changed.sha256 =
+            Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into());
+        assert_ne!(first.cache_key(), changed.cache_key());
     }
 
     #[test]
-    fn blocked_entries_require_a_reason() {
-        let error =
-            parse_manifest(r#"[{"file":"org--repo/model.onnx","validation":{"tier":"blocked"}}]"#)
-                .unwrap_err();
-        assert!(error.contains("without a reason"));
-
-        let entries = parse_manifest(
-            r#"[{"file":"org--repo/model.onnx","validation":{"tier":"blocked","reason":"unsupported op"}}]"#,
-        )
-        .unwrap();
-        assert_eq!(
-            entries[0].validation.as_ref().unwrap().tier,
-            ValidationTier::Blocked
+    fn validates_revision_and_digest() {
+        assert!(
+            parse_manifest(
+                r#"[{"file":"org--repo/model.onnx","sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}]"#
+            )
+            .unwrap_err()
+            .contains("without an immutable revision")
+        );
+        assert!(
+            parse_manifest(r#"[{"file":"org--repo/model.onnx","revision":"../main"}]"#)
+                .unwrap_err()
+                .contains("invalid revision")
+        );
+        assert!(
+            parse_manifest(
+                r#"[{"file":"org--repo/model.onnx","revision":"0123456789abcdef0123456789abcdef01234567","sha256":"ABCDEF"}]"#
+            )
+            .unwrap_err()
+            .contains("invalid lowercase sha256")
         );
     }
 
     #[test]
-    fn chronos_entries_are_recorded_blockers_but_remain_selectable() {
-        let entries = load_manifest().expect("load repository manifest");
-        let chronos = entries
-            .iter()
-            .enumerate()
-            .filter(|(_, entry)| entry.file.starts_with("kashif--chronos-2-onnx/"))
-            .collect::<Vec<_>>();
-        assert_eq!(chronos.len(), 2);
+    fn rejects_removed_validation_metadata() {
+        let error =
+            parse_manifest(r#"[{"file":"org--repo/model.onnx","validation":{"tier":"blocked"}}]"#)
+                .unwrap_err();
+        assert!(error.contains("unknown field"));
+    }
 
-        for (index, entry) in chronos {
-            let validation = entry.validation.as_ref().expect("validation metadata");
-            assert_eq!(validation.tier, ValidationTier::Blocked);
-            assert!(validation
-                .reason
-                .as_deref()
-                .is_some_and(|reason| !reason.trim().is_empty()));
-            assert!(Selection::All.includes(index, entry));
-            assert!(Selection::Match("chronos-2-onnx".into()).includes(index, entry));
-            assert!(!Selection::Smoke.includes(index, entry));
-            assert!(!Selection::Extended.includes(index, entry));
+    #[test]
+    fn curated_ci_manifest_is_small_pinned_and_unique() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/models/ci-validation.json");
+        let entries = load_manifest_from(&path).expect("load curated CI manifest");
+        assert!(!entries.is_empty(), "CI manifest must not be empty");
+        let mut cases = HashSet::new();
+        for entry in entries {
+            assert!(!entry.heavy, "CI model {} must not be heavy", entry.file);
+            let revision = entry.revision.as_deref().expect("CI model revision");
+            assert!(
+                revision.len() == 40
+                    && revision
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')),
+                "CI model {} must use a full immutable commit SHA",
+                entry.file
+            );
+            assert!(
+                entry.sha256.as_deref().is_some_and(valid_sha256),
+                "CI model {} must declare its SHA-256",
+                entry.file
+            );
+            assert!(
+                cases.insert(entry.cache_key()),
+                "duplicate CI model case for {}",
+                entry.file
+            );
         }
     }
 
     #[test]
-    fn selector_rejects_unknown_values() {
+    fn selector_rejects_tiers_and_malformed_values() {
+        assert!(Selection::parse("smoke").is_err());
+        assert!(Selection::parse("extended").is_err());
         assert!(Selection::parse("quick").is_err());
         assert!(Selection::parse("match=").is_err());
     }

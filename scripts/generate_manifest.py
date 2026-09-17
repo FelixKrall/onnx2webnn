@@ -27,10 +27,6 @@ a `use_cache_branch` input yields a prefill and a decode entry. Values already
 in the current manifest for the same file (or the same component at another
 dtype) are carried forward, so hand-tuned dims survive regeneration.
 
-Validation triage is preserved only for an exact retained manifest case
-(file, pinned inputs, and prefill/decode branch). Every newly generated or
-previously untriaged case receives `{"validation": {"tier": "untriaged"}}`.
-
 Model files are never downloaded. Like the sweep's skeleton scanner
 (tests/common/skeleton.rs) the serialized graph is walked over HTTP range
 requests, skipping every node and every initializer's data by its length
@@ -86,16 +82,7 @@ HEAVY_BYTES = 1 << 30
 SEQ_LEN = 128
 DECODER_SEQ_LEN = 16
 DECODE_PAST_LEN = 16
-CANONICAL_KEYS = [
-    "file",
-    "heavy",
-    "pin_inputs",
-    "override_dims",
-    "coreml_unsupported",
-    "coreml_slow",
-    "validation",
-]
-DEFAULT_VALIDATION = {"tier": "untriaged"}
+CANONICAL_KEYS = ["file", "heavy", "pin_inputs", "override_dims", "coreml_unsupported", "coreml_slow"]
 
 # transformers.js utils/dtypes.js DEFAULT_DTYPE_SUFFIX_MAPPING.
 DTYPE_SUFFIX = {
@@ -802,6 +789,7 @@ class Baselines:
         self.exact: dict[tuple, list[dict]] = {}
         self.by_component: dict[tuple[str, str, tuple], list[dict]] = {}
         self.repo_dims: dict[str, dict[str, int]] = {}
+        self.manual_fields: dict[tuple, dict] = {}
         for e in existing:
             key = entry_key(e)
             self.exact.setdefault(key, []).append(e)
@@ -811,6 +799,9 @@ class Baselines:
             for name, value in (e.get("override_dims") or {}).items():
                 if self._branch_invariant(name):
                     self.repo_dims.setdefault(repo, {}).setdefault(name, value)
+            extra = {k: v for k, v in e.items() if k not in ("file", "heavy", "pin_inputs", "override_dims", "validation")}
+            if extra:
+                self.manual_fields[key] = extra
 
     @staticmethod
     def _branch_invariant(name: str) -> bool:
@@ -840,23 +831,6 @@ class Baselines:
         dims = dict(self.repo_dims.get(repo, {}))
         dims.update((e or {}).get("override_dims") or {})
         return dims
-
-    def manual_fields_for(self, file: str, pins: dict[str, int], decode: bool) -> dict[str, Any]:
-        """Preserve exact-case metadata and initialize validation triage.
-
-        Metadata is intentionally not inherited across dtype variants: a new
-        export may have different backend behavior and must be triaged itself.
-        """
-        key = (file, tuple(sorted(pins.items())))
-        entry = self._pick(self.exact.get(key, []), decode)
-        fields = {
-            k: v
-            for k, v in (entry or {}).items()
-            if k not in ("file", "heavy", "pin_inputs", "override_dims")
-        }
-        if not fields.get("validation"):
-            fields["validation"] = dict(DEFAULT_VALIDATION)
-        return fields
 
 
 def process_repo(
@@ -930,7 +904,7 @@ def process_repo(
             dims, unresolved = resolve_dims(names, decode, overrides)
             unresolved_all += [u for u in unresolved if u not in unresolved_all]
             entry = entry_to_dict(file_key, heavy, pins, dims)
-            entry.update(baselines.manual_fields_for(file_key, pins, decode))
+            entry.update(baselines.manual_fields.get(entry_key(entry), {}))
             entries.append(entry)
         if unresolved_all:
             r.notes.append(f"skipped {rel_path}: unresolved dims {unresolved_all} -- add to --overrides")
