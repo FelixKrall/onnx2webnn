@@ -1,7 +1,7 @@
 # ONNX → WebNN operator conversion status
 
-> **Last edited:** `2026-09-17T11:08:08Z`<br>
-> **Checkout:** `fkrall/cache-backed-validation` at `6f6ad8a`
+> **Last edited:** `2026-09-17T15:43:26Z`<br>
+> **Checkout:** `fkrall/cache-backed-validation` at `d4d350b`
 >
 > **Freshness:** Use this document only when this provenance is recent relative to the relevant
 > code and commits; otherwise verify the implementation, tests, and Git history before relying
@@ -255,7 +255,7 @@ they are excluded from the 198-op percentages.
 | Operator | Status | Execution scope and WebNN limitation |
 |----------|--------|--------------------------------------|
 | `GatherBlockQuantized` | Decomposed | Gathers packed rows/scales/zero points and dequantizes only the selected slice for supported 2-D axis-0 tables; other layouts fall back at conversion time. |
-| `GroupQueryAttention` | Decomposed | Static attention/cache subgraph. WebNN has no fused attention; runtime sequence metadata is ignored and softcap/local-window modes are rejected. |
+| `GroupQueryAttention` | Decomposed | Static attention/cache subgraph. WebNN has no fused attention; runtime sequence metadata is ignored and softcap/local-window modes are rejected. Fused backend kernels and the portable decomposition need not be bit-identical, so an immediately following dynamic quantizer can amplify legal rounding differences. |
 | `MatMulBnb4` | Decomposed | Packed NF4/FP4 block path where representable; incompatible tails become dense constants, losing low-bit memory/performance benefits. |
 | `MatMulNBits` | Decomposed | Supported 4/8-bit constant layouts dequantize into a matmul path; g_idx is rejected. WebNN has no low-bit matmul kernel. |
 | `MoE` | Decomposed | All experts execute densely because WebNN has no TopK or sparse dispatch. Approximate compute overhead is num_experts/k; supported activation/fusion forms only. |

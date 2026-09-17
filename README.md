@@ -1,10 +1,23 @@
 # onnx2webnn
 
+> **Last edited:** `2026-09-17T15:25:28Z`<br>
+> **Checkout:** `fkrall/cache-backed-validation` at `d4d350b`
+>
+> **Freshness:** Use this document only when this provenance is recent relative to the relevant
+> code and commits; otherwise verify the implementation, tests, and Git history before relying
+> on it.
+
 ONNX → WebNN lowering crate extracted from [webnn-graph](../webnn-graph). ONNX operators lower
 directly to [rustnn](../rustnn) `MLGraphBuilder`; full-graph validation runs via ORT CPU
 `build()` (`onnx-runtime` feature). There is no intermediate JSON IR. Without `--output`,
 success means `builder.build()` returns `Ok(MLGraph)`; `--output` additionally writes a
 reloadable `.webnn` graph and sibling Safetensors archive.
+
+Decomposed attention is not promised to be bit-identical to a source backend fused-attention
+kernel. This matters for quantized models that immediately feed attention into
+`DynamicQuantizeLinear`: small legal floating-point differences can cross Uint8 bucket boundaries
+and compound through later layers. FastVLM prefill has this limitation; its fixed sequence-1 decode
+specialization passes numerical validation.
 
 Supported ONNX opset range: **1–26** (see `MIN_SUPPORTED_OPSET` / `MAX_SUPPORTED_OPSET` in
 `src/onnx/convert.rs`).

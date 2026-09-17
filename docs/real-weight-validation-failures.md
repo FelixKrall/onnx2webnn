@@ -1,7 +1,7 @@
 # Real-weight validation failures
 
-> **Last edited:** `2026-09-17T11:08:08Z`<br>
-> **Checkout:** `fkrall/cache-backed-validation` at `6f6ad8a`
+> **Last edited:** `2026-09-17T15:25:28Z`<br>
+> **Checkout:** `fkrall/cache-backed-validation` at `d4d350b`
 >
 > **Freshness:** Use this document only when this provenance is recent relative to the relevant
 > code and commits; otherwise verify the implementation, tests, and Git history before relying
@@ -14,8 +14,8 @@ ledger remain in [Full-model numerical validation status](model-validation-statu
 ## Recorded run
 
 - Date: 2026-09-17
-- Tested executable: onnx2webnn `6f6ad8a` plus the current Cast/Slice/comparison worktree
-- RustNN: `65e76e67` plus the current Slice-backend worktree
+- Tested executable: onnx2webnn `d4d350b`
+- RustNN: `724d076b`
 - Manifest: `tests/models/manifest.json` (52 cases)
 - Runtime: CPU ONNX Runtime 1.29.0
 - Cache state: complete; no model downloads or skips
@@ -36,24 +36,38 @@ observable.
 
 | Code | Cases | Furthest stage | Classification | Current ownership |
 |------|------:|----------------|----------------|-------------------|
-| N1 | 1 | Output comparison | Confirmed numerical disagreement | FastVLM prefill remains blocked; its decode specialization passes. |
+| U1 | 1 | Output comparison | Unsupported strict fused/decomposed attention equivalence across dynamic quantization boundaries | FastVLM prefill remains blocked; its decode specialization passes. |
 | Q1 | 1 | Output comparison | Unsupported `MatMulNBits accuracy_level=4` execution semantics | Requires a WebNN/backend mechanism for Int8-quantized activations with packed q4 weights; do not relax tolerance to hide it. |
 | O1 | 2 | Native ORT model load | The publisher ONNX is rejected before conversion can be compared | Blocked upstream pending a corrected publisher artifact. |
 
-The real sweep has no deterministic-input or cached-interface failures. N1 proves that both
-execution paths completed and returned materially different values. Q1 also reaches comparison,
-but the source and reconstructed graphs intentionally execute different precision modes. O1 fails
-in the reference model itself.
+The real sweep has no deterministic-input or cached-interface failures. U1 and Q1 both reach
+comparison, but the source and reconstructed graphs do not promise the same numerical execution
+mode. O1 fails in the reference model itself.
 
-## N1: numerical disagreement
+## U1: precision-sensitive fused attention followed by dynamic quantization
 
 | # | Case | Comparison diagnostics |
 |--:|------|------------------------|
 | 11 | `onnx-community--FastVLM-0.5B-ONNX :: decoder_model_merged_quantized.onnx` (`sequence=64`, `past=0`) | `9,702,133 / 9,705,344` logits exceed tolerance; maximum absolute error `10.0572`, mean absolute error `0.760946`, RMSE `1.05325`. |
 
-The source uses fused GroupQueryAttention while the WebNN path decomposes it, with repeated
-DynamicQuantizeLinear steps amplifying drift across prefill. The sequence-1 decode specialization
-passes, so only this fixed prefill specialization is recorded as blocked.
+Boundary probes rule out a shape, rotary, cache-layout, or serialization defect. Layer 0 query
+projection, external `RotaryEmbedding`, decomposed `GroupQueryAttention`, normalization, and MLP
+all pass the normal Float32 envelope. Layer 1 GQA output also remains within that envelope, but
+the immediately following `DynamicQuantizeLinear` makes the small difference discrete: the output
+projection is the first failing observed boundary (`825 / 57,344` values, maximum absolute error
+`0.001003`). Repeating this pattern through 24 layers produces the final logit disagreement above.
+
+ORT 1.29 CPU GQA has multiple valid kernels. With its default tiled flash-attention kernel the
+first native logit is `0.669124`; setting `ORT_GQA_DISABLE_FLASH_ATTENTION=1` selects ORT non-flash
+fallback and changes that same native logit to `1.066261`. The decomposed WebNN result is stable at
+`1.211192`. The source backend therefore materially disagrees with itself after repeated
+quantization when only its legal attention kernel changes.
+
+WebNN has no fused GQA primitive, and a decomposition into `matmul`, mask, `softmax`, and `matmul`
+cannot guarantee bit-identical rounding to either backend-specific fused kernel. Weakening the
+final tolerance would hide different Uint8 quantization decisions rather than accommodate ordinary
+output accumulation error. This fixed prefill specialization is therefore recorded as unsupported
+for strict cross-backend numerical validation; the sequence-1 decode specialization passes.
 
 ## Q1: unsupported `MatMulNBits accuracy_level=4`
 
@@ -88,8 +102,8 @@ provide a numerical oracle and are not evidence for or against onnx2webnn correc
 
 ## Repair order
 
-1. Track or further localize the blocked FastVLM prefill disagreement without weakening
-   comparison tolerance.
+1. Track U1 until WebNN or a backend-specific fusion can provide comparable attention precision
+   across the dynamic-quantization boundaries.
 2. Track Q1 until WebNN or a backend-specific fusion can express Int8 activations with packed q4 weights.
 3. Monitor the upstream Chronos repository for corrected reference exports.
 

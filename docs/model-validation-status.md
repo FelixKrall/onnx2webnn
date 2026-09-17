@@ -1,7 +1,7 @@
 # Full-model numerical validation status
 
-> **Last edited:** `2026-09-17T11:08:08Z`<br>
-> **Checkout:** `fkrall/cache-backed-validation` at `6f6ad8a`
+> **Last edited:** `2026-09-17T15:25:28Z`<br>
+> **Checkout:** `fkrall/cache-backed-validation` at `d4d350b`
 >
 > **Freshness:** Use this document only when this provenance is recent relative to the relevant
 > code and commits; otherwise verify the implementation, tests, and Git history before relying
@@ -56,8 +56,8 @@ activations. Voxtral uses level 4 on all 211 `MatMulNBits` nodes and remains blo
 ## Latest recorded sweep
 
 - Generated sweep: 2026-09-12 at onnx2webnn `4926c3e`
-- Real sweep: 2026-09-17 at onnx2webnn `6f6ad8a` plus the current Cast/Slice/comparison worktree
-- RustNN: `65e76e67` plus the current Slice-backend worktree
+- Real sweep: 2026-09-17 at onnx2webnn `d4d350b`
+- RustNN: `724d076b`
 - ORT: repository-local Linux x64 1.29.0 build
 - Manifest: `tests/models/manifest.json` (52 cases, 45 unique ONNX files)
 - Execution: one validation worker; ORT may use multiple CPU threads inside a case
@@ -83,10 +83,10 @@ ORT_DYLIB_PATH=../rustnn/target/onnxruntime/onnxruntime-linux-x64-1.29.0/lib/lib
 | Real | 48 | 4 | 0 | Complete (52/52) |
 
 Twenty cases pass in both modes. Eight generated cases reach comparison; in the current real sweep,
-one case remains a genuine numerical disagreement and one is the unsupported Voxtral execution
-mode. The generated column remains the 2026-09-12 baseline; only the real sweep
-was rerun for this change. Generated and real weights can expose different first blockers; a failure
-before comparison is not evidence of a numerical mismatch.
+two cases exercise unsupported cross-backend execution modes: FastVLM precision-sensitive
+GQA/DQL prefill and Voxtral level-4 quantized matmul. The generated column remains the
+2026-09-12 baseline; only the real sweep was rerun for this change. Generated and real weights can
+expose different first blockers; a failure before comparison is not evidence of a numerical mismatch.
 
 The real-weight failures, exact affected cases, current diagnosis, and suggested ownership are
 tracked in [Real-weight validation failures](real-weight-validation-failures.md).
@@ -95,7 +95,7 @@ tracked in [Real-weight validation failures](real-weight-validation-failures.md)
 
 | Code | Generated | Real | Stage | Current cause / next action |
 |------|----------:|-----:|-------|-----------------------------|
-| N1 | 8 | 1 | Comparison | FastVLM prefill materially differs after repeated DynamicQuantizeLinear and decomposed GroupQueryAttention; its decode specialization passes. |
+| N1 | 8 | 0 | Comparison | Generated-weight output disagreement; the retained generated baseline has not yet been rerun after later converter fixes. |
 | E1 | 4 | 0 | Export | The retained generated baseline predates packed Int4/Uint4 serialization; the current real sweep confirms E1 is fixed. |
 | G1 | 10 | 0 | Generated preparation | Initializer has no recorded consumers; extend consumer analysis while keeping generation fail-closed. |
 | G2 | 1 | 0 | Generated preparation | Large tensor-valued Constant has an ambiguous role. |
@@ -103,12 +103,13 @@ tracked in [Real-weight validation failures](real-weight-validation-failures.md)
 | I2 | 2 | 0 | Native ORT input | Cleared for real weights by preserving zero-element buffers; generated counts await a full rerun. |
 | I3 | 1 | 0 | Native ORT input | Cleared for real weights by generating an all-ones `attention_mask`; generated counts await a full rerun. |
 | Q1 | 0 | 1 | Comparison | Unsupported execution semantics: Voxtral sets `MatMulNBits accuracy_level=4`, allowing native ORT to quantize activations to Int8; WebNN lowers to Float32 dequantize-plus-matmul. |
+| U1 | 0 | 1 | Comparison | Unsupported strict equivalence: FastVLM prefill repeatedly quantizes attention results whose legal floating-point rounding differs between fused ORT kernels and the portable WebNN decomposition; decode passes. |
 | O1 | 2 | 2 | Native ORT load | Upstream-blocked: both Chronos paths resolve to the same publisher artifact, which feeds a float ConstantOfShape result to Gather indices. |
 
 Generated totals: 11 generated-model preparation, 4 export, 6 native-ORT input, 2 native-ORT
 model-load, 8 comparison failures, and 21 passes. Real totals: no export, reload,
-cached-interface, or native-ORT input failures, 2 native-ORT model-load failures, 1 numerical disagreement, 1 unsupported execution-mode
-mismatch, and 48 passes.
+cached-interface, or native-ORT input failures, 2 native-ORT model-load failures, 2 unsupported execution-mode
+mismatches, and 48 passes.
 
 ### Current case ledger
 
@@ -133,7 +134,7 @@ RAM and VRAM. This is distinct from ordinary repeated cases that differ only in 
 | 8 | `distil-whisper--distil-large-v2 :: decoder_model_merged_quantized.onnx` (`cache=1`) | G1 | PASS | Decode pair (2/2) |
 | 9 | `jinaai--jina-reranker-v2-base-multilingual :: model_quantized.onnx` | PASS | PASS | — |
 | 10 | `onnx-community--FastVLM-0.5B-ONNX :: embed_tokens_quantized.onnx` | PASS | PASS | — |
-| 11 | `onnx-community--FastVLM-0.5B-ONNX :: decoder_model_merged_quantized.onnx` (`sequence=64`, `past=0`) | I2 | N1 | — |
+| 11 | `onnx-community--FastVLM-0.5B-ONNX :: decoder_model_merged_quantized.onnx` (`sequence=64`, `past=0`) | I2 | U1 | — |
 | 12 | `onnx-community--FastVLM-0.5B-ONNX :: decoder_model_merged_quantized.onnx` (`sequence=1`, `past=64`) | I3 | PASS | — |
 | 13 | `onnx-community--FastVLM-0.5B-ONNX :: vision_encoder_quantized.onnx` | PASS | PASS | — |
 | 14 | `Marqo--marqo-fashionSigLIP :: text_model_quantized.onnx` | PASS | PASS | — |
@@ -187,8 +188,8 @@ is the newly exportable q4 artifacts. Neither completed run needed or skipped a 
 
 ### Current repair order
 
-1. Track the blocked FastVLM prefill disagreement while retaining its passing decode specialization.
-2. Extend generated-weight role/consumer analysis for G1/G2 without weakening fail-closed behavior.
+1. Extend generated-weight role/consumer analysis for G1/G2 without weakening fail-closed behavior.
+2. Track WebNN/backend capabilities that could make U1 or Q1 executable with comparable fused precision semantics.
 3. Monitor the upstream Chronos repository for corrected reference exports.
 
 ## Coverage change history
@@ -198,6 +199,7 @@ movement was not a functional improvement. Detailed obsolete ledgers are availab
 
 | Date / tested revisions | Change | Comparable coverage effect |
 |-------------------------|--------|----------------------------|
+| 2026-09-17 — onnx2webnn `d4d350b`, RustNN `724d076b`, targeted FastVLM probes | Exposed layer boundaries and compared ORT CPU flash/non-flash GQA against the WebNN decomposition. Layer 0 and external rotary matched; the first failing boundary followed layer-1 GQA dynamic quantization and output projection. Native ORT first-logit output changed from `0.669124` to `1.066261` when only its GQA kernel changed, while WebNN remained `1.211192`. | Reclassified FastVLM prefill from generic N1 to unsupported U1. Coverage remains **48/52**; no tolerance was weakened. |
 | 2026-09-17 — onnx2webnn `6f6ad8a` plus current Cast/Slice/comparison worktree, RustNN `65e76e67` plus Slice-backend worktree | Normalized ONNX numeric-to-Bool Cast through comparison, preserved positive Slice strides with WebNN extent semantics, and selected q4/q8 comparison envelopes from `MatMulNBits.bits`. | DETR, Donut encoder, and Qwen passed; real coverage rose **45 → 48** on the same 52 cases. FastVLM prefill, Voxtral level 4, and the two invalid Chronos artifacts remain blocked. |
 | 2026-09-16 — onnx2webnn `24fdd50` plus current validator/manifest worktree, RustNN `7f07a5e1` plus packed-4-bit archive worktree | Measured complete q4 output error distributions and applied a `1e-3` absolute/relative Float32 envelope only to source graphs containing `MatMulNBits`. Classified Voxtral's `accuracy_level=4` Int8-activation execution mode as unsupported. | SmolLM2 prefill/decode and Janus passed; Voxtral remained Q1. Real passes rose **42 → 45** on the same 52 cases. |
 | 2026-09-16 — onnx2webnn `24fdd50` plus current manifest/tests worktree, RustNN `7f07a5e1` plus packed-4-bit archive worktree | Stored packed Int4/Uint4 constants as versioned U8 Safetensors payloads while preserving logical dtype and shape in `.webnn`, then restored and executed them on reload. Marked the identical invalid Chronos publisher artifacts as upstream-blocked. | E1 was eliminated from the real sweep: all four q4 cases reached comparison and exposed N1. The aggregate remained **42/52** because those cases do not yet match numerically. |
