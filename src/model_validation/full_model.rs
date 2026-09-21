@@ -37,22 +37,28 @@ struct CachedFile {
     length: u64,
 }
 
-pub fn cache_root() -> PathBuf {
-    std::env::var_os("O2W_ONNX_CACHE")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join(".onnx-cache"))
+pub fn cache_root() -> Result<PathBuf, String> {
+    crate::cache::onnx_cache_dir()
 }
 
 pub fn cache_full_model(entry: &Entry) -> Result<PathBuf, String> {
+    let cache_root = cache_root()?;
     let file = entry.file.as_str();
     let revision = entry.revision();
     let (repo, repository_path) = parse_manifest_file(file)?;
     let relative_cache_path = safe_relative_path(file)?;
-    let target = cache_root().join(&relative_cache_path);
+    let target = cache_root.join(&relative_cache_path);
     let metadata_path = metadata_path(&target);
     let refresh = std::env::var_os("O2W_MODEL_CACHE_REFRESH").is_some();
-    if !refresh && complete_cache(&metadata_path, &target, revision, entry.sha256.as_deref()) {
+    if !refresh
+        && complete_cache(
+            &cache_root,
+            &metadata_path,
+            &target,
+            revision,
+            entry.sha256.as_deref(),
+        )
+    {
         return Ok(target);
     }
 
@@ -87,7 +93,7 @@ pub fn cache_full_model(entry: &Entry) -> Result<PathBuf, String> {
         let repository_sidecar = repository_parent.join(&location);
         let relative_sidecar = cache_parent.join(&location);
         let sidecar_url = hub_url(&repo, revision, &path_for_url(&repository_sidecar)?);
-        let sidecar_target = cache_root().join(&relative_sidecar);
+        let sidecar_target = cache_root.join(&relative_sidecar);
         files.push(download(
             &agent,
             &sidecar_url,
@@ -161,6 +167,7 @@ fn metadata_path(model: &Path) -> PathBuf {
 }
 
 fn complete_cache(
+    cache_root: &Path,
     metadata_path: &Path,
     model_path: &Path,
     revision: &str,
@@ -177,7 +184,7 @@ fn complete_cache(
             let Ok(relative) = safe_relative_path(&entry.path) else {
                 return false;
             };
-            fs::metadata(cache_root().join(relative))
+            fs::metadata(cache_root.join(relative))
                 .map(|metadata| metadata.is_file() && metadata.len() == entry.length)
                 .unwrap_or(false)
         })

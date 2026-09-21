@@ -74,7 +74,7 @@ enum Command {
         #[arg(long)]
         experimental_dynamic_inputs: bool,
 
-        /// Save the converted graph to .webnn-cache and the self-contained ONNX model to .onnx-cache
+        /// Save the converted graph and self-contained ONNX model to the OS cache directory
         #[arg(long)]
         output: bool,
 
@@ -107,7 +107,7 @@ enum Command {
     },
 }
 
-fn cache_paths(input: &Path) -> (PathBuf, PathBuf) {
+fn cache_paths(input: &Path) -> anyhow::Result<(PathBuf, PathBuf)> {
     let canonical = input.canonicalize().unwrap_or_else(|_| input.to_path_buf());
     let mut hash = 0xcbf29ce484222325u64;
     for byte in canonical.to_string_lossy().bytes() {
@@ -123,11 +123,14 @@ fn cache_paths(input: &Path) -> (PathBuf, PathBuf) {
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .collect();
     let key = format!("{safe_stem}-{hash:016x}");
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    (
-        root.join(".onnx-cache").join(format!("{key}.onnx")),
-        root.join(".webnn-cache").join(format!("{key}.webnn")),
-    )
+    Ok((
+        onnx2webnn::cache::onnx_cache_dir()
+            .map_err(anyhow::Error::msg)?
+            .join(format!("{key}.onnx")),
+        onnx2webnn::cache::webnn_cache_dir()
+            .map_err(anyhow::Error::msg)?
+            .join(format!("{key}.webnn")),
+    ))
 }
 
 fn main() -> anyhow::Result<()> {
@@ -205,7 +208,7 @@ fn main() -> anyhow::Result<()> {
 
             let validation_overrides = free_dim_overrides.clone();
             if validate_cached {
-                let (onnx_cache, webnn_cache) = cache_paths(input_path);
+                let (onnx_cache, webnn_cache) = cache_paths(input_path)?;
                 if !onnx_cache.exists() || !webnn_cache.exists() {
                     return Err(anyhow::anyhow!(
                         "cached validation requires {} and {}; run with --output first",
@@ -226,7 +229,7 @@ fn main() -> anyhow::Result<()> {
                 return Ok(());
             }
 
-            let cache_paths = output.then(|| cache_paths(input_path));
+            let cache_paths = output.then(|| cache_paths(input_path)).transpose()?;
             if let Some((onnx_cache, _)) = &cache_paths {
                 cache_onnx_model(input_path, onnx_cache, allow_missing_external_data)
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -269,7 +272,7 @@ fn main() -> anyhow::Result<()> {
             jobs,
         } => {
             let selection = Selection::parse(&selection).map_err(anyhow::Error::msg)?;
-            let mut options = RunOptions::new(selection, weights);
+            let mut options = RunOptions::new(selection, weights).map_err(anyhow::Error::msg)?;
             options.jobs = jobs;
             if let Some(manifest) = manifest {
                 options.manifest = manifest;

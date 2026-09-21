@@ -72,9 +72,11 @@ cargo run -- convert --input model.onnx `
 If `model.dims.json` sits beside the ONNX file and no overrides were passed on the CLI, dimension
 bindings are loaded from that sidecar (`freeDimensionOverrides` or a flat JSON object).
 
-With `--output`, artifacts are overwritten in `.onnx-cache` and `.webnn-cache`; add
-`--validate` to reload the saved pair immediately and compare deterministic execution against
-native ORT. RustNN stores logical Int4/Uint4 constants as their original packed nibble bytes in a
+With `--output`, artifacts are overwritten below the operating system's cache directory in
+`onnx2webnn/onnx` and `onnx2webnn/webnn`; add `--validate` to reload the saved pair immediately and
+compare deterministic execution against native ORT. Set `O2W_CACHE_DIR` to relocate both caches,
+or `O2W_ONNX_CACHE` and `O2W_WEBNN_CACHE` to override either cache independently. RustNN stores
+logical Int4/Uint4 constants as their original packed nibble bytes in a
 versioned U8 Safetensors extension while the `.webnn` declaration retains the logical dtype and
 shape. This is a RustNN archive convention, not a native Safetensors 4-bit dtype.
 

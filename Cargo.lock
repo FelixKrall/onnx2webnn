@@ -1407,6 +1407,7 @@ dependencies = [
  "anyhow",
  "bytemuck",
  "clap",
+ "dirs",
  "half",
  "pretty_env_logger",
  "prost",

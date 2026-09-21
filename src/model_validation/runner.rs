@@ -50,9 +50,9 @@ pub struct RunOptions {
 }
 
 impl RunOptions {
-    pub fn new(selection: Selection, weights: WeightMode) -> Self {
+    pub fn new(selection: Selection, weights: WeightMode) -> Result<Self, String> {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        Self {
+        Ok(Self {
             selection,
             weights,
             manifest: std::env::var_os("O2W_MANIFEST")
@@ -60,11 +60,8 @@ impl RunOptions {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| root.join("tests/models/manifest.json")),
             jobs: 1,
-            webnn_cache: std::env::var_os("O2W_WEBNN_CACHE")
-                .filter(|v| !v.is_empty())
-                .map(PathBuf::from)
-                .unwrap_or_else(|| root.join(".webnn-cache")),
-        }
+            webnn_cache: crate::cache::webnn_cache_dir()?,
+        })
     }
 }
 
