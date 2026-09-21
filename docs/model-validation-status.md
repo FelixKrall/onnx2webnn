@@ -1,7 +1,7 @@
 # Full-model numerical validation status
 
-> **Last edited:** `2026-09-17T16:56:50Z`<br>
-> **Checkout:** `fkrall/cache-backed-validation` at `25ea94c`
+> **Last edited:** `2026-09-21T13:27:31Z`<br>
+> **Checkout:** `fkrall/cache-backed-validation` at `1fd0571`
 >
 > **Freshness:** Use this document only when this provenance is recent relative to the relevant
 > code and commits; otherwise verify the implementation, tests, and Git history before relying
@@ -38,11 +38,11 @@ revision, downloaded-file digest, fixed dimension overrides, and any pinned inpu
 `tests/models/ci-validation.json`. This file is hand-maintained. `scripts/generate_manifest.py` only
 regenerates `tests/models/manifest.json` and must not be used to update or carry CI pins.
 
-The `Full model validation` workflow is manually dispatched with either real or generated weights.
+The `Full model validation` workflow is manually dispatched for real publisher weights.
 It runs the entire generated manifest sequentially on a runner labeled `self-hosted`, `linux`,
 `x64`, and `onnx2webnn-validation`. The runner must provide network access, a writable persistent
-`/var/cache/onnx2webnn`, at least a 100 GiB filesystem, and approximately 32 GiB RAM. Model sources
-and generated fixtures persist; WebNN exports are temporary. Provisioning, storage checks, and
+`/var/cache/onnx2webnn`, at least a 100 GiB filesystem, and approximately 32 GiB RAM.
+Downloaded model sources persist; WebNN exports are temporary. Provisioning, storage checks, and
 build failures are fatal. Per-model validation failures remain diagnostic: the workflow emits a
 warning and uploads its complete log for 14 days. There is no scheduled or extended-tier sweep.
 
@@ -79,26 +79,18 @@ activations. Voxtral uses level 4 on all 211 `MatMulNBits` nodes and remains blo
 
 ## Latest recorded sweep
 
-- Generated sweep: 2026-09-12 at onnx2webnn `4926c3e`
-- Real sweep: 2026-09-17 at onnx2webnn `25ea94c`
-- RustNN: `28fb3bbe`
+- Real sweep: 2026-09-21 on `fkrall/cache-backed-validation` at `1fd0571` plus the uncommitted real-only cleanup worktree
+- RustNN: `76d52b97`
 - ORT: repository-local Linux x64 1.29.0 build
 - Manifest: `tests/models/manifest.json` (51 cases, 44 unique ONNX files)
 - Execution: one validation worker; ORT may use multiple CPU threads inside a case
-- Skeleton verification: 51/51 passed as part of the complete 52-case pre-cleanup run, including heavy entries; that superset took 114.0s (135.8s including startup) and peaked at 26.4 GiB
-- Real verification: 47/51 passed as part of the complete 52-case pre-cleanup run, with the same four recorded blockers; that superset took 7m 2.3s and peaked at 26.4 GiB
+- Skeleton verification: 51/51 passed on the current worktree; the test took 112.9s (134.1s including the release build)
+- Real verification: 47/51 passed. The all-model process completed 50 cases before its 15-minute tool wrapper expired; the remaining privacy-filter case then passed with a `match=` selection at the same checkout and caches. No case was inferred without execution.
 
-The current 51 cases are a strict subset of the completed 52-case runs: the removed FP32 Tiny
-RoFormer case passed in both modes. No result for a retained case is inferred without execution.
-
-These revisions identify the latest **tested** state for each weight mode. A newer checkout is not
-considered the baseline for a mode until that mode has been rerun and this section is replaced.
+All 51 current manifest cases were executed. A newer checkout is not considered the tested baseline
+until the real sweep is rerun and this section is replaced.
 
 ```bash
-ORT_DYLIB_PATH=../rustnn/target/onnxruntime/onnxruntime-linux-x64-1.29.0/lib/libonnxruntime.so.1.29.0 \
-  target/release/onnx2webnn validate-models \
-  --selection all --weights generated --jobs 1
-
 ORT_DYLIB_PATH=../rustnn/target/onnxruntime/onnxruntime-linux-x64-1.29.0/lib/libonnxruntime.so.1.29.0 \
   target/release/onnx2webnn validate-models \
   --selection all --weights real --jobs 1
@@ -108,37 +100,25 @@ ORT_DYLIB_PATH=../rustnn/target/onnxruntime/onnxruntime-linux-x64-1.29.0/lib/lib
 
 | Weight mode | Pass | Fail | Download skipped | Result |
 |-------------|-----:|-----:|-----------------:|--------|
-| Generated (`g4`) | 20 | 31 | 0 | Complete (51/51) |
 | Real | 47 | 4 | 0 | Complete (51/51) |
 
-Nineteen cases pass in both modes. Eight generated cases reach comparison; in the current real sweep,
-two cases exercise unsupported cross-backend execution modes: FastVLM precision-sensitive
-GQA/DQL prefill and Voxtral level-4 quantized matmul. The generated column remains the
-2026-09-12 baseline; only the real sweep was rerun for this change. Generated and real weights can
-expose different first blockers; a failure before comparison is not evidence of a numerical mismatch.
+Two cases exercise unsupported cross-backend execution modes: FastVLM precision-sensitive GQA/DQL
+prefill and Voxtral level-4 quantized matmul. The two Chronos publisher artifacts are rejected by
+native ORT before conversion comparison.
 
 The real-weight failures, exact affected cases, current diagnosis, and suggested ownership are
 tracked in [Real-weight validation failures](real-weight-validation-failures.md).
 
 ### Current failure families
 
-| Code | Generated | Real | Stage | Current cause / next action |
-|------|----------:|-----:|-------|-----------------------------|
-| N1 | 8 | 0 | Comparison | Generated-weight output disagreement; the retained generated baseline has not yet been rerun after later converter fixes. |
-| E1 | 4 | 0 | Export | The retained generated baseline predates packed Int4/Uint4 serialization; the current real sweep confirms E1 is fixed. |
-| G1 | 10 | 0 | Generated preparation | Initializer has no recorded consumers; extend consumer analysis while keeping generation fail-closed. |
-| G2 | 1 | 0 | Generated preparation | Large tensor-valued Constant has an ambiguous role. |
-| I1 | 3 | 0 | Native ORT input | Cleared for real weights by generating zero-valued `token_type_ids`; generated counts await a full rerun. |
-| I2 | 2 | 0 | Native ORT input | Cleared for real weights by preserving zero-element buffers; generated counts await a full rerun. |
-| I3 | 1 | 0 | Native ORT input | Cleared for real weights by generating an all-ones `attention_mask`; generated counts await a full rerun. |
-| Q1 | 0 | 1 | Comparison | Unsupported execution semantics: Voxtral sets `MatMulNBits accuracy_level=4`, allowing native ORT to quantize activations to Int8; WebNN lowers to Float32 dequantize-plus-matmul. |
-| U1 | 0 | 1 | Comparison | Unsupported strict equivalence: FastVLM prefill repeatedly quantizes attention results whose legal floating-point rounding differs between fused ORT kernels and the portable WebNN decomposition; decode passes. |
-| O1 | 2 | 2 | Native ORT load | Upstream-blocked: both Chronos paths resolve to the same publisher artifact, which feeds a float ConstantOfShape result to Gather indices. |
+| Code | Cases | Stage | Current cause / next action |
+|------|------:|-------|-----------------------------|
+| Q1 | 1 | Comparison | Unsupported execution semantics: Voxtral sets `MatMulNBits accuracy_level=4`, allowing native ORT to quantize activations to Int8; WebNN lowers to Float32 dequantize-plus-matmul. |
+| U1 | 1 | Comparison | Unsupported strict equivalence: FastVLM prefill repeatedly quantizes attention results whose legal floating-point rounding differs between fused ORT kernels and the portable WebNN decomposition; decode passes. |
+| O1 | 2 | Native ORT load | Upstream-blocked: both Chronos paths resolve to the same publisher artifact, which feeds a float ConstantOfShape result to Gather indices. |
 
-Generated totals: 11 generated-model preparation, 4 export, 6 native-ORT input, 2 native-ORT
-model-load, 8 comparison failures, and 20 passes. Real totals: no export, reload,
-cached-interface, or native-ORT input failures, 2 native-ORT model-load failures, 2 unsupported execution-mode
-mismatches, and 47 passes.
+Real totals: no export, reload, cached-interface, or native-ORT input failures; 2 native-ORT
+model-load failures, 2 unsupported execution-mode mismatches, and 47 passes.
 
 ### Current case ledger
 
@@ -150,77 +130,76 @@ pinned because WebNN has no `If` operation. Each prefill/decode entry produces i
 `.webnn`/Safetensors pair. Loading both graphs concurrently may duplicate their shared weights in
 RAM and VRAM. This is distinct from ordinary repeated cases that differ only in fixed dimensions.
 
-| # | Manifest case | Generated | Real | WebNN If split |
-|---:|---------------|-----------|------|----------------|
-| 0 | `briaai--RMBG-1.4 :: model_quantized.onnx` | PASS | PASS | — |
-| 1 | `openai--privacy-filter :: model_quantized.onnx` | N1 | PASS | — |
-| 2 | `nomic-ai--nomic-embed-text-v1.5 :: model_quantized.onnx` | I1 | PASS | — |
-| 3 | `mixedbread-ai--mxbai-embed-large-v1 :: model_quantized.onnx` | I1 | PASS | — |
-| 4 | `HuggingFaceTB--SmolLM2-1.7B-Instruct :: model_q4.onnx` (`sequence=64`, `past=0`) | E1 | PASS | — |
-| 5 | `HuggingFaceTB--SmolLM2-1.7B-Instruct :: model_q4.onnx` (`sequence=1`, `past=64`) | E1 | PASS | — |
-| 6 | `distil-whisper--distil-large-v2 :: encoder_model_quantized.onnx` | N1 | PASS | — |
-| 7 | `distil-whisper--distil-large-v2 :: decoder_model_merged_quantized.onnx` (`cache=0`) | G1 | PASS | Prefill pair (1/2) |
-| 8 | `distil-whisper--distil-large-v2 :: decoder_model_merged_quantized.onnx` (`cache=1`) | G1 | PASS | Decode pair (2/2) |
-| 9 | `jinaai--jina-reranker-v2-base-multilingual :: model_quantized.onnx` | PASS | PASS | — |
-| 10 | `onnx-community--FastVLM-0.5B-ONNX :: embed_tokens_quantized.onnx` | PASS | PASS | — |
-| 11 | `onnx-community--FastVLM-0.5B-ONNX :: decoder_model_merged_quantized.onnx` (`sequence=64`, `past=0`) | I2 | U1 | — |
-| 12 | `onnx-community--FastVLM-0.5B-ONNX :: decoder_model_merged_quantized.onnx` (`sequence=1`, `past=64`) | I3 | PASS | — |
-| 13 | `onnx-community--FastVLM-0.5B-ONNX :: vision_encoder_quantized.onnx` | PASS | PASS | — |
-| 14 | `Marqo--marqo-fashionSigLIP :: text_model_quantized.onnx` | PASS | PASS | — |
-| 15 | `Marqo--marqo-fashionSigLIP :: vision_model_quantized.onnx` | N1 | PASS | — |
-| 16 | `AdamCodd--vit-base-nsfw-detector :: model_quantized.onnx` | PASS | PASS | — |
-| 17 | `Xenova--nllb-200-distilled-600M :: encoder_model_quantized.onnx` | G2 | PASS | — |
-| 18 | `onnx-community--Janus-Pro-1B-ONNX :: language_model_q4.onnx` | E1 | PASS | — |
-| 19 | `onnx-community--Janus-Pro-1B-ONNX :: lm_head.onnx` | PASS | PASS | — |
-| 20 | `onnx-community--Janus-Pro-1B-ONNX :: gen_head.onnx` | PASS | PASS | — |
-| 21 | `onnx-community--Janus-Pro-1B-ONNX :: gen_img_embeds.onnx` | PASS | PASS | — |
-| 22 | `onnx-community--Janus-Pro-1B-ONNX :: image_decode.onnx` | PASS | PASS | — |
-| 23 | `Xenova--musicgen-small :: text_encoder_quantized.onnx` | PASS | PASS | — |
-| 24 | `Xenova--musicgen-small :: decoder_model_merged_quantized.onnx` (`cache=0`) | G1 | PASS | Prefill pair (1/2) |
-| 25 | `Xenova--musicgen-small :: decoder_model_merged_quantized.onnx` (`cache=1`) | G1 | PASS | Decode pair (2/2) |
-| 26 | `Mozilla--distilvit :: encoder_model_quantized.onnx` | N1 | PASS | — |
-| 27 | `onnx-community--Voxtral-Mini-3B-2507-ONNX :: embed_tokens_fp16.onnx` | PASS | PASS | — |
-| 28 | `onnx-community--Voxtral-Mini-3B-2507-ONNX :: decoder_model_merged_q4.onnx` | E1 | Q1 | — |
-| 29 | `onnx-community--Voxtral-Mini-3B-2507-ONNX :: audio_encoder_quantized.onnx` | N1 | PASS | — |
-| 30 | `Xenova--LaMini-Flan-T5-783M :: encoder_model_quantized.onnx` | PASS | PASS | — |
-| 31 | `Xenova--LaMini-Flan-T5-783M :: decoder_model_merged_quantized.onnx` (`cache=0`) | G1 | PASS | Prefill pair (1/2) |
-| 32 | `Xenova--LaMini-Flan-T5-783M :: decoder_model_merged_quantized.onnx` (`cache=1`) | G1 | PASS | Decode pair (2/2) |
-| 33 | `Xenova--detr-resnet-50 :: model_quantized.onnx` | PASS | PASS | — |
-| 34 | `Xenova--donut-base-finetuned-docvqa :: encoder_model_quantized.onnx` | N1 | PASS | — |
-| 35 | `Xenova--donut-base-finetuned-docvqa :: decoder_model_merged_quantized.onnx` (`cache=0`) | G1 | PASS | Prefill pair (1/2) |
-| 36 | `Xenova--donut-base-finetuned-docvqa :: decoder_model_merged_quantized.onnx` (`cache=1`) | G1 | PASS | Decode pair (2/2) |
-| 37 | `onnx-community--dinov3-vits16-pretrain-lvd1689m-ONNX :: model.onnx` | PASS | PASS | — |
-| 38 | `Xenova--distilbart-cnn-6-6 :: encoder_model_quantized.onnx` | PASS | PASS | — |
-| 39 | `Xenova--distilbart-cnn-6-6 :: decoder_model_merged_quantized.onnx` (`cache=0`) | G1 | PASS | Prefill pair (1/2) |
-| 40 | `Xenova--distilbart-cnn-6-6 :: decoder_model_merged_quantized.onnx` (`cache=1`) | G1 | PASS | Decode pair (2/2) |
-| 41 | `prithivMLmods--Common-Voice-Gender-Detection-ONNX :: model_quantized.onnx` | N1 | PASS | — |
-| 42 | `Xenova--bert-base-multilingual-cased :: model_quantized.onnx` | I1 | PASS | — |
-| 43 | `Xenova--distilbert-base-cased-distilled-squad :: model_quantized.onnx` | PASS | PASS | — |
-| 44 | `onnx-community--vitpose-base-simple :: model_quantized.onnx` | PASS | PASS | — |
-| 45 | `kashif--chronos-2-onnx :: encoder_model.onnx` | O1 | O1 | — |
-| 46 | `kashif--chronos-2-onnx :: decoder_model_merged.onnx` | O1 | O1 | — |
-| 47 | `huggingworld--Qwen2.5-VL-3B-Instruct-ONNX :: embed_tokens_quantized.onnx` | PASS | PASS | — |
-| 48 | `huggingworld--Qwen2.5-VL-3B-Instruct-ONNX :: decoder_model_merged_quantized.onnx` | I2 | PASS | — |
-| 49 | `onnx-community--timesformer-base-finetuned-k400 :: model_quantized.onnx` | N1 | PASS | — |
-| 50 | `Xenova--tiny-random-RoFormerForMultipleChoice :: model_quantized.onnx` | PASS | PASS | — |
+| # | Manifest case | Real | WebNN If split |
+|---:|---------------|------|----------------|
+| 0 | `briaai--RMBG-1.4 :: model_quantized.onnx` | PASS | — |
+| 1 | `openai--privacy-filter :: model_quantized.onnx` | PASS | — |
+| 2 | `nomic-ai--nomic-embed-text-v1.5 :: model_quantized.onnx` | PASS | — |
+| 3 | `mixedbread-ai--mxbai-embed-large-v1 :: model_quantized.onnx` | PASS | — |
+| 4 | `HuggingFaceTB--SmolLM2-1.7B-Instruct :: model_q4.onnx` (`sequence=64`, `past=0`) | PASS | — |
+| 5 | `HuggingFaceTB--SmolLM2-1.7B-Instruct :: model_q4.onnx` (`sequence=1`, `past=64`) | PASS | — |
+| 6 | `distil-whisper--distil-large-v2 :: encoder_model_quantized.onnx` | PASS | — |
+| 7 | `distil-whisper--distil-large-v2 :: decoder_model_merged_quantized.onnx` (`cache=0`) | PASS | Prefill pair (1/2) |
+| 8 | `distil-whisper--distil-large-v2 :: decoder_model_merged_quantized.onnx` (`cache=1`) | PASS | Decode pair (2/2) |
+| 9 | `jinaai--jina-reranker-v2-base-multilingual :: model_quantized.onnx` | PASS | — |
+| 10 | `onnx-community--FastVLM-0.5B-ONNX :: embed_tokens_quantized.onnx` | PASS | — |
+| 11 | `onnx-community--FastVLM-0.5B-ONNX :: decoder_model_merged_quantized.onnx` (`sequence=64`, `past=0`) | U1 | — |
+| 12 | `onnx-community--FastVLM-0.5B-ONNX :: decoder_model_merged_quantized.onnx` (`sequence=1`, `past=64`) | PASS | — |
+| 13 | `onnx-community--FastVLM-0.5B-ONNX :: vision_encoder_quantized.onnx` | PASS | — |
+| 14 | `Marqo--marqo-fashionSigLIP :: text_model_quantized.onnx` | PASS | — |
+| 15 | `Marqo--marqo-fashionSigLIP :: vision_model_quantized.onnx` | PASS | — |
+| 16 | `AdamCodd--vit-base-nsfw-detector :: model_quantized.onnx` | PASS | — |
+| 17 | `Xenova--nllb-200-distilled-600M :: encoder_model_quantized.onnx` | PASS | — |
+| 18 | `onnx-community--Janus-Pro-1B-ONNX :: language_model_q4.onnx` | PASS | — |
+| 19 | `onnx-community--Janus-Pro-1B-ONNX :: lm_head.onnx` | PASS | — |
+| 20 | `onnx-community--Janus-Pro-1B-ONNX :: gen_head.onnx` | PASS | — |
+| 21 | `onnx-community--Janus-Pro-1B-ONNX :: gen_img_embeds.onnx` | PASS | — |
+| 22 | `onnx-community--Janus-Pro-1B-ONNX :: image_decode.onnx` | PASS | — |
+| 23 | `Xenova--musicgen-small :: text_encoder_quantized.onnx` | PASS | — |
+| 24 | `Xenova--musicgen-small :: decoder_model_merged_quantized.onnx` (`cache=0`) | PASS | Prefill pair (1/2) |
+| 25 | `Xenova--musicgen-small :: decoder_model_merged_quantized.onnx` (`cache=1`) | PASS | Decode pair (2/2) |
+| 26 | `Mozilla--distilvit :: encoder_model_quantized.onnx` | PASS | — |
+| 27 | `onnx-community--Voxtral-Mini-3B-2507-ONNX :: embed_tokens_fp16.onnx` | PASS | — |
+| 28 | `onnx-community--Voxtral-Mini-3B-2507-ONNX :: decoder_model_merged_q4.onnx` | Q1 | — |
+| 29 | `onnx-community--Voxtral-Mini-3B-2507-ONNX :: audio_encoder_quantized.onnx` | PASS | — |
+| 30 | `Xenova--LaMini-Flan-T5-783M :: encoder_model_quantized.onnx` | PASS | — |
+| 31 | `Xenova--LaMini-Flan-T5-783M :: decoder_model_merged_quantized.onnx` (`cache=0`) | PASS | Prefill pair (1/2) |
+| 32 | `Xenova--LaMini-Flan-T5-783M :: decoder_model_merged_quantized.onnx` (`cache=1`) | PASS | Decode pair (2/2) |
+| 33 | `Xenova--detr-resnet-50 :: model_quantized.onnx` | PASS | — |
+| 34 | `Xenova--donut-base-finetuned-docvqa :: encoder_model_quantized.onnx` | PASS | — |
+| 35 | `Xenova--donut-base-finetuned-docvqa :: decoder_model_merged_quantized.onnx` (`cache=0`) | PASS | Prefill pair (1/2) |
+| 36 | `Xenova--donut-base-finetuned-docvqa :: decoder_model_merged_quantized.onnx` (`cache=1`) | PASS | Decode pair (2/2) |
+| 37 | `onnx-community--dinov3-vits16-pretrain-lvd1689m-ONNX :: model.onnx` | PASS | — |
+| 38 | `Xenova--distilbart-cnn-6-6 :: encoder_model_quantized.onnx` | PASS | — |
+| 39 | `Xenova--distilbart-cnn-6-6 :: decoder_model_merged_quantized.onnx` (`cache=0`) | PASS | Prefill pair (1/2) |
+| 40 | `Xenova--distilbart-cnn-6-6 :: decoder_model_merged_quantized.onnx` (`cache=1`) | PASS | Decode pair (2/2) |
+| 41 | `prithivMLmods--Common-Voice-Gender-Detection-ONNX :: model_quantized.onnx` | PASS | — |
+| 42 | `Xenova--bert-base-multilingual-cased :: model_quantized.onnx` | PASS | — |
+| 43 | `Xenova--distilbert-base-cased-distilled-squad :: model_quantized.onnx` | PASS | — |
+| 44 | `onnx-community--vitpose-base-simple :: model_quantized.onnx` | PASS | — |
+| 45 | `kashif--chronos-2-onnx :: encoder_model.onnx` | O1 | — |
+| 46 | `kashif--chronos-2-onnx :: decoder_model_merged.onnx` | O1 | — |
+| 47 | `huggingworld--Qwen2.5-VL-3B-Instruct-ONNX :: embed_tokens_quantized.onnx` | PASS | — |
+| 48 | `huggingworld--Qwen2.5-VL-3B-Instruct-ONNX :: decoder_model_merged_quantized.onnx` | PASS | — |
+| 49 | `onnx-community--timesformer-base-finetuned-k400 :: model_quantized.onnx` | PASS | — |
+| 50 | `Xenova--tiny-random-RoFormerForMultipleChoice :: model_quantized.onnx` | PASS | — |
 
 ### Current timing and storage
 
 | Run | Cases | Warm wall time |
 |-----|------:|---------------:|
-| Generated (recorded superset) | 52 | 7m 47.5s |
-| Real, cache-complete (recorded superset) | 52 | 7m 2.3s |
+| Real, cache-complete (aggregate completion) | 51 | Not comparable: final case resumed after tool timeout |
 
-These timings are retained for the completed 52-case superset; removing one passing Tiny RoFormer case does not provide a separately measured 51-case duration.
+The result is complete coverage aggregated from the interrupted all-model run and one resumed
+selection, so it has no comparable single wall time.
 
-At the end of the sweep, `.onnx-cache` occupied 76 GB and `.webnn-cache` 86 GB. The increase
-is the newly exportable q4 artifacts. Neither completed run needed or skipped a download.
+After the aggregate sweep, `.onnx-cache` occupied 76 GB and `.webnn-cache` 114 GB; 48 GiB
+remained free. No selected case was skipped for download or storage.
 
 ### Current repair order
 
-1. Extend generated-weight role/consumer analysis for G1/G2 without weakening fail-closed behavior.
-2. Track WebNN/backend capabilities that could make U1 or Q1 executable with comparable fused precision semantics.
-3. Monitor the upstream Chronos repository for corrected reference exports.
+1. Track WebNN/backend capabilities that could make U1 or Q1 executable with comparable fused precision semantics.
+2. Monitor the upstream Chronos repository for corrected reference exports.
 
 ## Coverage change history
 
@@ -229,7 +208,7 @@ movement was not a functional improvement. Detailed obsolete ledgers are availab
 
 | Date / tested revisions | Change | Comparable coverage effect |
 |-------------------------|--------|----------------------------|
-| 2026-09-17 — validation-tier cleanup after `25ea94c` | Removed manifest validation tiers and the hand-added FP32 RoFormer smoke case, restoring the generator-owned upstream population. Status and blocker ownership now live only in these validation documents; the CLI selects `all` or `match=<text>`. | Population changed **52 → 51** by removing one passing duplicate-model variant. Comparable coverage is unchanged: skeleton **51/51**, generated **20/51**, and real **47/51** with the same four blockers. |
+| 2026-09-17 — validation-tier cleanup after `25ea94c` | Removed manifest validation tiers and the hand-added FP32 RoFormer smoke case, restoring the generator-owned upstream population. Status and blocker ownership now live only in these validation documents; the CLI selects `all` or `match=<text>`. | Population changed **52 → 51** by removing one passing duplicate-model variant. Comparable coverage is unchanged: skeleton **51/51** and real validation **47/51** with the same four blockers. |
 | 2026-09-17 — onnx2webnn `25ea94c`, RustNN `28fb3bbe`, post-rebase complete rerun | Rebased both feature stacks onto `rustnn/onnx2webnn:main` and `rustnn/rustnn:main`, then ran all 52 skeleton cases and all 52 real-weight cases from warm caches, including heavy entries. | No regression: skeleton remained **52/52**; real validation remained **48/52** with the identical FastVLM U1, Voxtral Q1, and two Chronos O1 blockers. |
 | 2026-09-17 — onnx2webnn `d4d350b`, RustNN `724d076b`, targeted FastVLM probes | Exposed layer boundaries and compared ORT CPU flash/non-flash GQA against the WebNN decomposition. Layer 0 and external rotary matched; the first failing boundary followed layer-1 GQA dynamic quantization and output projection. Native ORT first-logit output changed from `0.669124` to `1.066261` when only its GQA kernel changed, while WebNN remained `1.211192`. | Reclassified FastVLM prefill from generic N1 to unsupported U1. Coverage remains **48/52**; no tolerance was weakened. |
 | 2026-09-17 — onnx2webnn `6f6ad8a` plus current Cast/Slice/comparison worktree, RustNN `65e76e67` plus Slice-backend worktree | Normalized ONNX numeric-to-Bool Cast through comparison, preserved positive Slice strides with WebNN extent semantics, and selected q4/q8 comparison envelopes from `MatMulNBits.bits`. | DETR, Donut encoder, and Qwen passed; real coverage rose **45 → 48** on the same 52 cases. FastVLM prefill, Voxtral level 4, and the two invalid Chronos artifacts remain blocked. |
@@ -237,10 +216,10 @@ movement was not a functional improvement. Detailed obsolete ledgers are availab
 | 2026-09-16 — onnx2webnn `24fdd50` plus current manifest/tests worktree, RustNN `7f07a5e1` plus packed-4-bit archive worktree | Stored packed Int4/Uint4 constants as versioned U8 Safetensors payloads while preserving logical dtype and shape in `.webnn`, then restored and executed them on reload. Marked the identical invalid Chronos publisher artifacts as upstream-blocked. | E1 was eliminated from the real sweep: all four q4 cases reached comparison and exposed N1. The aggregate remained **42/52** because those cases do not yet match numerically. |
 | 2026-09-15 — onnx2webnn `ec5ba275` plus current validator worktree, RustNN `7f07a5e1` | Reconciled native ONNX interfaces with branch-specialized cached WebNN interfaces, dispatching only retained inputs and accepting omitted outputs only when native ORT proves they are empty. | Real passes rose **32 → 42** on the same 52 cases. All ten V1 cases passed numerically and no new blocker family appeared. |
 | 2026-09-14 — onnx2webnn `aaa33e2` plus current validator worktree, RustNN `7f07a5e1` | Made standard `token_type_ids` zero, `attention_mask` one, and preserved zero-element input buffers without treating scalars as empty. | Real passes rose **28 → 32** on the same 52 cases. I1-I3 were eliminated: four cases passed, five exposed V1, and two exposed N1. |
-| 2026-09-12 — onnx2webnn `4926c3e`, RustNN `7f07a5e1` | RustNN `2e22b3db` unified MLGraphBuilder recording and GraphJSON loader inference, replacing the loader-only string-based inference loop. Typed inference added the previously missing/rejected Resample2d, RoundEven/Clamp, Conv2d, LogicalNot, and LogicalAnd reload paths. | On the same 52-case manifest, generated passes rose **7 → 21** and real passes **6 → 28**. Former reload families R1–R5 were eliminated; newly reachable cases exposed N1 and V1 instead. |
+| 2026-09-12 — onnx2webnn `4926c3e`, RustNN `7f07a5e1` | RustNN `2e22b3db` unified MLGraphBuilder recording and GraphJSON loader inference, replacing the loader-only string-based inference loop. Typed inference added the previously missing/rejected Resample2d, RoundEven/Clamp, Conv2d, LogicalNot, and LogicalAnd reload paths. | On the same 52-case manifest, real passes rose **6 → 28**. Former reload families R1–R5 were eliminated; newly reachable cases exposed N1 and V1 instead. |
 | 2026-09-12 — RustNN `7f07a5e1` | Made `[]` unambiguously scalar and required completed GraphInfo descriptors to have known shapes. | Hardened the shared inference path but did not itself add the dispatch that cleared R1–R5; no separate coverage gain is attributed without a bisect. |
-| 2026-09-09 — onnx2webnn `e5a5f88c`, RustNN `2783a191` | Rebased onto the newer upstream model manifest and converter work. The manifest changed from 63 to 52 cases: 21 retained, 31 added, 42 removed. | Retained cases preserved their outcomes. The aggregate changed to 7 generated and 6 real passes because the population changed, not because comparable coverage improved. One real Voxtral download was skipped. |
-| 2026-09-08/09 — onnx2webnn `f1ca548`, RustNN `b64cf495` | First complete generated/real full-model baseline with cache-backed export, reload, deterministic execution, and comparison. | 6/63 generated and 7/63 real cases passed. Every case that reached comparison matched; failures established the original reload, serialization, generator, and input blocker families. |
+| 2026-09-09 — onnx2webnn `e5a5f88c`, RustNN `2783a191` | Rebased onto the newer upstream model manifest and converter work. The manifest changed from 63 to 52 cases: 21 retained, 31 added, 42 removed. | Retained cases preserved their outcomes. Real coverage changed to 6 passes because the population changed, not because comparable coverage improved. One real Voxtral download was skipped. |
+| 2026-09-08/09 — onnx2webnn `f1ca548`, RustNN `b64cf495` | First complete real-weight full-model baseline with cache-backed export, reload, deterministic execution, and comparison. | 7/63 real cases passed. Every case that reached comparison matched; failures established the original reload, serialization, and input blocker families. |
 
 ### RustNN inference-refactor attribution
 

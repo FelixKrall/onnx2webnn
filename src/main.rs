@@ -93,7 +93,7 @@ enum Command {
         #[arg(long)]
         selection: String,
 
-        /// Use publisher weights or deterministic generated replacements
+        /// Weight source. Only publisher weights are currently supported.
         #[arg(long, default_value_t = WeightMode::Real)]
         weights: WeightMode,
 

@@ -2,15 +2,6 @@ name: Full model validation
 
 on:
   workflow_dispatch:
-    inputs:
-      weights:
-        description: Model weights to validate
-        required: true
-        default: real
-        type: choice
-        options:
-          - real
-          - generated
 
 env:
   ORT_VERSION: 1.29.0
@@ -19,7 +10,7 @@ env:
 
 jobs:
   validate:
-    name: Full ${{ inputs.weights }}-weight sweep
+    name: Full real-weight sweep
     runs-on: [self-hosted, linux, x64, onnx2webnn-validation]
     timeout-minutes: 360
     defaults:
@@ -105,7 +96,7 @@ jobs:
           target/release/onnx2webnn validate-models \
             --manifest tests/models/manifest.json \
             --selection all \
-            --weights "${{ inputs.weights }}" \
+            --weights real \
             --jobs 1 2>&1 | tee "$RUNNER_TEMP/model-validation.log"
           status=${PIPESTATUS[0]}
           set -e
@@ -122,7 +113,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: full-model-validation-${{ inputs.weights }}
+          name: full-model-validation-real
           path: ${{ runner.temp }}/model-validation.log
           if-no-files-found: warn
           retention-days: 14

@@ -1,7 +1,7 @@
 # onnx2webnn
 
-> **Last edited:** `2026-09-17T16:56:50Z`<br>
-> **Checkout:** `fkrall/cache-backed-validation` at `25ea94c`
+> **Last edited:** `2026-09-21T13:27:31Z`<br>
+> **Checkout:** `fkrall/cache-backed-validation` at `1fd0571`
 >
 > **Freshness:** Use this document only when this provenance is recent relative to the relevant
 > code and commits; otherwise verify the implementation, tests, and Git history before relying
@@ -144,7 +144,7 @@ Every Linux pull-request job numerically validates the real-weight models in the
 set. Windows does not run numerical model validation. Each curated entry must be small enough for a
 hosted runner, pass on both ORT and CoreML, and declare an immutable 40-character Hugging Face
 commit `revision` plus the lowercase SHA-256 of its primary ONNX file. Downloads, external-data
-sidecars, generated fixtures, skeletons, and cache identities all use that revision. The primary
+sidecars, skeletons, and cache identities all use that revision. The primary
 model digest is checked after download and whenever a cached model is reused.
 
 To add required CI coverage, resolve the model repository to a commit, download the exact ONNX file
@@ -160,10 +160,10 @@ target/release/onnx2webnn validate-models \
 ```
 
 The manually dispatched `Full model validation` workflow runs every entry from the generated main
-manifest with either real or generated weights. It requires a dedicated runner labeled
+manifest with real publisher weights. It requires a dedicated runner labeled
 `self-hosted`, `linux`, `x64`, and `onnx2webnn-validation`, a writable
 `/var/cache/onnx2webnn`, network access, a filesystem of at least 100 GiB, and approximately 32 GiB
-of RAM. Source and generated models persist in that directory; exported WebNN artifacts remain
+of RAM. Downloaded source models persist in that directory; exported WebNN artifacts remain
 temporary. Setup, build, and runner-contract failures fail the workflow, while model failures are
 reported as diagnostic warnings and retained in a full log artifact for 14 days.
 

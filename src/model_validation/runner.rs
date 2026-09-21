@@ -4,7 +4,6 @@
  */
 
 use super::full_model::cache_full_model;
-use super::generated::{cache_generated_model, GENERATOR_VERSION};
 use super::manifest::{load_manifest_from, Entry, Selection};
 use crate::{convert_onnx, validate_cached_model_with_options, ConvertOptions};
 use std::collections::HashMap;
@@ -22,7 +21,6 @@ type ModelCell = Arc<OnceLock<Result<PathBuf, String>>>;
 pub enum WeightMode {
     #[default]
     Real,
-    Generated,
 }
 
 impl FromStr for WeightMode {
@@ -30,10 +28,7 @@ impl FromStr for WeightMode {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
             "real" => Ok(Self::Real),
-            "generated" => Ok(Self::Generated),
-            _ => Err(format!(
-                "invalid weight mode {value:?}; expected real or generated"
-            )),
+            _ => Err(format!("invalid weight mode {value:?}; expected real")),
         }
     }
 }
@@ -42,7 +37,6 @@ impl fmt::Display for WeightMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Real => "real",
-            Self::Generated => "generated",
         })
     }
 }
@@ -131,11 +125,7 @@ impl Sweep {
     fn model(&self, entry: &Entry) -> Result<PathBuf, String> {
         let key = format!("{}:{}", self.options.weights, entry.source_key());
         let cell = self.models.lock().unwrap().entry(key).or_default().clone();
-        cell.get_or_init(|| match self.options.weights {
-            WeightMode::Real => cache_full_model(entry),
-            WeightMode::Generated => cache_generated_model(&entry.file, entry.revision.as_deref()),
-        })
-        .clone()
+        cell.get_or_init(|| cache_full_model(entry)).clone()
     }
 
     fn validate(&self, index: usize, entry: &Entry) {
@@ -162,13 +152,8 @@ impl Sweep {
         let onnx_path = self
             .model(entry)
             .map_err(|e| format!("model preparation: {e}"))?;
-        let version = if self.options.weights == WeightMode::Generated {
-            format!("-g{GENERATOR_VERSION}")
-        } else {
-            String::new()
-        };
         let webnn_path = self.options.webnn_cache.join(format!(
-            "{}-{}{version}.webnn",
+            "{}-{}.webnn",
             entry.cache_key(),
             self.options.weights
         ));
@@ -243,7 +228,7 @@ mod tests {
     #[test]
     fn parses_weight_modes() {
         assert_eq!("real".parse(), Ok(WeightMode::Real));
-        assert_eq!("generated".parse(), Ok(WeightMode::Generated));
+        assert!("generated".parse::<WeightMode>().is_err());
         assert!("random".parse::<WeightMode>().is_err());
     }
     #[test]

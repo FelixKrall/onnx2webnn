@@ -4,7 +4,6 @@
  */
 
 pub mod full_model;
-pub mod generated;
 pub mod manifest;
 pub mod runner;
 pub mod skeleton;
