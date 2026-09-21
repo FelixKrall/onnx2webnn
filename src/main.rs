@@ -275,10 +275,14 @@ fn main() -> anyhow::Result<()> {
                 options.manifest = manifest;
             }
             let summary = run_manifest_validation(options).map_err(anyhow::Error::msg)?;
-            println!(
-                "✓ {} of {} selected models passed ({weights} weights)",
-                summary.passed, summary.selected
-            );
+            println!("{summary}");
+            if summary.has_failures() {
+                return Err(anyhow::anyhow!(
+                    "{} of {} model validations failed",
+                    summary.failed.len(),
+                    summary.selected
+                ));
+            }
         }
     }
 

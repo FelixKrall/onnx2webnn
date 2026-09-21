@@ -8,4 +8,4 @@ pub mod manifest;
 pub mod runner;
 pub mod skeleton;
 
-pub use runner::{run_manifest_validation, RunOptions, RunSummary, WeightMode};
+pub use runner::{run_manifest_validation, ModelFailure, RunOptions, RunSummary, WeightMode};

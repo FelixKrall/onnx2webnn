@@ -10,7 +10,6 @@ use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 const WORKER_STACK_BYTES: usize = 256 << 20;
@@ -73,6 +72,57 @@ impl RunOptions {
 pub struct RunSummary {
     pub selected: usize,
     pub passed: usize,
+    pub succeeded: Vec<String>,
+    pub failed: Vec<ModelFailure>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModelFailure {
+    pub label: String,
+    pub error: String,
+}
+
+impl RunSummary {
+    pub fn pass_percentage(&self) -> f64 {
+        if self.selected == 0 {
+            0.0
+        } else {
+            self.passed as f64 * 100.0 / self.selected as f64
+        }
+    }
+
+    pub fn has_failures(&self) -> bool {
+        !self.failed.is_empty()
+    }
+}
+
+impl fmt::Display for RunSummary {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "Model validation summary")?;
+        writeln!(f, "Succeeded ({}):", self.succeeded.len())?;
+        if self.succeeded.is_empty() {
+            writeln!(f, "  (none)")?;
+        } else {
+            for label in &self.succeeded {
+                writeln!(f, "  PASS {label}")?;
+            }
+        }
+        writeln!(f, "Failed ({}):", self.failed.len())?;
+        if self.failed.is_empty() {
+            writeln!(f, "  (none)")?;
+        } else {
+            for failure in &self.failed {
+                writeln!(f, "  FAIL {}: {}", failure.label, failure.error)?;
+            }
+        }
+        write!(
+            f,
+            "Overall: {}/{} passed ({:.1}%)",
+            self.passed,
+            self.selected,
+            self.pass_percentage()
+        )
+    }
 }
 
 pub fn run_manifest_validation(options: RunOptions) -> Result<RunSummary, String> {
@@ -93,32 +143,43 @@ pub fn run_manifest_validation(options: RunOptions) -> Result<RunSummary, String
     let sweep = Sweep {
         options,
         models: Mutex::new(HashMap::new()),
-        passed: AtomicUsize::new(0),
-        failures: Mutex::new(Vec::new()),
+        results: Mutex::new(Vec::new()),
     };
     sweep.run(light, sweep.options.jobs);
     sweep.run(heavy, 1);
-    let passed = sweep.passed.load(Ordering::Relaxed);
-    let failures = sweep.failures.into_inner().unwrap();
-    if failures.is_empty() {
-        Ok(RunSummary {
-            selected: selected_count,
-            passed,
-        })
-    } else {
-        Err(format!(
-            "{} of {selected_count} model validations failed:\n{}",
-            failures.len(),
-            failures.join("\n")
-        ))
+    let mut results = sweep.results.into_inner().unwrap();
+    results.sort_unstable_by_key(|result| result.index);
+    let mut succeeded = Vec::new();
+    let mut failed = Vec::new();
+    for result in results {
+        if let Some(error) = result.error {
+            failed.push(ModelFailure {
+                label: result.label,
+                error,
+            });
+        } else {
+            succeeded.push(result.label);
+        }
     }
+    let passed = succeeded.len();
+    Ok(RunSummary {
+        selected: selected_count,
+        passed,
+        succeeded,
+        failed,
+    })
+}
+
+struct ModelResult {
+    index: usize,
+    label: String,
+    error: Option<String>,
 }
 
 struct Sweep {
     options: RunOptions,
     models: Mutex<HashMap<String, ModelCell>>,
-    passed: AtomicUsize,
-    failures: Mutex<Vec<String>>,
+    results: Mutex<Vec<ModelResult>>,
 }
 
 impl Sweep {
@@ -132,18 +193,23 @@ impl Sweep {
         let label = entry.label(index);
         match self.validate_inner(entry) {
             Ok((inputs, pins, outputs)) => {
-                self.passed.fetch_add(1, Ordering::Relaxed);
                 eprintln!(
                     "ok   {label}\n     {inputs} inputs + {pins} pinned, {outputs} outputs ({})",
                     self.options.weights
                 );
+                self.results.lock().unwrap().push(ModelResult {
+                    index,
+                    label,
+                    error: None,
+                });
             }
             Err(error) => {
                 eprintln!("FAIL {label}\n     {error}");
-                self.failures
-                    .lock()
-                    .unwrap()
-                    .push(format!("{label}: {error}"));
+                self.results.lock().unwrap().push(ModelResult {
+                    index,
+                    label,
+                    error: Some(error),
+                });
             }
         }
     }
@@ -234,5 +300,23 @@ mod tests {
     #[test]
     fn real_is_default() {
         assert_eq!(WeightMode::default(), WeightMode::Real);
+    }
+
+    #[test]
+    fn summary_lists_all_results_and_percentage() {
+        let summary = RunSummary {
+            selected: 3,
+            passed: 2,
+            succeeded: vec!["#0 first".into(), "#2 third".into()],
+            failed: vec![ModelFailure {
+                label: "#1 second".into(),
+                error: "comparison: mismatch".into(),
+            }],
+        };
+        let report = summary.to_string();
+        assert!(report.contains("Succeeded (2):\n  PASS #0 first\n  PASS #2 third"));
+        assert!(report.contains("Failed (1):\n  FAIL #1 second: comparison: mismatch"));
+        assert!(report.contains("Overall: 2/3 passed (66.7%)"));
+        assert!(summary.has_failures());
     }
 }
