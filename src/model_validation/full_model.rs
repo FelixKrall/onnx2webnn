@@ -7,57 +7,99 @@
 
 use super::manifest::Entry;
 use crate::protos::onnx::{GraphProto, ModelProto};
+use huggingface_hub::{HFClient, HFClientSync, HFRepositorySync, RepoDownloadFileParams};
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
-use std::time::Duration;
 
-const CACHE_FORMAT: u32 = 2;
+const CACHE_FORMAT: u32 = 3;
+const METADATA_DIR: &str = ".onnx2webnn-validation";
 
 #[derive(Debug, Deserialize, Serialize)]
 struct CacheMetadata {
     format: u32,
-    source: String,
+    repository: String,
     revision: String,
     sha256: Option<String>,
+    primary: String,
     files: Vec<CachedFile>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
 struct CachedFile {
     path: String,
-    url: String,
-    etag: Option<String>,
     length: u64,
 }
 
 pub fn cache_root() -> Result<PathBuf, String> {
-    crate::cache::onnx_cache_dir()
+    resolve_cache_root(
+        nonempty_env("O2W_ONNX_CACHE"),
+        nonempty_env("O2W_CACHE_DIR"),
+        nonempty_env("HF_HUB_CACHE"),
+        nonempty_env("HUGGINGFACE_HUB_CACHE"),
+        nonempty_env("HF_HOME"),
+        dirs::cache_dir(),
+    )
+    .ok_or_else(|| {
+        "cannot determine the Hugging Face cache directory; set O2W_ONNX_CACHE or HF_HUB_CACHE"
+            .to_string()
+    })
+}
+
+fn resolve_cache_root(
+    o2w_onnx: Option<PathBuf>,
+    o2w_shared: Option<PathBuf>,
+    hf_hub: Option<PathBuf>,
+    legacy_hf_hub: Option<PathBuf>,
+    hf_home: Option<PathBuf>,
+    os_cache: Option<PathBuf>,
+) -> Option<PathBuf> {
+    o2w_onnx
+        .or_else(|| o2w_shared.map(|path| path.join("onnx")))
+        .or(hf_hub)
+        .or(legacy_hf_hub)
+        .or_else(|| hf_home.map(|path| path.join("hub")))
+        .or_else(|| os_cache.map(|path| path.join("huggingface").join("hub")))
+}
+
+fn nonempty_env(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
 }
 
 pub fn cache_full_model(entry: &Entry) -> Result<PathBuf, String> {
     let cache_root = cache_root()?;
-    let file = entry.file.as_str();
+    fs::create_dir_all(&cache_root).map_err(|e| format!("create {}: {e}", cache_root.display()))?;
     let revision = entry.revision();
-    let (repo, repository_path) = parse_manifest_file(file)?;
-    let relative_cache_path = safe_relative_path(file)?;
-    let target = cache_root.join(&relative_cache_path);
-    let metadata_path = metadata_path(&target);
+    let (repository, repository_path) = parse_manifest_file(&entry.file)?;
+    let (owner, name) = repository
+        .split_once('/')
+        .ok_or_else(|| format!("invalid Hugging Face repository {repository:?}"))?;
+    let client = HFClient::builder()
+        .cache_dir(&cache_root)
+        .build()
+        .map_err(|e| format!("create Hugging Face client: {e}"))?;
+    let client = HFClientSync::from_api(client)
+        .map_err(|e| format!("create blocking Hugging Face client: {e}"))?;
+    let repository_client = client.model(owner, name);
+    let metadata_path = metadata_path(&cache_root, entry);
     let refresh = std::env::var_os("O2W_MODEL_CACHE_REFRESH").is_some();
-    if !refresh
-        && complete_cache(
-            &cache_root,
+
+    if !refresh {
+        if let Some(model_path) = complete_cache(
+            &repository_client,
             &metadata_path,
-            &target,
+            &repository,
             revision,
             entry.sha256.as_deref(),
-        )
-    {
-        return Ok(target);
+        )? {
+            return Ok(model_path);
+        }
     }
 
     if metadata_path.exists() {
@@ -65,51 +107,85 @@ pub fn cache_full_model(entry: &Entry) -> Result<PathBuf, String> {
             .map_err(|e| format!("remove stale {}: {e}", metadata_path.display()))?;
     }
 
-    let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(300))
-        .build();
-    let source_url = hub_url(&repo, revision, &repository_path);
-    let mut files = vec![download(
-        &agent,
-        &source_url,
-        &target,
-        &relative_cache_path,
-        entry.sha256.as_deref(),
-    )?];
+    let mut model_path = download_hub_file(
+        &repository_client,
+        &repository_path,
+        revision,
+        refresh,
+        false,
+    )?;
+    if let Some(expected) = entry.sha256.as_deref() {
+        if let Err(error) = verify_sha256(&model_path, expected) {
+            if refresh {
+                return Err(error);
+            }
+            model_path =
+                download_hub_file(&repository_client, &repository_path, revision, true, false)?;
+            verify_sha256(&model_path, expected)?;
+        }
+    }
 
-    let model_bytes = fs::read(&target).map_err(|e| format!("read {}: {e}", target.display()))?;
+    let model_bytes =
+        fs::read(&model_path).map_err(|e| format!("read {}: {e}", model_path.display()))?;
     let model = ModelProto::decode(model_bytes.as_slice())
-        .map_err(|e| format!("decode {}: {e}", target.display()))?;
+        .map_err(|e| format!("decode {}: {e}", model_path.display()))?;
     let locations = external_locations(&model)?;
     let repository_parent = Path::new(&repository_path)
         .parent()
         .unwrap_or_else(|| Path::new(""));
-    let cache_parent = relative_cache_path
-        .parent()
-        .unwrap_or_else(|| Path::new(""));
+    let mut files = vec![cached_file(&repository_path, &model_path)?];
     for location in locations {
         let repository_sidecar = repository_parent.join(&location);
-        let relative_sidecar = cache_parent.join(&location);
-        let sidecar_url = hub_url(&repo, revision, &path_for_url(&repository_sidecar)?);
-        let sidecar_target = cache_root.join(&relative_sidecar);
-        files.push(download(
-            &agent,
-            &sidecar_url,
-            &sidecar_target,
-            &relative_sidecar,
-            None,
-        )?);
+        let repository_sidecar = path_for_url(&repository_sidecar)?;
+        let sidecar_path = download_hub_file(
+            &repository_client,
+            &repository_sidecar,
+            revision,
+            refresh,
+            false,
+        )?;
+        files.push(cached_file(&repository_sidecar, &sidecar_path)?);
     }
 
     let metadata = CacheMetadata {
         format: CACHE_FORMAT,
-        source: source_url,
+        repository,
         revision: revision.to_string(),
         sha256: entry.sha256.clone(),
+        primary: repository_path,
         files,
     };
     write_metadata(&metadata_path, &metadata)?;
-    Ok(target)
+    Ok(model_path)
+}
+
+fn download_hub_file(
+    repository: &HFRepositorySync,
+    path: &str,
+    revision: &str,
+    force_download: bool,
+    local_files_only: bool,
+) -> Result<PathBuf, String> {
+    repository
+        .download_file(
+            &RepoDownloadFileParams::builder()
+                .filename(path)
+                .revision(revision)
+                .force_download(force_download)
+                .local_files_only(local_files_only)
+                .build(),
+        )
+        .map_err(|e| format!("download {path} at revision {revision}: {e}"))
+}
+
+fn cached_file(repository_path: &str, local_path: &Path) -> Result<CachedFile, String> {
+    let length = fs::metadata(local_path)
+        .map_err(|e| format!("inspect {}: {e}", local_path.display()))?
+        .len();
+    Ok(CachedFile {
+        path: repository_path.to_string(),
+        length,
+    })
 }
 
 fn parse_manifest_file(file: &str) -> Result<(String, String), String> {
@@ -152,116 +228,75 @@ fn path_for_url(path: &Path) -> Result<String, String> {
         .join("/"))
 }
 
-fn hub_url(repo: &str, revision: &str, relative: &str) -> String {
-    format!("https://huggingface.co/{repo}/resolve/{revision}/{relative}")
-}
-
-fn metadata_path(model: &Path) -> PathBuf {
-    let file_name = model
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("model.onnx");
-    model.with_file_name(format!("{file_name}.complete.json"))
+fn metadata_path(cache_root: &Path, entry: &Entry) -> PathBuf {
+    let digest = Sha256::digest(entry.source_key().as_bytes());
+    let key = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    cache_root
+        .join(METADATA_DIR)
+        .join(format!("{key}.complete.json"))
 }
 
 fn complete_cache(
-    cache_root: &Path,
+    repository_client: &HFRepositorySync,
     metadata_path: &Path,
-    model_path: &Path,
+    repository: &str,
     revision: &str,
     expected_sha256: Option<&str>,
-) -> bool {
+) -> Result<Option<PathBuf>, String> {
     let Ok(bytes) = fs::read(metadata_path) else {
-        return false;
+        return Ok(None);
     };
     let Ok(metadata) = serde_json::from_slice::<CacheMetadata>(&bytes) else {
-        return false;
+        return Ok(None);
     };
-    metadata_matches(&metadata, revision, expected_sha256)
-        && metadata.files.iter().all(|entry| {
-            let Ok(relative) = safe_relative_path(&entry.path) else {
-                return false;
-            };
-            fs::metadata(cache_root.join(relative))
-                .map(|metadata| metadata.is_file() && metadata.len() == entry.length)
-                .unwrap_or(false)
-        })
-        && expected_sha256.is_none_or(|expected| verify_sha256(model_path, expected).is_ok())
+    if !metadata_matches(&metadata, repository, revision, expected_sha256) {
+        return Ok(None);
+    }
+
+    let mut primary = None;
+    for file in &metadata.files {
+        let path = match path_for_url(Path::new(&file.path)) {
+            Ok(path) => path,
+            Err(_) => return Ok(None),
+        };
+        let local_path = match download_hub_file(repository_client, &path, revision, false, true) {
+            Ok(path) => path,
+            Err(_) => return Ok(None),
+        };
+        let valid_length = fs::metadata(&local_path)
+            .map(|value| value.is_file() && value.len() == file.length)
+            .unwrap_or(false);
+        if !valid_length {
+            return Ok(None);
+        }
+        if path == metadata.primary {
+            primary = Some(local_path);
+        }
+    }
+
+    let Some(primary) = primary else {
+        return Ok(None);
+    };
+    if expected_sha256.is_some_and(|expected| verify_sha256(&primary, expected).is_err()) {
+        return Ok(None);
+    }
+    Ok(Some(primary))
 }
 
 fn metadata_matches(
     metadata: &CacheMetadata,
+    repository: &str,
     revision: &str,
     expected_sha256: Option<&str>,
 ) -> bool {
     metadata.format == CACHE_FORMAT
+        && metadata.repository == repository
         && metadata.revision == revision
         && metadata.sha256.as_deref() == expected_sha256
-}
-
-fn download(
-    agent: &ureq::Agent,
-    url: &str,
-    target: &Path,
-    relative_path: &Path,
-    expected_sha256: Option<&str>,
-) -> Result<CachedFile, String> {
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
-    }
-    let file_name = target
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("download");
-    let part = target.with_file_name(format!("{file_name}.part"));
-    let mut last_error = String::new();
-    for attempt in 0..5 {
-        let mut request = agent.get(url);
-        if let Ok(token) = std::env::var("HF_TOKEN") {
-            if !token.is_empty() {
-                request = request.set("Authorization", &format!("Bearer {token}"));
-            }
-        }
-        let result = (|| {
-            let response = request.call().map_err(|e| e.to_string())?;
-            let etag = response.header("ETag").map(str::to_string);
-            let mut reader = response.into_reader();
-            let mut output =
-                fs::File::create(&part).map_err(|e| format!("create {}: {e}", part.display()))?;
-            let length = std::io::copy(&mut reader, &mut output)
-                .map_err(|e| format!("download {url}: {e}"))?;
-            output
-                .flush()
-                .map_err(|e| format!("flush {}: {e}", part.display()))?;
-            drop(output);
-            if let Some(expected) = expected_sha256 {
-                if let Err(error) = verify_sha256(&part, expected) {
-                    let _ = fs::remove_file(&part);
-                    return Err(format!("{url}: {error}"));
-                }
-            }
-            if target.exists() {
-                fs::remove_file(target)
-                    .map_err(|e| format!("replace {}: {e}", target.display()))?;
-            }
-            fs::rename(&part, target)
-                .map_err(|e| format!("move {} to {}: {e}", part.display(), target.display()))?;
-            Ok(CachedFile {
-                path: path_for_url(relative_path)?,
-                url: url.to_string(),
-                etag,
-                length,
-            })
-        })();
-        match result {
-            Ok(file) => return Ok(file),
-            Err(error) => {
-                last_error = error;
-                std::thread::sleep(Duration::from_millis(1500 * (attempt + 1)));
-            }
-        }
-    }
-    Err(format!("download {url}: {last_error}"))
+        && !metadata.primary.is_empty()
 }
 
 fn sha256_file(path: &Path) -> Result<String, String> {
@@ -354,23 +389,76 @@ mod tests {
     use crate::protos::onnx::{StringStringEntryProto, TensorProto};
 
     #[test]
+    fn model_cache_precedence_prefers_o2w_then_hugging_face() {
+        let path = resolve_cache_root(
+            Some("/o2w-models".into()),
+            Some("/o2w".into()),
+            Some("/hf-hub".into()),
+            Some("/legacy-hf-hub".into()),
+            Some("/hf-home".into()),
+            Some("/os-cache".into()),
+        );
+        assert_eq!(path, Some(PathBuf::from("/o2w-models")));
+
+        let path = resolve_cache_root(
+            None,
+            Some("/o2w".into()),
+            Some("/hf-hub".into()),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(path, Some(PathBuf::from("/o2w/onnx")));
+
+        let path = resolve_cache_root(
+            None,
+            None,
+            Some("/hf-hub".into()),
+            None,
+            Some("/hf-home".into()),
+            Some("/os-cache".into()),
+        );
+        assert_eq!(path, Some(PathBuf::from("/hf-hub")));
+
+        let path = resolve_cache_root(None, None, None, None, None, Some("/os-cache".into()));
+        assert_eq!(path, Some(PathBuf::from("/os-cache/huggingface/hub")));
+    }
+
+    #[test]
     fn cache_metadata_requires_current_format_revision_and_digest() {
         let metadata = CacheMetadata {
             format: CACHE_FORMAT,
-            source: "https://example.invalid/model.onnx".into(),
+            repository: "org/repo".into(),
             revision: "0123456789abcdef0123456789abcdef01234567".into(),
             sha256: Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into()),
+            primary: "onnx/model.onnx".into(),
             files: Vec::new(),
         };
         let digest = metadata.sha256.as_deref();
-        assert!(metadata_matches(&metadata, &metadata.revision, digest));
-        assert!(!metadata_matches(&metadata, "other-revision", digest));
-        assert!(!metadata_matches(&metadata, &metadata.revision, None));
+        assert!(metadata_matches(
+            &metadata,
+            &metadata.repository,
+            &metadata.revision,
+            digest
+        ));
+        assert!(!metadata_matches(
+            &metadata,
+            &metadata.repository,
+            "other-revision",
+            digest
+        ));
+        assert!(!metadata_matches(
+            &metadata,
+            &metadata.repository,
+            &metadata.revision,
+            None
+        ));
 
         let mut old = metadata;
         old.format -= 1;
         assert!(!metadata_matches(
             &old,
+            &old.repository,
             &old.revision,
             old.sha256.as_deref()
         ));
@@ -393,10 +481,24 @@ mod tests {
     }
 
     #[test]
-    fn revision_is_part_of_the_hub_url() {
+    fn metadata_path_is_stable_for_the_source_identity() {
+        let entry = Entry {
+            file: "org--repo/onnx/model.onnx".into(),
+            revision: Some("deadbeef".into()),
+            sha256: None,
+            heavy: false,
+            coreml_unsupported: None,
+            coreml_slow: None,
+            override_dims: Default::default(),
+            pin_inputs: Default::default(),
+        };
+        let root = Path::new("/cache");
+        let first = metadata_path(root, &entry);
+        assert_eq!(first, metadata_path(root, &entry));
+        assert!(first.starts_with(root.join(METADATA_DIR)));
         assert_eq!(
-            hub_url("org/repo", "deadbeef", "onnx/model.onnx"),
-            "https://huggingface.co/org/repo/resolve/deadbeef/onnx/model.onnx"
+            first.extension().and_then(|value| value.to_str()),
+            Some("json")
         );
     }
 

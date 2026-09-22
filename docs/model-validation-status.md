@@ -1,7 +1,7 @@
 # Full-model numerical validation status
 
-> **Last edited:** `2026-09-21T13:27:31Z`<br>
-> **Checkout:** `fkrall/cache-backed-validation` at `1fd0571`
+> **Last edited:** `2026-09-22T21:07:28Z`<br>
+> **Checkout:** `fkrall/cache-backed-validation` at `a582b89`
 >
 > **Freshness:** Use this document only when this provenance is recent relative to the relevant
 > code and commits; otherwise verify the implementation, tests, and Git history before relying
@@ -31,7 +31,10 @@ Linux/ORT is blocking; macOS/CoreML runs the identical set as an experimental, n
 Windows does not run numerical validation. Membership is defined by the curated file itself and the
 runner invokes it with `--selection all`. Every entry must be suitable for hosted runners and include
 a full immutable Hugging Face commit revision and a lowercase SHA-256 for its primary ONNX file.
-The downloader verifies that digest both after download and on cache reuse.
+The downloader verifies that digest both after download and on cache reuse. Full-model downloads
+use the standard Hugging Face cache by default so Python and Rust clients can share immutable blobs;
+`O2W_ONNX_CACHE` and `O2W_CACHE_DIR/onnx` remain explicit overrides. Completion records stay
+onnx2webnn-specific and do not replace the manifest digest check.
 
 To add a required model, first confirm it passes on ORT and CoreML, then add its exact file, commit
 revision, downloaded-file digest, fixed dimension overrides, and any pinned inputs to
@@ -79,13 +82,13 @@ activations. Voxtral uses level 4 on all 211 `MatMulNBits` nodes and remains blo
 
 ## Latest recorded sweep
 
-- Real sweep: 2026-09-21 on `fkrall/cache-backed-validation` at `1fd0571` plus the uncommitted real-only cleanup worktree
-- RustNN: `76d52b97`
+- Real sweep: 2026-09-22 on `fkrall/cache-backed-validation` at `a582b89` plus the uncommitted Hugging Face cache migration worktree
+- RustNN: `38022044`
 - ORT: repository-local Linux x64 1.29.0 build
 - Manifest: `tests/models/manifest.json` (51 cases, 44 unique ONNX files)
 - Execution: one validation worker; ORT may use multiple CPU threads inside a case
-- Skeleton verification: 51/51 passed on the current worktree; the test took 112.9s (134.1s including the release build)
-- Real verification: 47/51 passed. The all-model process completed 50 cases before its 15-minute tool wrapper expired; the remaining privacy-filter case then passed with a `match=` selection at the same checkout and caches. No case was inferred without execution.
+- Skeleton verification: 51/51 passed; the test took 81.1s (133.2s including the release build)
+- Real verification: 47/51 passed in one complete cold-cache process; wall time was 10m 43.6s and peak RSS was 30.3 GiB. No case was skipped or inferred without execution.
 
 All 51 current manifest cases were executed. A newer checkout is not considered the tested baseline
 until the real sweep is rerun and this section is replaced.
@@ -186,15 +189,16 @@ RAM and VRAM. This is distinct from ordinary repeated cases that differ only in 
 
 ### Current timing and storage
 
-| Run | Cases | Warm wall time |
+| Run | Cases | Wall time |
 |-----|------:|---------------:|
-| Real, cache-complete (aggregate completion) | 51 | Not comparable: final case resumed after tool timeout |
+| Real, cold standard HF cache | 51 | 10m 43.6s |
 
-The result is complete coverage aggregated from the interrupted all-model run and one resumed
-selection, so it has no comparable single wall time.
+The official Rust client populated 44 completion records, one per unique ONNX file. A subsequent
+offline `match=privacy-filter` run verified warm reuse of both the primary ONNX and its external-data
+sidecar.
 
-After the aggregate sweep, `.onnx-cache` occupied 76 GB and `.webnn-cache` 114 GB; 48 GiB
-remained free. No selected case was skipped for download or storage.
+After the sweep, the standard Hugging Face cache occupied 18 GB and temporary WebNN artifacts
+occupied 32 GB; 122 GiB remained free. No selected case was skipped for download or storage.
 
 ### Current repair order
 

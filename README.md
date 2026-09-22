@@ -1,7 +1,7 @@
 # onnx2webnn
 
-> **Last edited:** `2026-09-21T13:27:31Z`<br>
-> **Checkout:** `fkrall/cache-backed-validation` at `1fd0571`
+> **Last edited:** `2026-09-22T21:07:28Z`<br>
+> **Checkout:** `fkrall/cache-backed-validation` at `a582b89`
 >
 > **Freshness:** Use this document only when this provenance is recent relative to the relevant
 > code and commits; otherwise verify the implementation, tests, and Git history before relying
@@ -148,6 +148,14 @@ hosted runner, pass on both ORT and CoreML, and declare an immutable 40-characte
 commit `revision` plus the lowercase SHA-256 of its primary ONNX file. Downloads, external-data
 sidecars, skeletons, and cache identities all use that revision. The primary
 model digest is checked after download and whenever a cached model is reused.
+
+Full-model validation downloads through the official Hugging Face Rust client and uses the standard
+`HF_HUB_CACHE`/`HF_HOME` cache by default, allowing Python and Rust tools to reuse the same blobs.
+`O2W_ONNX_CACHE`, followed by `O2W_CACHE_DIR/onnx`, takes precedence when set and is interpreted as
+the Hub cache root. onnx2webnn stores only its completion records in the private
+`.onnx2webnn-validation` directory there; model files retain the standard `blobs` and `snapshots`
+layout. Xet-backed downloads use chunked transfer, while ordinary HTTP downloads are retried but
+are not guaranteed to resume from a partial byte offset.
 
 To add required CI coverage, resolve the model repository to a commit, download the exact ONNX file
 from that revision, compute its SHA-256 (for example with `sha256sum`), and add the file, revision,
