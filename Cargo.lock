@@ -2612,7 +2612,7 @@ dependencies = [
 [[package]]
 name = "webnn-graph"
 version = "0.3.0"
-source = "git+https://github.com/FelixKrall/webnn-graph?rev=32a685c0cc006e8b1d5c3e2a8499fc173cb5997c#32a685c0cc006e8b1d5c3e2a8499fc173cb5997c"
+source = "git+https://github.com/FelixKrall/webnn-graph?branch=fkrall%2Fpacked4-external-weights#49322fd19476426282ae4d275e206ab19f49b1e3"
 dependencies = [
  "anyhow",
  "base64",
