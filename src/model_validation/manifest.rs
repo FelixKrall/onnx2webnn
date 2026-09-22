@@ -5,8 +5,6 @@
 
 //! Shared parsing and selection for the transformers.js model manifest.
 
-#![allow(dead_code)]
-
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

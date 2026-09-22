@@ -107,42 +107,97 @@ fn packed_uint4_matmul_round_trips_and_matches_native_ort() {
     assert_eq!(summary.output_count, 1);
 }
 
-#[test]
-fn accepted_integer_dtypes_round_trip_exactly() {
-    use onnx2webnn::protos::onnx::TensorProto_DataType;
-
-    for (label, elem_type) in [
-        ("int8", TensorProto_DataType::Int8 as i32),
-        ("uint32", TensorProto_DataType::Uint32 as i32),
-        ("uint64", TensorProto_DataType::Uint64 as i32),
-    ] {
-        let dir = tempfile::tempdir().expect("temporary cache");
-        let source = dir.path().join(format!("{label}.onnx"));
-        let cached_webnn = dir.path().join(format!("{label}.webnn"));
-        let model = model(
-            17,
-            graph(
-                label,
-                vec![tensor_input("x", elem_type, &[4])],
-                vec![tensor_output("y", elem_type, &[4])],
-                vec![node("Identity", "identity", &["x"], &["y"], &[])],
-                vec![],
-            ),
-        );
-        fs::write(&source, model.encode_to_vec()).expect("write dtype model");
-        convert_onnx(
-            &source,
-            ConvertOptions {
-                output_path: Some(cached_webnn.clone()),
-                ..ConvertOptions::default()
-            },
-        )
-        .unwrap_or_else(|error| panic!("convert {label}: {error}"));
-        let summary = validate_cached_model(&source, &cached_webnn)
-            .unwrap_or_else(|error| panic!("validate {label}: {error}"));
-        assert_eq!(summary.input_count, 1);
-        assert_eq!(summary.output_count, 1);
+fn integer_dtype_round_trip(label: &str, elem_type: i32) -> Result<(), String> {
+    let dir = tempfile::tempdir().map_err(|error| format!("temporary cache: {error}"))?;
+    let source = dir.path().join(format!("{label}.onnx"));
+    let cached_webnn = dir.path().join(format!("{label}.webnn"));
+    let model = model(
+        17,
+        graph(
+            label,
+            vec![tensor_input("x", elem_type, &[4])],
+            vec![tensor_output("y", elem_type, &[4])],
+            vec![node("Identity", "identity", &["x"], &["y"], &[])],
+            vec![],
+        ),
+    );
+    fs::write(&source, model.encode_to_vec())
+        .map_err(|error| format!("write {label} dtype model: {error}"))?;
+    convert_onnx(
+        &source,
+        ConvertOptions {
+            output_path: Some(cached_webnn.clone()),
+            ..ConvertOptions::default()
+        },
+    )
+    .map_err(|error| format!("convert {label}: {error}"))?;
+    let summary = validate_cached_model(&source, &cached_webnn)
+        .map_err(|error| format!("validate {label}: {error}"))?;
+    if summary.input_count != 1 || summary.output_count != 1 {
+        return Err(format!(
+            "validate {label}: expected one input and output, got {} and {}",
+            summary.input_count, summary.output_count
+        ));
     }
+    Ok(())
+}
+
+fn expect_integer_dtype_round_trip(label: &str, elem_type: i32) {
+    integer_dtype_round_trip(label, elem_type)
+        .unwrap_or_else(|error| panic!("{label} should round-trip exactly: {error}"));
+}
+
+// WebNN permits all operand data types for Identity, but only requires float32,
+// float16, and int32. CoreML therefore legitimately omits optional int8 graph
+// boundary support. Keep executing it as a strict XFAIL instead of hiding it:
+// a different error is a regression, and unexpected success is an XPASS.
+// https://github.com/webmachinelearning/webnn/blob/main/index.bs#tensor-limits-elementwise-unary-identity
+#[cfg(all(target_os = "macos", feature = "coreml"))]
+fn expect_coreml_identity_boundary_xfail(label: &str, elem_type: i32) {
+    let error = match integer_dtype_round_trip(label, elem_type) {
+        Ok(()) => panic!("XPASS: CoreML now supports {label} Identity graph I/O"),
+        Err(error) => error,
+    };
+    let normalized = error.to_ascii_lowercase();
+    assert!(
+        normalized.contains("coreml") && normalized.contains("identity"),
+        "unexpected failure for CoreML {label} Identity graph I/O: {error}"
+    );
+    eprintln!("XFAIL: CoreML {label} Identity graph I/O: {error}");
+}
+
+#[cfg(not(all(target_os = "macos", feature = "coreml")))]
+#[test]
+fn accepted_int8_dtype_round_trips_exactly() {
+    expect_integer_dtype_round_trip(
+        "int8",
+        onnx2webnn::protos::onnx::TensorProto_DataType::Int8 as i32,
+    );
+}
+
+#[test]
+fn accepted_uint32_dtype_round_trips_exactly() {
+    expect_integer_dtype_round_trip(
+        "uint32",
+        onnx2webnn::protos::onnx::TensorProto_DataType::Uint32 as i32,
+    );
+}
+
+#[test]
+fn accepted_uint64_dtype_round_trips_exactly() {
+    expect_integer_dtype_round_trip(
+        "uint64",
+        onnx2webnn::protos::onnx::TensorProto_DataType::Uint64 as i32,
+    );
+}
+
+#[cfg(all(target_os = "macos", feature = "coreml"))]
+#[test]
+fn coreml_xfail_int8_identity_boundary() {
+    expect_coreml_identity_boundary_xfail(
+        "int8",
+        onnx2webnn::protos::onnx::TensorProto_DataType::Int8 as i32,
+    );
 }
 
 #[test]

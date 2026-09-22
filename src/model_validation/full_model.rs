@@ -5,8 +5,6 @@
 
 //! Full Hugging Face model downloads for the manual numerical sweep.
 
-#![allow(dead_code)]
-
 use super::manifest::Entry;
 use crate::protos::onnx::{GraphProto, ModelProto};
 use prost::Message;

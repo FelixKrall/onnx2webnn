@@ -39,10 +39,6 @@ use onnx2webnn::protos::onnx::ModelProto;
 use onnx2webnn::{convert_model_proto, convert_onnx, ConvertOptions};
 use prost::Message;
 
-/// Large models recurse deeply in shape inference; the default 2 MB thread
-/// stack is not enough.
-const WORKER_STACK_BYTES: usize = 256 << 20;
-
 enum Source {
     Hub,
     Dir(PathBuf),
@@ -210,15 +206,12 @@ impl Sweep {
         let queue = Mutex::new(entries);
         std::thread::scope(|scope| {
             for _ in 0..workers {
-                std::thread::Builder::new()
-                    .stack_size(WORKER_STACK_BYTES)
-                    .spawn_scoped(scope, || loop {
-                        let Some((idx, entry)) = queue.lock().unwrap().pop() else {
-                            break;
-                        };
-                        self.convert(idx, entry);
-                    })
-                    .expect("spawn sweep worker");
+                scope.spawn(|| loop {
+                    let Some((idx, entry)) = queue.lock().unwrap().pop() else {
+                        break;
+                    };
+                    self.convert(idx, entry);
+                });
             }
         });
     }

@@ -12,8 +12,6 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex, OnceLock};
 
-const WORKER_STACK_BYTES: usize = 256 << 20;
-
 type ModelCell = Arc<OnceLock<Result<PathBuf, String>>>;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -255,15 +253,12 @@ impl Sweep {
         let queue = Mutex::new(entries);
         std::thread::scope(|scope| {
             for _ in 0..workers {
-                std::thread::Builder::new()
-                    .stack_size(WORKER_STACK_BYTES)
-                    .spawn_scoped(scope, || loop {
-                        let Some((index, entry)) = queue.lock().unwrap().pop() else {
-                            break;
-                        };
-                        self.validate(index, &entry);
-                    })
-                    .expect("spawn validation worker");
+                scope.spawn(|| loop {
+                    let Some((index, entry)) = queue.lock().unwrap().pop() else {
+                        break;
+                    };
+                    self.validate(index, &entry);
+                });
             }
         });
     }
