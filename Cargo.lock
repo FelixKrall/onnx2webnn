@@ -1242,15 +1242,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6b947ae49db0d222b1dbc6b113ce7248a3fc3a6ca21b696717bfc000ba4484d8"
 
 [[package]]
-name = "memmap2"
-version = "0.9.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d1219ed1b7f229ee7104d281dd01d6802fe28bb6e95d292942c4daacdeb798c0"
-dependencies = [
- "libc",
-]
-
-[[package]]
 name = "miette"
 version = "5.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2612,13 +2603,12 @@ dependencies = [
 [[package]]
 name = "webnn-graph"
 version = "0.3.0"
-source = "git+https://github.com/FelixKrall/webnn-graph?branch=fkrall%2Fpacked4-external-weights#49322fd19476426282ae4d275e206ab19f49b1e3"
+source = "git+https://github.com/FelixKrall/webnn-graph?branch=fkrall%2Fpacked4-external-weights#c6473ef33e9ac1e7c585ad7b9e0c3d7d99a3de45"
 dependencies = [
  "anyhow",
  "base64",
  "clap",
  "half",
- "memmap2",
  "pest",
  "pest_derive",
  "prost",
