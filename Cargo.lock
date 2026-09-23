@@ -2563,6 +2563,8 @@ dependencies = [
  "prettyplease",
  "prost",
  "prost-types",
+ "pulldown-cmark",
+ "pulldown-cmark-to-cmark",
  "regex",
  "syn 2.0.117",
  "tempfile",
@@ -2588,6 +2590,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9091c90b0a32608e984ff2fa4091273cbdd755d54935c51d520887f4a1dbd5b0"
 dependencies = [
  "prost",
+]
+
+[[package]]
+name = "pulldown-cmark"
+version = "0.9.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "57206b407293d2bcd3af849ce869d52068623f19e1b5ff8e8778e3309439682b"
+dependencies = [
+ "bitflags",
+ "memchr",
+ "unicase",
+]
+
+[[package]]
+name = "pulldown-cmark-to-cmark"
+version = "10.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0194e6e1966c23cc5fd988714f85b18d548d773e81965413555d96569931833d"
+dependencies = [
+ "pulldown-cmark",
 ]
 
 [[package]]
@@ -4273,7 +4295,7 @@ dependencies = [
 [[package]]
 name = "webnn-graph"
 version = "0.3.0"
-source = "git+https://github.com/FelixKrall/webnn-graph?branch=fkrall%2Fpacked4-external-weights#067a86d93dfdd185ecfb8aaab855b112bb0064a3"
+source = "git+https://github.com/rustnn/webnn-graph?branch=main#0bcd517d30cf740f55bf19386be254e37010ab2b"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

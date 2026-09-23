@@ -5,8 +5,8 @@ on:
 
 env:
   ORT_VERSION: 1.29.0
-  RUSTNN_REPO: FelixKrall/rustnn
-  RUSTNN_REF: fkrall/executable-webnn-reload
+  RUSTNN_REPO: rustnn/rustnn
+  RUSTNN_REF: main
 
 jobs:
   validate:

@@ -1,7 +1,7 @@
 # Full-model numerical validation status
 
-> **Last edited:** `2026-09-22T21:07:28Z`<br>
-> **Checkout:** `fkrall/cache-backed-validation` at `a582b89`
+> **Last edited:** `2026-09-23T11:35:58Z`<br>
+> **Checkout:** `fkrall/cache-backed-validation` at `ac6d5ca`
 >
 > **Freshness:** Use this document only when this provenance is recent relative to the relevant
 > code and commits; otherwise verify the implementation, tests, and Git history before relying
@@ -24,6 +24,30 @@ accepts a fixed past length `N` normally produces a cache of length `N + 1`, whi
 back into that same fixed-shape artifact. Repeated decoding therefore still requires proper dynamic
 cache shapes, separately specialized artifacts, or a fixed-capacity cache with an explicit position.
 
+## Broad manifest selection
+
+[`tests/models/manifest.json`](../tests/models/manifest.json) is not a global top-50 list. The
+[`scripts/generate_manifest.py` generator](../scripts/generate_manifest.py) queries Hugging Face for
+repositories tagged `transformers.js`, groups them by pipeline task, and by default selects the
+single most-liked repository in each task (`--top 1`). Tokenizer-only repositories, repositories
+without usable ONNX exports, and repositories or components listed in the
+[Transformers.js excluded-model list](transformersjs_excluded_models.md) are omitted.
+
+For each selected repository, the generator includes the ONNX components that Transformers.js
+would load for that model class, such as both encoder and merged decoder graphs for a sequence-to-
+sequence model. It follows the model's `transformers.js_config` dtype when present; otherwise the
+default generator mode mirrors WASM and prefers q8 exports. Missing preferred variants fall back to
+an available export. Models with a `use_cache_branch` input receive separate prefill and decode
+cases, while other multipart models contribute one case per required graph. Consequently the
+current manifest contains 28 repositories, 44 unique ONNX files, and 51 configured cases.
+
+The generator assigns bounded dimensions using onnx2webnn's naming policy and carries forward
+existing per-file dimension overrides, pinned inputs, and other manual fields. It inspects remote
+ONNX structure using HTTP range requests rather than downloading full weights. Regeneration tracks
+publisher `main` revisions and is therefore diagnostic coverage, not an immutable model set. The
+current population was last generated around early September 2026 and entered Git history on
+13 September 2026.
+
 ## Validation automation
 
 Pull requests use `tests/models/ci-validation.json` as the required numerical-validation contract.
@@ -38,8 +62,9 @@ onnx2webnn-specific and do not replace the manifest digest check.
 
 To add a required model, first confirm it passes on ORT and CoreML, then add its exact file, commit
 revision, downloaded-file digest, fixed dimension overrides, and any pinned inputs to
-`tests/models/ci-validation.json`. This file is hand-maintained. `scripts/generate_manifest.py` only
-regenerates `tests/models/manifest.json` and must not be used to update or carry CI pins.
+`tests/models/ci-validation.json`. This file is hand-maintained. The
+[`scripts/generate_manifest.py`](../scripts/generate_manifest.py) generator only regenerates
+`tests/models/manifest.json` and must not be used to update or carry CI pins.
 
 The `Full model validation` workflow is manually dispatched for real publisher weights.
 It runs the entire generated manifest sequentially on a runner labeled `self-hosted`, `linux`,

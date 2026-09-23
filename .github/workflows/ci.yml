@@ -10,11 +10,8 @@ env:
   # ONNX Runtime dylib for the reference backend. rustnn pins ort 2.0.0-rc.13
   # with the `api-27` feature, so this must be >= 1.27 (any newer 1.x works).
   ORT_VERSION: 1.29.0
-  # Stacked rustnn checkout: Mikhail's exporter/CoreML fixes plus executable
-  # .webnn reload and path-based native ORT execution for external-data models.
-  # Switch back to rustnn/rustnn only after both prerequisite rustnn PRs land.
-  RUSTNN_REPO: FelixKrall/rustnn
-  RUSTNN_REF: fkrall/executable-webnn-reload
+  RUSTNN_REPO: rustnn/rustnn
+  RUSTNN_REF: main
 
 jobs:
   test:
