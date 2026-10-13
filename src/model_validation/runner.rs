@@ -94,6 +94,8 @@ impl RunSummary {
 impl fmt::Display for RunSummary {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "Model validation summary")?;
+        writeln!(f)?;
+        writeln!(f)?;
         writeln!(f, "Succeeded ({}):", self.succeeded.len())?;
         if self.succeeded.is_empty() {
             writeln!(f, "  (none)")?;
@@ -102,6 +104,8 @@ impl fmt::Display for RunSummary {
                 writeln!(f, "  PASS {label}")?;
             }
         }
+        writeln!(f)?;
+        writeln!(f)?;
         writeln!(f, "Failed ({}):", self.failed.len())?;
         if self.failed.is_empty() {
             writeln!(f, "  (none)")?;
@@ -110,6 +114,8 @@ impl fmt::Display for RunSummary {
                 writeln!(f, "  FAIL {}: {}", failure.label, failure.error)?;
             }
         }
+        writeln!(f)?;
+        writeln!(f)?;
         write!(
             f,
             "Overall: {}/{} passed ({:.1}%)",
@@ -139,6 +145,8 @@ pub fn run_manifest_validation(options: RunOptions) -> Result<RunSummary, String
         options,
         models: Mutex::new(HashMap::new()),
         results: Mutex::new(Vec::new()),
+        completed: Mutex::new(0),
+        total: selected_count,
     };
     sweep.run(light, sweep.options.jobs);
     sweep.run(heavy, 1);
@@ -175,6 +183,8 @@ struct Sweep {
     options: RunOptions,
     models: Mutex<HashMap<String, ModelCell>>,
     results: Mutex<Vec<ModelResult>>,
+    completed: Mutex<usize>,
+    total: usize,
 }
 
 impl Sweep {
@@ -186,10 +196,14 @@ impl Sweep {
 
     fn validate(&self, index: usize, entry: &Entry) {
         let label = entry.label(index);
-        match self.validate_inner(entry) {
+        let result = self.validate_inner(entry);
+        let mut completed = self.completed.lock().unwrap();
+        *completed += 1;
+        let progress = format!("Model {}/{}", *completed, self.total);
+        match result {
             Ok((inputs, pins, outputs)) => {
                 eprintln!(
-                    "ok   {label}\n     {inputs} inputs + {pins} pinned, {outputs} outputs ({})",
+                    "\n\n{progress}\nok   {label}\n     {inputs} inputs + {pins} pinned, {outputs} outputs ({})",
                     self.options.weights
                 );
                 self.results.lock().unwrap().push(ModelResult {
@@ -199,7 +213,7 @@ impl Sweep {
                 });
             }
             Err(error) => {
-                eprintln!("FAIL {label}\n     {error}");
+                eprintln!("\n\n{progress}\nFAIL {label}\n     {error}");
                 self.results.lock().unwrap().push(ModelResult {
                     index,
                     label,
@@ -306,9 +320,18 @@ mod tests {
             }],
         };
         let report = summary.to_string();
-        assert!(report.contains("Succeeded (2):\n  PASS #0 first\n  PASS #2 third"));
-        assert!(report.contains("Failed (1):\n  FAIL #1 second: comparison: mismatch"));
-        assert!(report.contains("Overall: 2/3 passed (66.7%)"));
+        assert_eq!(
+            report,
+            concat!(
+                "Model validation summary\n\n\n",
+                "Succeeded (2):\n",
+                "  PASS #0 first\n",
+                "  PASS #2 third\n\n\n",
+                "Failed (1):\n",
+                "  FAIL #1 second: comparison: mismatch\n\n\n",
+                "Overall: 2/3 passed (66.7%)"
+            )
+        );
         assert!(summary.has_failures());
     }
 }
