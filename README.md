@@ -1,7 +1,7 @@
 # onnx2webnn
 
-> **Last edited:** `2026-10-14T13:39:33Z`<br>
-> **Checkout:** `validation-enhancements` at `1a06c6d`
+> **Last edited:** `2026-10-14T14:52:54Z`<br>
+> **Checkout:** `validation-enhancements` at `b2baf08`
 >
 > **Freshness:** Use this document only when this provenance is recent relative to the relevant
 > code and commits; otherwise verify the implementation, tests, and Git history before relying
@@ -141,7 +141,9 @@ cargo run -- validate-files --model first.onnx --inputs first.safetensors \
 
 Conversion and validation report node-occurrence and unique-operator percentages from the
 code-backed operator catalog. “Fully” means the selected lowering has no known decomposition or
-specialization cost, not measured performance parity. See
+specialization cost, not measured performance parity. A separate performance-limited count and
+per-operator warning identify converted paths with known major runtime costs; they remain
+functionally supported. See
 [`docs/operator-conversion-status.md`](docs/operator-conversion-status.md) for the generated
 opset-26 inventory. With `coreml` enabled on macOS, converted and reloaded graphs explicitly use
 CoreML; otherwise they use ORT unless `trtx` explicitly selects TensorRT. Native comparison always

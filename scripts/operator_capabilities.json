@@ -4,6 +4,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -11,6 +12,7 @@
     "status": "Unsupported",
     "scope": "No current executable lowering.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -18,6 +20,7 @@
     "status": "Decomposed",
     "scope": "Elementwise decomposition; WebNN has no native acosh.",
     "perf_impact": "moderate",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -25,6 +28,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -32,6 +36,7 @@
     "status": "Unsupported",
     "scope": "No current lowering; the required vision/spatial primitive is absent or not implemented.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -39,6 +44,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -46,6 +52,7 @@
     "status": "Direct WebNN",
     "scope": "Direct WebNN argMax; select_last_index is not implemented.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -53,6 +60,7 @@
     "status": "Direct WebNN",
     "scope": "Direct WebNN argMin; select_last_index is not implemented.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -60,6 +68,7 @@
     "status": "Unsupported",
     "scope": "No current executable lowering.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -67,6 +76,7 @@
     "status": "Decomposed",
     "scope": "Elementwise decomposition; WebNN has no native asinh.",
     "perf_impact": "moderate",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -74,6 +84,7 @@
     "status": "Unsupported",
     "scope": "No current executable lowering.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -81,6 +92,7 @@
     "status": "Decomposed",
     "scope": "Elementwise decomposition; WebNN has no native atanh.",
     "perf_impact": "moderate",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -88,6 +100,7 @@
     "status": "Unsupported",
     "scope": "No native WebNN attention; no standard Attention decomposition is implemented.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -95,6 +108,7 @@
     "status": "Direct WebNN",
     "scope": "Direct WebNN pool; 1-D is emulated, higher spatial ranks rejected, and some ONNX padding modes are restricted.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -102,6 +116,7 @@
     "status": "Direct WebNN",
     "scope": "Direct WebNN primitive; inference mode only.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -109,6 +124,7 @@
     "status": "Unsupported",
     "scope": "WebNN has no graph random-number operators.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -116,6 +132,7 @@
     "status": "Unsupported",
     "scope": "WebNN has no corresponding bitwise/reinterpretation primitive.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -123,6 +140,7 @@
     "status": "Unsupported",
     "scope": "WebNN has no corresponding bitwise/reinterpretation primitive.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -130,6 +148,7 @@
     "status": "Unsupported",
     "scope": "WebNN has no corresponding bitwise/reinterpretation primitive.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -137,6 +156,7 @@
     "status": "Unsupported",
     "scope": "WebNN has no corresponding bitwise/reinterpretation primitive.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -144,6 +164,7 @@
     "status": "Unsupported",
     "scope": "WebNN has no corresponding bitwise/reinterpretation primitive.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -151,6 +172,7 @@
     "status": "Unsupported",
     "scope": "WebNN has no corresponding bitwise/reinterpretation primitive.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -158,6 +180,7 @@
     "status": "Unsupported",
     "scope": "WebNN has no corresponding signal-processing primitive.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -165,6 +188,7 @@
     "status": "Direct WebNN",
     "scope": "Direct WebNN cast where the target type supports it; numeric-to-Boolean casts normalize nonzero values through a WebNN comparison. Unsupported ONNX/string element types are rejected.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -172,6 +196,7 @@
     "status": "Decomposed",
     "scope": "Infers the second input's type at conversion time, then emits WebNN cast.",
     "perf_impact": "minimal",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -179,6 +204,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -186,6 +212,7 @@
     "status": "Decomposed",
     "scope": "Elementwise decomposition; no native WebNN celu.",
     "perf_impact": "moderate",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -193,6 +220,7 @@
     "status": "Unsupported",
     "scope": "No current lowering; the required vision/spatial primitive is absent or not implemented.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -200,6 +228,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -207,6 +236,7 @@
     "status": "Unsupported",
     "scope": "No current lowering; the required vision/spatial primitive is absent or not implemented.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -214,6 +244,7 @@
     "status": "Unsupported",
     "scope": "No current lowering; missing primitive and/or data-dependent output shape.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -221,6 +252,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -228,6 +260,7 @@
     "status": "Unsupported",
     "scope": "WebNN has no sequence operand type.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -235,6 +268,7 @@
     "status": "Folded/static",
     "scope": "Creates an inline WebNN constant; no runtime ONNX operation remains.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -242,6 +276,7 @@
     "status": "Folded/static",
     "scope": "Materialized or expanded from statically resolvable shape/value data.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -249,6 +284,7 @@
     "status": "Direct WebNN",
     "scope": "Direct WebNN conv2d; 1-D is emulated and 3-D is unsupported.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -256,6 +292,7 @@
     "status": "Decomposed",
     "scope": "Centers values in float, executes conv2d, then casts to int32; WebNN lacks integer accumulation, so large sums may lose exactness.",
     "perf_impact": "high",
+    "perf_limited": true,
     "domain": "ai.onnx"
   },
   {
@@ -263,6 +300,7 @@
     "status": "Direct WebNN",
     "scope": "Direct WebNN convTranspose2d; 1-D is emulated and 3-D is unsupported.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -270,6 +308,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -277,6 +316,7 @@
     "status": "Decomposed",
     "scope": "Elementwise decomposition; WebNN has no native cosh.",
     "perf_impact": "moderate",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -284,6 +324,7 @@
     "status": "Decomposed",
     "scope": "exp(cumulativeSum(log(x))); valid only for positive floating-point inputs. Zero and negative inputs are not generally correct.",
     "perf_impact": "moderate",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -291,6 +332,7 @@
     "status": "Direct WebNN",
     "scope": "Direct WebNN cumulativeSum; axis must be constant.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -298,6 +340,7 @@
     "status": "Unsupported",
     "scope": "WebNN has no corresponding signal-processing primitive.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -305,6 +348,7 @@
     "status": "Unsupported",
     "scope": "No current lowering; the required vision/spatial primitive is absent or not implemented.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -312,6 +356,7 @@
     "status": "Unsupported",
     "scope": "No current lowering; the required vision/spatial primitive is absent or not implemented.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -319,6 +364,7 @@
     "status": "Direct WebNN",
     "scope": "Direct WebNN primitive for supported scalar/effectively-scalar or full-rank block parameters; axis must be 1.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -326,6 +372,7 @@
     "status": "Unsupported",
     "scope": "No current executable lowering.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -333,6 +380,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -340,6 +388,7 @@
     "status": "Unsupported",
     "scope": "No current inference lowering; exporters may remove applicable training artifacts.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -347,6 +396,7 @@
     "status": "Decomposed",
     "scope": "Reduction/arithmetic decomposition followed by WebNN quantizeLinear.",
     "perf_impact": "moderate",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -354,6 +404,7 @@
     "status": "Decomposed",
     "scope": "Static reduce/transpose/reshape/matmul decomposition; at most two inputs, no ellipsis or repeated labels within a term.",
     "perf_impact": "not inferred",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -361,6 +412,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -368,6 +420,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -375,6 +428,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -382,6 +436,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -389,6 +444,7 @@
     "status": "Direct WebNN",
     "scope": "Direct WebNN expand; target shape must be build-time resolvable.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -396,6 +452,7 @@
     "status": "Unsupported",
     "scope": "No current lowering; missing primitive and/or data-dependent output shape.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -403,6 +460,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -410,6 +468,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -417,6 +476,7 @@
     "status": "Direct WebNN",
     "scope": "Direct WebNN recurrent primitive with layout adaptation; sequence_lens and unsupported optional inputs are rejected.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -424,6 +484,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -431,6 +492,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -438,6 +500,7 @@
     "status": "Direct WebNN",
     "scope": "Direct WebNN gatherND; ONNX batch_dims is currently ignored.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -445,6 +508,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -452,6 +516,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -459,6 +524,7 @@
     "status": "Direct WebNN",
     "scope": "Direct WebNN pool; supported for the implemented 1-D/2-D spatial forms.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -466,6 +532,7 @@
     "status": "Unsupported",
     "scope": "No current executable lowering.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -473,6 +540,7 @@
     "status": "Direct WebNN",
     "scope": "Direct WebNN pool; supported for the implemented 1-D/2-D spatial forms.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -480,6 +548,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -487,6 +556,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -494,6 +564,7 @@
     "status": "Unsupported",
     "scope": "No current lowering; the required vision/spatial primitive is absent or not implemented.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -501,6 +572,7 @@
     "status": "Decomposed",
     "scope": "Reduction and elementwise decomposition; relevant ranks and dimensions must be known.",
     "perf_impact": "moderate",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -508,6 +580,7 @@
     "status": "Unsupported",
     "scope": "WebNN has no corresponding signal-processing primitive.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -515,6 +588,7 @@
     "status": "Unsupported",
     "scope": "WebNN has no corresponding signal-processing primitive.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -522,6 +596,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -529,6 +604,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -536,6 +612,7 @@
     "status": "Decomposed",
     "scope": "Comparison/mask decomposition; requires known input shape.",
     "perf_impact": "moderate",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -543,6 +620,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -550,6 +628,7 @@
     "status": "Folded/static",
     "scope": "Only constant or pinned-constant conditions; the selected branch is resolved and inlined during conversion because WebNN has no control flow. Runtime-selectable models therefore require a separate `.webnn`/Safetensors pair per branch. Shared weights are not deduplicated, so keeping both compiled graphs resident may duplicate them in RAM and VRAM.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -557,6 +636,7 @@
     "status": "Unsupported",
     "scope": "No current lowering; the required vision/spatial primitive is absent or not implemented.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -564,6 +644,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -571,6 +652,7 @@
     "status": "Direct WebNN",
     "scope": "Direct WebNN isInfinite; non-default ONNX detect_negative/detect_positive filtering is not implemented.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -578,6 +660,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -585,6 +668,7 @@
     "status": "Unsupported",
     "scope": "No current executable lowering.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -592,6 +676,7 @@
     "status": "Direct WebNN",
     "scope": "Direct WebNN recurrent primitive with layout adaptation; sequence_lens and peepholes are rejected.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -599,6 +684,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -606,6 +692,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -613,6 +700,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -620,6 +708,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -627,6 +716,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -634,6 +724,7 @@
     "status": "Decomposed",
     "scope": "Softmax/log decomposition; no native WebNN logSoftmax.",
     "perf_impact": "moderate",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -641,6 +732,7 @@
     "status": "Unsupported",
     "scope": "No WebNN runtime loop/control-flow representation.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -648,6 +740,7 @@
     "status": "Unsupported",
     "scope": "No current executable lowering.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -655,6 +748,7 @@
     "status": "Direct WebNN",
     "scope": "Direct WebNN l2Pool2d only when p=2; 1-D is emulated and higher spatial ranks rejected.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -662,6 +756,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -669,6 +764,7 @@
     "status": "Decomposed",
     "scope": "Centers values in float, executes matmul, then casts to int32; WebNN lacks integer accumulation, so large sums may lose exactness.",
     "perf_impact": "high",
+    "perf_limited": true,
     "domain": "ai.onnx"
   },
   {
@@ -676,6 +772,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -683,6 +780,7 @@
     "status": "Direct WebNN",
     "scope": "Direct WebNN pool; indices output is unsupported, 1-D is emulated, and higher spatial ranks are rejected.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -690,6 +788,7 @@
     "status": "Unsupported",
     "scope": "No current lowering; the required vision/spatial primitive is absent or not implemented.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -697,6 +796,7 @@
     "status": "Unsupported",
     "scope": "No current lowering; the required vision/spatial primitive is absent or not implemented.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -704,6 +804,7 @@
     "status": "Decomposed",
     "scope": "Variadic binary fold; operation order and floating-point rounding can differ.",
     "perf_impact": "not inferred",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -711,6 +812,7 @@
     "status": "Unsupported",
     "scope": "No current executable lowering.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -718,6 +820,7 @@
     "status": "Unsupported",
     "scope": "WebNN has no corresponding signal-processing primitive.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -725,6 +828,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -732,6 +836,7 @@
     "status": "Decomposed",
     "scope": "Softplus/tanh/multiply decomposition; no native WebNN mish.",
     "perf_impact": "moderate",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -739,6 +844,7 @@
     "status": "Decomposed",
     "scope": "A - B * q(A/B) decomposition for both fmod modes; no WebNN remainder primitive.",
     "perf_impact": "moderate",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -746,6 +852,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -753,6 +860,7 @@
     "status": "Unsupported",
     "scope": "WebNN has no graph random-number operators.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -760,6 +868,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -767,6 +876,7 @@
     "status": "Unsupported",
     "scope": "No current inference lowering; exporters may remove applicable training artifacts.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -774,6 +884,7 @@
     "status": "Unsupported",
     "scope": "No current lowering; the required vision/spatial primitive is absent or not implemented.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -781,6 +892,7 @@
     "status": "Unsupported",
     "scope": "No current lowering; missing primitive and/or data-dependent output shape.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -788,6 +900,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -795,6 +908,7 @@
     "status": "Decomposed",
     "scope": "Static comparison/mask decomposition; depth and values must be constant and indices shape known.",
     "perf_impact": "moderate",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -802,6 +916,7 @@
     "status": "Unsupported",
     "scope": "WebNN has no optional operand type.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -809,6 +924,7 @@
     "status": "Unsupported",
     "scope": "WebNN has no optional operand type.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -816,6 +932,7 @@
     "status": "Unsupported",
     "scope": "WebNN has no optional operand type.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -823,6 +940,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -830,6 +948,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -837,6 +956,7 @@
     "status": "Direct WebNN",
     "scope": "Direct WebNN pad; rank and non-negative pads must be known at build time.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -844,6 +964,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -851,6 +972,7 @@
     "status": "Unsupported",
     "scope": "No fused WebNN quantized linear-algebra primitive; float decomposition is not implemented.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -858,6 +980,7 @@
     "status": "Unsupported",
     "scope": "No fused WebNN quantized linear-algebra primitive; float decomposition is not implemented.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -865,6 +988,7 @@
     "status": "Direct WebNN",
     "scope": "Direct WebNN primitive for supported scalar/effectively-scalar or full-rank block parameters; axis must be 1.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -872,6 +996,7 @@
     "status": "Decomposed",
     "scope": "Reduction and elementwise decomposition; relevant ranks and dimensions must be known.",
     "perf_impact": "moderate",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -879,6 +1004,7 @@
     "status": "Unsupported",
     "scope": "No current executable lowering.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -886,6 +1012,7 @@
     "status": "Unsupported",
     "scope": "WebNN has no graph random-number operators.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -893,6 +1020,7 @@
     "status": "Unsupported",
     "scope": "WebNN has no graph random-number operators.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -900,6 +1028,7 @@
     "status": "Unsupported",
     "scope": "WebNN has no graph random-number operators.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -907,6 +1036,7 @@
     "status": "Unsupported",
     "scope": "WebNN has no graph random-number operators.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -914,6 +1044,7 @@
     "status": "Folded/static",
     "scope": "Implemented for constant scalar or supported bounded-symbolic forms.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -921,6 +1052,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -928,6 +1060,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -935,6 +1068,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -942,6 +1076,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -949,6 +1084,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -956,6 +1092,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -963,6 +1100,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -970,6 +1108,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -977,6 +1116,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -984,6 +1124,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -991,6 +1132,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -998,6 +1140,7 @@
     "status": "Unsupported",
     "scope": "WebNN has no string tensor/operation support.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -1005,6 +1148,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -1012,6 +1156,7 @@
     "status": "Direct WebNN",
     "scope": "Direct WebNN reshape; target shape must be build-time resolvable.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -1019,6 +1164,7 @@
     "status": "Direct WebNN",
     "scope": "Maps to WebNN resample2d; nearest/linear supported forms only, with 1-D emulation. Cubic and unsupported coordinate/axis modes are rejected.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -1026,6 +1172,7 @@
     "status": "Direct WebNN",
     "scope": "Partial mapping to WebNN reverse: sequence_lens and batch_axis semantics are ignored, so only full-axis reversal is equivalent.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -1033,6 +1180,7 @@
     "status": "Unsupported",
     "scope": "No current lowering; the required vision/spatial primitive is absent or not implemented.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -1040,6 +1188,7 @@
     "status": "Decomposed",
     "scope": "Gather/rotate/concat decomposition; concrete dimensions and compatible cache shapes required.",
     "perf_impact": "moderate",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -1047,6 +1196,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -1054,6 +1204,7 @@
     "status": "Unsupported",
     "scope": "WebNN has no corresponding signal-processing primitive.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -1061,6 +1212,7 @@
     "status": "Unsupported",
     "scope": "No WebNN runtime loop/control-flow representation.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -1068,6 +1220,7 @@
     "status": "Direct WebNN",
     "scope": "Direct WebNN scatterElements; only reduction=none.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -1075,6 +1228,7 @@
     "status": "Direct WebNN",
     "scope": "Direct WebNN scatterND; only reduction=none.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -1082,6 +1236,7 @@
     "status": "Decomposed",
     "scope": "Elementwise decomposition; no native WebNN selu.",
     "perf_impact": "moderate",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -1089,6 +1244,7 @@
     "status": "Pattern-only",
     "scope": "Only a constant index into the converter's SplitToSequence pseudo-sequence.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -1096,6 +1252,7 @@
     "status": "Unsupported",
     "scope": "WebNN has no sequence operand type.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -1103,6 +1260,7 @@
     "status": "Unsupported",
     "scope": "WebNN has no sequence operand type.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -1110,6 +1268,7 @@
     "status": "Unsupported",
     "scope": "WebNN has no sequence operand type.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -1117,6 +1276,7 @@
     "status": "Unsupported",
     "scope": "WebNN has no sequence operand type.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -1124,6 +1284,7 @@
     "status": "Unsupported",
     "scope": "WebNN has no sequence operand type.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -1131,6 +1292,7 @@
     "status": "Unsupported",
     "scope": "WebNN has no sequence operand type.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -1138,6 +1300,7 @@
     "status": "Folded/static",
     "scope": "Resolved from known graph shape metadata.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -1145,6 +1308,7 @@
     "status": "Decomposed",
     "scope": "Elementwise comparison/select decomposition; no native WebNN shrink.",
     "perf_impact": "moderate",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -1152,6 +1316,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -1159,6 +1324,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -1166,6 +1332,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -1173,6 +1340,7 @@
     "status": "Decomposed",
     "scope": "Elementwise decomposition; WebNN has no native sinh.",
     "perf_impact": "moderate",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -1180,6 +1348,7 @@
     "status": "Unsupported",
     "scope": "No current executable lowering.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -1187,6 +1356,7 @@
     "status": "Direct WebNN",
     "scope": "Direct WebNN slice/reverse; starts, sizes, axes, and steps must resolve at build time. Positive steps are preserved as strides; negative steps support only the full-axis reverse pattern.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -1194,6 +1364,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -1201,6 +1372,7 @@
     "status": "Unsupported",
     "scope": "No current inference lowering; exporters may remove applicable training artifacts.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -1208,6 +1380,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -1215,6 +1388,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -1222,6 +1396,7 @@
     "status": "Unsupported",
     "scope": "No current lowering; the required vision/spatial primitive is absent or not implemented.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -1229,6 +1404,7 @@
     "status": "Direct WebNN",
     "scope": "Direct WebNN split; split sizes or the split dimension must be resolvable.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -1236,6 +1412,7 @@
     "status": "Pattern-only",
     "scope": "Only the static split pattern consumed by constant-index SequenceAt; no sequence graph output.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -1243,6 +1420,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -1250,6 +1428,7 @@
     "status": "Direct WebNN",
     "scope": "Direct WebNN squeeze; axes must be resolvable.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -1257,6 +1436,7 @@
     "status": "Unsupported",
     "scope": "WebNN has no string tensor/operation support.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -1264,6 +1444,7 @@
     "status": "Unsupported",
     "scope": "WebNN has no string tensor/operation support.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -1271,6 +1452,7 @@
     "status": "Unsupported",
     "scope": "WebNN has no string tensor/operation support.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -1278,6 +1460,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -1285,6 +1468,7 @@
     "status": "Decomposed",
     "scope": "Variadic binary fold; operation order and floating-point rounding can differ.",
     "perf_impact": "not inferred",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -1292,6 +1476,7 @@
     "status": "Decomposed",
     "scope": "Sigmoid/multiply decomposition; no native WebNN swish.",
     "perf_impact": "minimal",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -1299,6 +1484,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -1306,6 +1492,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -1313,6 +1500,7 @@
     "status": "Unsupported",
     "scope": "No current lowering; missing primitive and/or data-dependent output shape.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -1320,6 +1508,7 @@
     "status": "Unsupported",
     "scope": "WebNN has no string tensor/operation support.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -1327,6 +1516,7 @@
     "status": "Decomposed",
     "scope": "Comparison/select decomposition; no native WebNN thresholdedRelu.",
     "perf_impact": "minimal",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -1334,6 +1524,7 @@
     "status": "Direct WebNN",
     "scope": "Direct WebNN tile; repeats must be constant.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -1341,6 +1532,7 @@
     "status": "Unsupported",
     "scope": "No current lowering; missing primitive and/or data-dependent output shape.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -1348,6 +1540,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -1355,6 +1548,7 @@
     "status": "Direct WebNN",
     "scope": "Direct WebNN triangular; k must be resolvable.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -1362,6 +1556,7 @@
     "status": "Unsupported",
     "scope": "No current lowering; missing primitive and/or data-dependent output shape.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -1369,6 +1564,7 @@
     "status": "Direct WebNN",
     "scope": "Direct WebNN unsqueeze; axes must be resolvable.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -1376,6 +1572,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -1383,6 +1580,7 @@
     "status": "Direct WebNN",
     "scope": "Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply.",
     "perf_impact": "",
+    "perf_limited": false,
     "domain": "ai.onnx"
   },
   {
@@ -1390,6 +1588,7 @@
     "status": "Decomposed",
     "scope": "Gathers packed rows/scales/zero points and dequantizes only the selected slice for supported 2-D axis-0 tables; other layouts fall back at conversion time.",
     "perf_impact": "moderate",
+    "perf_limited": false,
     "domain": "com.microsoft"
   },
   {
@@ -1397,6 +1596,7 @@
     "status": "Decomposed",
     "scope": "Static attention/cache subgraph. WebNN has no fused attention; runtime sequence metadata is ignored and softcap/local-window modes are rejected. Fused backend kernels and the portable decomposition need not be bit-identical, so an immediately following dynamic quantizer can amplify legal rounding differences.",
     "perf_impact": "high",
+    "perf_limited": true,
     "domain": "com.microsoft"
   },
   {
@@ -1404,6 +1604,7 @@
     "status": "Decomposed",
     "scope": "Packed NF4/FP4 block path where representable; incompatible tails become dense constants, losing low-bit memory/performance benefits.",
     "perf_impact": "high",
+    "perf_limited": true,
     "domain": "com.microsoft"
   },
   {
@@ -1411,6 +1612,7 @@
     "status": "Decomposed",
     "scope": "Supported 4/8-bit constant layouts dequantize into a matmul path; g_idx is rejected. WebNN has no low-bit matmul kernel.",
     "perf_impact": "high",
+    "perf_limited": true,
     "domain": "com.microsoft"
   },
   {
@@ -1418,6 +1620,7 @@
     "status": "Decomposed",
     "scope": "All experts execute densely because WebNN has no TopK or sparse dispatch. Approximate compute overhead is num_experts/k; supported activation/fusion forms only.",
     "perf_impact": "high",
+    "perf_limited": true,
     "domain": "com.microsoft"
   },
   {
@@ -1425,6 +1628,7 @@
     "status": "Decomposed",
     "scope": "Supported 4/8-bit expert weights feed the same dense all-expert lowering; block-layout fallbacks may dequantize at conversion time.",
     "perf_impact": "high",
+    "perf_limited": true,
     "domain": "com.microsoft"
   },
   {
@@ -1432,6 +1636,7 @@
     "status": "Decomposed",
     "scope": "RMS-style normalization decomposition; no matching WebNN fused primitive.",
     "perf_impact": "moderate",
+    "perf_limited": false,
     "domain": "com.microsoft"
   },
   {
@@ -1439,6 +1644,7 @@
     "status": "Decomposed",
     "scope": "Residual/bias plus simplified normalization decomposition; no matching WebNN fused primitive.",
     "perf_impact": "moderate",
+    "perf_limited": false,
     "domain": "com.microsoft"
   }
 ]

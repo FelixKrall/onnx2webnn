@@ -27,7 +27,8 @@ def generated() -> tuple[str, str]:
         raise ValueError("catalog must contain 198 standard opset-26 operators")
     data = json.dumps(catalog, indent=2, ensure_ascii=False) + "\n"
     matrix = "".join(
-        f'| `{entry["name"]}` | {entry["status"]} | {entry["scope"]} | {entry["perf_impact"]} |\n'
+        f'| `{entry["name"]}` | {entry["status"]} | {entry["scope"]} | '
+        f'{entry["perf_impact"]} | {"Yes" if entry["perf_limited"] else ""} |\n'
         for entry in catalog
     )
     return data, matrix
@@ -56,11 +57,11 @@ def update_doc(original: str, matrix: str) -> str:
     )
     return (
         before_coverage + coverage + "## Complete opset-26 status matrix\n\n"
-        "| ONNX operator | Status | Execution scope and WebNN limitation | Estimated perf impact |\n"
-        "|---------------|--------|--------------------------------------|-----------------------|\n"
+        "| ONNX operator | Status | Execution scope and WebNN limitation | Estimated perf impact | Performance-limited |\n"
+        "|---------------|--------|--------------------------------------|-----------------------|---------------------|\n"
         + "".join(rows[:198]) + "\n## Additional contrib and fused operators\n\n"
-        "| ONNX operator | Status | Execution scope and WebNN limitation | Estimated perf impact |\n"
-        "|---------------|--------|--------------------------------------|-----------------------|\n"
+        "| ONNX operator | Status | Execution scope and WebNN limitation | Estimated perf impact | Performance-limited |\n"
+        "|---------------|--------|--------------------------------------|-----------------------|---------------------|\n"
         + "".join(rows[198:]) + "\n### MoE interpretation" + tail
     )
 
