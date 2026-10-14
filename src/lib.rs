@@ -18,6 +18,6 @@ pub use onnx::convert::{
 };
 pub use onnx::test_models;
 pub use validation::{
-    validate_cached_model, validate_cached_model_with_options,
-    validate_cached_model_with_overrides, ValidationSummary,
+    load_safetensors_inputs, validate_cached_model, validate_cached_model_with_inputs,
+    validate_cached_model_with_options, validate_cached_model_with_overrides, ValidationSummary,
 };

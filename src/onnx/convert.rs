@@ -219,6 +219,14 @@ pub fn pin_graph_inputs(
     model: &mut ModelProto,
     pinned: &HashMap<String, i64>,
 ) -> Result<(), OnnxError> {
+    pin_graph_inputs_with_overrides(model, pinned, &HashMap::new())
+}
+
+fn pin_graph_inputs_with_overrides(
+    model: &mut ModelProto,
+    pinned: &HashMap<String, i64>,
+    overrides: &HashMap<String, u32>,
+) -> Result<(), OnnxError> {
     if pinned.is_empty() {
         return Ok(());
     }
@@ -247,15 +255,32 @@ pub fn pin_graph_inputs(
                 .dim
                 .iter()
                 .map(|d| match d.value.as_ref() {
-                    Some(DimensionValue::DimValue(v)) => Ok(*v),
+                    Some(DimensionValue::DimValue(v)) if *v >= 0 => Ok(*v),
+                    Some(DimensionValue::DimParam(symbol)) if !symbol.is_empty() => overrides
+                        .get(symbol)
+                        .map(|value| i64::from(*value))
+                        .ok_or_else(|| OnnxError::InvalidShape(format!(
+                            "pin-input: '{name}' has unresolved dimension {symbol}; supply --override-dim {symbol}=VALUE"
+                        ))),
                     _ => Err(OnnxError::InvalidShape(format!(
-                        "pin-input: '{name}' has a dynamic dimension; only static shapes can be pinned"
+                        "pin-input: '{name}' has an unresolved dimension"
                     ))),
                 })
                 .collect::<Result<Vec<_>, _>>()?,
             None => Vec::new(),
         };
-        let numel: usize = dims.iter().product::<i64>().max(1) as usize;
+        let numel = dims
+            .iter()
+            .try_fold(1usize, |count, dim| {
+                usize::try_from(*dim)
+                    .ok()
+                    .and_then(|dim| count.checked_mul(dim))
+            })
+            .ok_or_else(|| {
+                OnnxError::InvalidShape(format!(
+                    "pin-input: '{name}' shape overflows element count"
+                ))
+            })?;
         let elem_type = tt.elem_type;
         let raw_data: Vec<u8> = if elem_type == TensorProto_DataType::Bool as i32 {
             vec![u8::from(value != 0); numel]
@@ -501,6 +526,7 @@ impl OnnxConverter {
         }
 
         let onnx_graph = self.model.graph.as_ref().unwrap();
+        let mut operator_report = crate::onnx::ops::catalog::OperatorReport::new(&onnx_graph.node);
 
         // Fail fast on unsupported operators before any graph setup. Input/initializer
         // registration below can error on tensor kinds an unsupported op happens to use
@@ -522,6 +548,13 @@ impl OnnxConverter {
             let registry = crate::onnx::ops::OpRegistry::new();
             let unsupported = registry.collect_unsupported_nodes(onnx_graph.node.as_slice());
             if !unsupported.is_empty() {
+                for (index, node) in onnx_graph.node.iter().enumerate() {
+                    if !registry.is_supported(&node.op_type) {
+                        let reason = crate::onnx::ops::catalog::capability(&node.op_type)
+                            .map_or("no registered ONNX lowering", |entry| entry.scope);
+                        operator_report.failed(index, reason.to_string());
+                    }
+                }
                 return Err(OnnxError::UnsupportedOps(unsupported));
             }
         }
@@ -1212,7 +1245,7 @@ Provide --override-dim {}=<value> or enable --experimental-dynamic-inputs.",
                 }
             }
         }
-        for onnx_node in onnx_graph.node.as_slice() {
+        for (node_index, onnx_node) in onnx_graph.node.iter().enumerate() {
             // If all outputs are compile-time constants, emit them directly and skip conversion
             let outputs = onnx_node.output.as_slice();
             let has_dynamic_output_metadata = outputs.iter().any(|o| {
@@ -1346,6 +1379,8 @@ Provide --override-dim {}=<value> or enable --experimental-dynamic-inputs.",
                         value_types.insert(const_name, dtype);
                     }
                 }
+                operator_report
+                    .converted(node_index, crate::onnx::ops::catalog::LoweringPath::Folded);
                 continue;
             }
 
@@ -1358,7 +1393,19 @@ Provide --override-dim {}=<value> or enable --experimental-dynamic-inputs.",
                 value_types: &value_types,
             };
 
-            let converted = registry.convert_node(onnx_node, &context, b)?;
+            let converted = match registry.convert_node(onnx_node, &context, b) {
+                Ok(result) => result,
+                Err(error) => {
+                    operator_report.failed(node_index, error.to_string());
+                    return Err(error);
+                }
+            };
+            if let Some(path) = converted
+                .lowering
+                .or_else(|| crate::onnx::ops::catalog::catalog_path(&onnx_node.op_type))
+            {
+                operator_report.converted(node_index, path);
+            }
 
             for (onnx_out, dtype) in converted.output_types {
                 let webnn_id = sanitize_identifier(&onnx_out);
@@ -1898,17 +1945,39 @@ fn inline_constant_ifs(model: &mut ModelProto, options: &ConvertOptions) {
     }
 }
 
-/// ORT by default; with the `trtx` feature, TensorRT-RTX is requested explicitly so a
-/// missing GPU or DLL fails instead of silently validating on ORT.
+/// Select the backend explicitly so feature combinations cannot silently change CI coverage.
 pub(crate) fn backend_context_options() -> MLContextOptions {
     #[cfg(feature = "trtx")]
     {
         MLContextOptions::new(MLPowerPreference::Default, true)
             .with_rustnn_backend_hint(rustnn::mlcontext::Backend::Trtx)
     }
-    #[cfg(not(feature = "trtx"))]
+    #[cfg(all(not(feature = "trtx"), feature = "coreml", target_os = "macos"))]
     {
         MLContextOptions::new(MLPowerPreference::Default, false)
+            .with_rustnn_backend_hint(rustnn::mlcontext::Backend::Coreml)
+    }
+    #[cfg(not(any(feature = "trtx", all(feature = "coreml", target_os = "macos"))))]
+    {
+        MLContextOptions::new(MLPowerPreference::Default, false)
+            .with_rustnn_backend_hint(rustnn::mlcontext::Backend::Onnx)
+    }
+}
+
+#[cfg(test)]
+mod backend_selection_tests {
+    use super::*;
+    use rustnn::mlcontext::Backend;
+
+    #[test]
+    fn conversion_context_uses_requested_backend() {
+        let context = MLContext::create(&backend_context_options()).unwrap();
+        #[cfg(feature = "trtx")]
+        assert_eq!(context.rustnn_backend(), Backend::Trtx);
+        #[cfg(all(not(feature = "trtx"), feature = "coreml", target_os = "macos"))]
+        assert_eq!(context.rustnn_backend(), Backend::Coreml);
+        #[cfg(not(any(feature = "trtx", all(feature = "coreml", target_os = "macos"))))]
+        assert_eq!(context.rustnn_backend(), Backend::Onnx);
     }
 }
 
@@ -1925,12 +1994,34 @@ pub(crate) fn convert_model(
     mut model: ModelProto,
     options: &ConvertOptions,
 ) -> Result<ValidatedGraph<'static>, OnnxError> {
+    let source_nodes: Vec<_> = model
+        .graph
+        .as_ref()
+        .map(|graph| {
+            graph
+                .node
+                .iter()
+                .map(|node| {
+                    (
+                        node.name.clone(),
+                        node.op_type.clone(),
+                        node.domain.clone(),
+                        node.output.clone(),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     if options.zero_fill_missing_external_data {
         if let Some(graph) = model.graph.as_mut() {
             zero_fill_external_tensors(graph)?;
         }
     }
-    pin_graph_inputs(&mut model, &options.pinned_inputs)?;
+    pin_graph_inputs_with_overrides(
+        &mut model,
+        &options.pinned_inputs,
+        &options.free_dim_overrides,
+    )?;
     if options.optimize {
         crate::debug_println!("Running constant folding...");
         let evaluators = crate::onnx::constant_folding::evaluators::get_evaluators();
@@ -1942,6 +2033,9 @@ pub(crate) fn convert_model(
     if !options.pinned_inputs.is_empty() {
         prune_empty_graph_outputs(&mut model);
         prune_unused_graph_inputs(&mut model);
+    }
+    if let Some(graph) = &model.graph {
+        crate::onnx::ops::catalog::report_eliminated_source_nodes(&source_nodes, &graph.node);
     }
     // Move, don't clone: `model` carries every weight tensor.
     let mut converter = OnnxConverter::new(model)?;
@@ -2148,7 +2242,35 @@ mod pin_input_tests {
                 Some(DimensionValue::DimParam("n".to_string()));
         }
         let pinned = HashMap::from([("ids".to_string(), 7i64)]);
+        let mut with_overrides = m.clone();
         assert!(pin_graph_inputs(&mut m, &pinned).is_err());
+        pin_graph_inputs_with_overrides(
+            &mut with_overrides,
+            &pinned,
+            &HashMap::from([("n".into(), 2)]),
+        )
+        .unwrap();
+        let value = &with_overrides.graph.as_ref().unwrap().initializer[0];
+        assert_eq!(value.dims, vec![2]);
+        assert_eq!(value.raw_data, 7i64.to_le_bytes().repeat(2));
+    }
+
+    #[test]
+    fn pinned_zero_element_shape_stays_empty() {
+        let mut m = model(
+            17,
+            graph(
+                "zero_pin",
+                vec![i64_input("x", &[0])],
+                vec![i64_output("y", &[0])],
+                vec![],
+                vec![],
+            ),
+        );
+        pin_graph_inputs(&mut m, &HashMap::from([("x".into(), 7)])).unwrap();
+        let value = &m.graph.as_ref().unwrap().initializer[0];
+        assert_eq!(value.dims, vec![0]);
+        assert!(value.raw_data.is_empty());
     }
 
     #[test]

@@ -42,8 +42,8 @@ jobs:
             ort_archive: onnxruntime-osx-arm64
             ort_ext: tgz
             ort_dylib: lib/libonnxruntime.dylib
-            # rustnn selects the CoreML backend automatically on macOS when
-            # the feature is compiled in (ORT still serves as the reference).
+            # The converter explicitly selects CoreML when this feature is enabled;
+            # native ORT remains the numerical reference.
             cargo_flags: --features coreml
             experimental: true
             # CoreML graph compiles peak at ~5 GB for the largest sweep
@@ -131,6 +131,10 @@ jobs:
 
       - name: Build
         run: cargo build --release --locked ${{ matrix.cargo_flags }}
+
+      - name: Check generated operator views
+        if: runner.os == 'Linux'
+        run: O2W_CATALOG_BIN=target/release/onnx2webnn python3 scripts/generate_operator_catalog.py --check
 
       # tests/model_skeletons.rs converts the transformers.js exports in
       # tests/models/manifest.json. With CI set it builds weight-stripped

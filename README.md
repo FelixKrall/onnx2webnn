@@ -1,15 +1,16 @@
 # onnx2webnn
 
-> **Last edited:** `2026-09-22T21:07:28Z`<br>
-> **Checkout:** `fkrall/cache-backed-validation` at `a582b89`
+> **Last edited:** `2026-10-14T13:39:33Z`<br>
+> **Checkout:** `validation-enhancements` at `1a06c6d`
 >
 > **Freshness:** Use this document only when this provenance is recent relative to the relevant
 > code and commits; otherwise verify the implementation, tests, and Git history before relying
 > on it.
 
 ONNX → WebNN lowering crate extracted from [webnn-graph](../webnn-graph). ONNX operators lower
-directly to [rustnn](../rustnn) `MLGraphBuilder`; full-graph validation runs via ORT CPU
-`build()` (`onnx-runtime` feature). There is no intermediate JSON IR. Without `--output`,
+directly to [rustnn](../rustnn) `MLGraphBuilder`; converted-graph builds explicitly use ORT by
+default, CoreML with `--features coreml` on macOS, or TensorRT with `--features trtx`. There is
+no intermediate JSON IR. Without `--output`,
 success means `builder.build()` returns `Ok(MLGraph)`; `--output` additionally writes a
 reloadable `.webnn` graph and sibling Safetensors archive.
 
@@ -123,7 +124,28 @@ manage graph selection and KV-cache handoff themselves.
 | `--validate` | After `--output`, reload and numerically compare against native ORT |
 | `--validate-cached` | Validate existing cache artifacts without reconverting |
 
-On success the CLI prints `✓ ORT graph build succeeded for …`.
+On success the CLI prints the selected backend's graph-build result.
+
+`validate-files` accepts local ONNX paths without a manifest. Repeat `--model PATH` for each case;
+either omit `--inputs` to use deterministic feeds or supply one complete SafeTensors input archive
+per model, paired in argument order. Each archive must name every unpinned feedable ONNX input
+exactly and match its dtype and shape. `--override-dim NAME=VALUE` and `--pin-input NAME=VALUE`
+apply to every selected model; named symbolic dimensions can also be inferred from supplied input
+shapes. External ONNX data stays beside its source model. Each run overwrites a configuration-keyed
+`.webnn`/Safetensors pair in the WebNN cache, reloads it, and compares against native CPU ORT.
+
+```bash
+cargo run -- validate-files --model first.onnx --inputs first.safetensors \
+  --model second.onnx --inputs second.safetensors
+```
+
+Conversion and validation report node-occurrence and unique-operator percentages from the
+code-backed operator catalog. “Fully” means the selected lowering has no known decomposition or
+specialization cost, not measured performance parity. See
+[`docs/operator-conversion-status.md`](docs/operator-conversion-status.md) for the generated
+opset-26 inventory. With `coreml` enabled on macOS, converted and reloaded graphs explicitly use
+CoreML; otherwise they use ORT unless `trtx` explicitly selects TensorRT. Native comparison always
+uses CPU ORT.
 
 ## Model sweep
 

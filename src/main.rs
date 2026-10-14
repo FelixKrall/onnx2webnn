@@ -17,6 +17,7 @@
  */
 
 use clap::{Parser, Subcommand};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -28,7 +29,7 @@ use onnx2webnn::{cache_onnx_model, convert_onnx, validate_cached_model_with_over
 #[derive(Parser)]
 #[command(name = "onnx2webnn")]
 #[command(
-    about = "Convert ONNX models to WebNN via MLGraphBuilder (ORT validation)",
+    about = "Convert ONNX models to WebNN via MLGraphBuilder",
     long_about = None
 )]
 struct Cli {
@@ -42,7 +43,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Lower ONNX to MLGraphBuilder and validate with rustnn ORT (CPU build)
+    /// Print the code-backed operator catalog as JSON
+    OperatorCatalog,
+    /// Lower ONNX to MLGraphBuilder and build with the selected RustNN backend
     Convert {
         /// Input ONNX model path
         #[arg(long)]
@@ -105,6 +108,83 @@ enum Command {
         #[arg(long, default_value_t = 1)]
         jobs: usize,
     },
+
+    /// Validate one or more local ONNX files against freshly exported WebNN artifacts
+    ValidateFiles {
+        /// Local ONNX file; repeat for each case
+        #[arg(long = "model", required = true)]
+        models: Vec<PathBuf>,
+        /// Complete SafeTensors input file, paired by position with each --model
+        #[arg(long = "inputs")]
+        inputs: Vec<PathBuf>,
+        /// Symbolic dimension binding shared by every model, NAME=VALUE
+        #[arg(long = "override-dim")]
+        override_dims: Vec<String>,
+        /// Pin a graph input in every model, NAME=VALUE
+        #[arg(long = "pin-input")]
+        pin_inputs: Vec<String>,
+    },
+}
+
+fn parse_overrides(specs: Vec<String>) -> anyhow::Result<HashMap<String, u32>> {
+    let mut values = HashMap::new();
+    for spec in specs {
+        let (name, value) = spec.split_once('=').ok_or_else(|| {
+            anyhow::anyhow!("invalid --override-dim {spec:?}; expected NAME=VALUE")
+        })?;
+        if name.trim().is_empty() {
+            anyhow::bail!("empty --override-dim name");
+        }
+        let parsed = value.trim().parse::<u32>()?;
+        if values.insert(name.trim().to_string(), parsed).is_some() {
+            anyhow::bail!("duplicate --override-dim {name}");
+        }
+    }
+    Ok(values)
+}
+
+fn parse_pins(specs: Vec<String>) -> anyhow::Result<HashMap<String, i64>> {
+    let mut values = HashMap::new();
+    for spec in specs {
+        let (name, value) = onnx2webnn::onnx::convert::parse_pinned_input(&spec)?;
+        if values.insert(name.clone(), value).is_some() {
+            anyhow::bail!("duplicate --pin-input {name}");
+        }
+    }
+    Ok(values)
+}
+
+fn local_webnn_path(
+    model: &Path,
+    overrides: &HashMap<String, u32>,
+    pins: &HashMap<String, i64>,
+) -> anyhow::Result<PathBuf> {
+    let mut hasher = Sha256::new();
+    let mut field = |bytes: &[u8]| {
+        hasher.update((bytes.len() as u64).to_le_bytes());
+        hasher.update(bytes);
+    };
+    field(b"onnx2webnn-local-v2");
+    field(model.canonicalize()?.to_string_lossy().as_bytes());
+    let mut dims: Vec<_> = overrides.iter().collect();
+    dims.sort_unstable_by_key(|(key, _)| *key);
+    for (key, value) in dims {
+        field(b"dimension");
+        field(key.as_bytes());
+        field(&value.to_le_bytes());
+    }
+    let mut pinned: Vec<_> = pins.iter().collect();
+    pinned.sort_unstable_by_key(|(key, _)| *key);
+    for (key, value) in pinned {
+        field(b"pin");
+        field(key.as_bytes());
+        field(&value.to_le_bytes());
+    }
+    drop(field);
+    let key = format!("{:x}", hasher.finalize());
+    Ok(onnx2webnn::cache::webnn_cache_dir()
+        .map_err(anyhow::Error::msg)?
+        .join(format!("local-{}.webnn", &key[..24])))
 }
 
 fn cache_paths(input: &Path) -> anyhow::Result<(PathBuf, PathBuf)> {
@@ -135,11 +215,23 @@ fn cache_paths(input: &Path) -> anyhow::Result<(PathBuf, PathBuf)> {
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    if !matches!(cli.cmd, Command::OperatorCatalog) {
+        std::env::set_var("O2W_OPERATOR_REPORT", "1");
+    }
     if cli.debug {
         onnx2webnn::debug::enable();
+        std::env::set_var("O2W_OPERATOR_REPORT_VERBOSE", "1");
     }
 
     match cli.cmd {
+        Command::OperatorCatalog => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    onnx2webnn::onnx::ops::catalog::OPERATOR_CAPABILITIES
+                )?
+            );
+        }
         Command::Convert {
             input,
             override_dims,
@@ -152,6 +244,9 @@ fn main() -> anyhow::Result<()> {
             validate,
             validate_cached,
         } => {
+            if validate || validate_cached {
+                std::env::set_var("O2W_OPERATOR_REPORT", "1");
+            }
             let mut free_dim_overrides = if let Some(path) = override_dims_file {
                 let content = std::fs::read_to_string(&path)?;
                 let json: serde_json::Value = serde_json::from_str(&content)?;
@@ -244,10 +339,13 @@ fn main() -> anyhow::Result<()> {
                 output_path: cache_paths.as_ref().map(|(_, webnn)| webnn.clone()),
             };
 
-            let _validated = convert_onnx(input_path.to_str().unwrap(), options)
+            let validated = convert_onnx(input_path.to_str().unwrap(), options)
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
-            // stdout (not stderr): PowerShell treats native stderr as NativeCommandError
-            println!("✓ ORT graph build succeeded for {}", input);
+            println!(
+                "✓ {:?} graph build succeeded for {}",
+                validated.context.rustnn_backend(),
+                input
+            );
             if let Some((onnx_cache, webnn_cache)) = &cache_paths {
                 println!("✓ cached ONNX at {}", onnx_cache.display());
                 println!("✓ cached WebNN at {}", webnn_cache.display());
@@ -271,6 +369,7 @@ fn main() -> anyhow::Result<()> {
             manifest,
             jobs,
         } => {
+            std::env::set_var("O2W_OPERATOR_REPORT", "1");
             let selection = Selection::parse(&selection).map_err(anyhow::Error::msg)?;
             let mut options = RunOptions::new(selection, weights).map_err(anyhow::Error::msg)?;
             options.jobs = jobs;
@@ -285,6 +384,80 @@ fn main() -> anyhow::Result<()> {
                     summary.failed.len(),
                     summary.selected
                 ));
+            }
+        }
+        Command::ValidateFiles {
+            models,
+            inputs,
+            override_dims,
+            pin_inputs,
+        } => {
+            std::env::set_var("O2W_OPERATOR_REPORT", "1");
+            if !inputs.is_empty() && inputs.len() != models.len() {
+                anyhow::bail!("--inputs must be omitted or supplied once per --model ({} models, {} input files)",
+                    models.len(), inputs.len());
+            }
+            let overrides = parse_overrides(override_dims)?;
+            let pins = parse_pins(pin_inputs)?;
+            let mut failed = Vec::new();
+            let total = models.len();
+            for (index, model) in models.iter().enumerate() {
+                let run = || -> anyhow::Result<onnx2webnn::ValidationSummary> {
+                    let (effective, supplied) = if inputs.is_empty() {
+                        (overrides.clone(), None)
+                    } else {
+                        let (dims, tensors) = onnx2webnn::load_safetensors_inputs(
+                            model,
+                            &inputs[index],
+                            &overrides,
+                            &pins,
+                        )?;
+                        (dims, Some(tensors))
+                    };
+                    let webnn = local_webnn_path(model, &effective, &pins)?;
+                    convert_onnx(
+                        model,
+                        ConvertOptions {
+                            free_dim_overrides: effective.clone(),
+                            optimize: true,
+                            experimental_dynamic_inputs: false,
+                            pinned_inputs: pins.clone(),
+                            zero_fill_missing_external_data: false,
+                            output_path: Some(webnn.clone()),
+                        },
+                    )?;
+                    let result = if let Some(tensors) = supplied {
+                        onnx2webnn::validate_cached_model_with_inputs(
+                            model, &webnn, tensors, &pins,
+                        )?
+                    } else {
+                        onnx2webnn::validate_cached_model_with_options(
+                            model, &webnn, &effective, &pins,
+                        )?
+                    };
+                    Ok(result)
+                };
+                match run() {
+                    Ok(summary) => println!(
+                        "PASS {} ({} inputs, {} outputs)",
+                        model.display(),
+                        summary.input_count,
+                        summary.output_count
+                    ),
+                    Err(error) => {
+                        eprintln!("FAIL {}: {error:#}", model.display());
+                        failed.push(model.display().to_string());
+                    }
+                }
+            }
+            println!(
+                "Local validation: {}/{} passed ({:.1}%)",
+                total - failed.len(),
+                total,
+                (total - failed.len()) as f64 * 100.0 / total as f64
+            );
+            if !failed.is_empty() {
+                anyhow::bail!("{} local model(s) failed", failed.len());
             }
         }
     }

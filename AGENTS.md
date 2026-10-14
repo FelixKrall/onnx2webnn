@@ -1,5 +1,12 @@
 # onnx2webnn
 
+> **Last edited:** `2026-10-14T13:39:33Z`<br>
+> **Checkout:** `validation-enhancements` at `1a06c6d`
+>
+> **Freshness:** Use this document only when this provenance is recent relative to the relevant
+> code and commits; otherwise verify the implementation, tests, and Git history before relying
+> on it.
+
 ONNX → WebNN conversion crate. Rust lowering lives in `src/onnx/`; graph validation uses
 [rustnn](../rustnn) **ORT `build()`** on `MLGraphBuilder` (see `ValidatedGraph` in
 `src/onnx/convert.rs`). There is no JSON IR in the committed tree.
@@ -25,7 +32,7 @@ independent layers:
 |-------|----------------|-------|-----------------|
 | **1. WebNN spec** | Ops the W3C API defines | [webnn spec](https://www.w3.org/TR/webnn/) | ~105 |
 | **2. Name mapping** | ONNX op name ↔ WebNN `MLGraphBuilder` method | `webnn-onnx-utils/src/operation_names.rs` | ~90 |
-| **3. Exporter implementation** | Advertised ONNX names with a lowering or preprocessing path | `src/onnx/ops/*.rs` + `scripts/webnn_onnx_ops.py` | 135 |
+| **3. Exporter implementation** | ONNX names with a lowering or preprocessing path | `src/onnx/ops/catalog.rs` + `src/onnx/ops/*.rs` | 129 standard names at opset 26 |
 
 An ONNX op can be:
 
@@ -34,11 +41,10 @@ An ONNX op can be:
 - **Pattern-only or partial** — for example constant-condition `If`, the narrow
   `SplitToSequence` + `SequenceAt` export pattern, static `OneHot`, and restricted
   `Einsum`. The handler rejects unsupported forms.
-- **Direct or decomposed** — advertised in `scripts/webnn_onnx_ops.py`. A decomposed op may be
+- **Direct or decomposed** — cataloged in `src/onnx/ops/catalog.rs`. A decomposed op may be
   functionally supported while remaining slower or narrower than a native backend kernel.
 
-The manifest contains 135 accepted names. At opset 26, 127 are standard `ai.onnx` names;
-adding the registry-only `SplitToSequence`/`SequenceAt` pattern gives 129/198 (65.2%) standard
+At opset 26, the code catalog lists 129/198 (65.2%) standard
 names with at least one executable lowering. Of those, 96/198 (48.5%) have a direct standardized
 WebNN primitive path. Name presence is not a promise of every ONNX schema variant. See
 `docs/operator-conversion-status.md` for the complete inventory and WebNN-imposed limitations. Regenerate tests after changing the manifest.
@@ -85,8 +91,9 @@ cargo run -- convert --input model.onnx `
 | `--experimental-dynamic-inputs` | `ConvertOptions::experimental_dynamic_inputs` | Preserve unresolved symbolic input dims as dynamic metadata |
 | `--debug` | global | Enable conversion debug output (`src/debug.rs`) |
 
-Success prints `✓ ORT graph build succeeded for …` to stdout. There is no `--output` flag in
-the committed CLI — validation only.
+Success prints the backend graph-build result and operator-support statistics. `--output` saves
+`.webnn` and Safetensors; `--validate` reloads and compares them to native CPU ORT.
+`validate-files` accepts local ONNX files and optional complete SafeTensors input archives.
 
 ## Library API
 
@@ -132,7 +139,8 @@ Install: `pip install -r requirements.txt` (from repo root; needs `onnx`, `numpy
 
 | Script | Purpose |
 |--------|---------|
-| `webnn_onnx_ops.py` | Supported-op manifest — sync with `src/onnx/ops/*.rs` when adding handlers |
+| `webnn_onnx_ops.py` | Loads generated supported-op data from `operator_capabilities.json` |
+| `generate_operator_catalog.py` | Regenerates/checks Python data and the operator-status matrix from Rust metadata |
 | `generate_rust_op_conversion_tests.py` | Regenerate `tests/onnx_ops/` and `tests/onnx_op_tests.rs` |
 | `onnx_ops_to_csv.py` | List operators in a model; `--check-webnn` exits non-zero if unsupported ops remain |
 | `upgrade_onnx_opset.py` | Upgrade a model to a target `ai.onnx` opset version |
