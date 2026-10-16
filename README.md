@@ -1,18 +1,19 @@
 # onnx2webnn
 
-> **Last edited:** `2026-10-14T14:52:54Z`<br>
-> **Checkout:** `validation-enhancements` at `b2baf08`
+> **Last edited:** `2026-10-16T12:26:06Z`<br>
+> **Checkout:** `validation-enhancements` at `38e54e9`
 >
 > **Freshness:** Use this document only when this provenance is recent relative to the relevant
 > code and commits; otherwise verify the implementation, tests, and Git history before relying
 > on it.
 
 ONNX → WebNN lowering crate extracted from [webnn-graph](../webnn-graph). ONNX operators lower
-directly to [rustnn](../rustnn) `MLGraphBuilder`; converted-graph builds explicitly use ORT by
-default, CoreML with `--features coreml` on macOS, or TensorRT with `--features trtx`. There is
-no intermediate JSON IR. Without `--output`,
-success means `builder.build()` returns `Ok(MLGraph)`; `--output` additionally writes a
-reloadable `.webnn` graph and sibling Safetensors archive.
+directly to [rustnn](../rustnn) `MLGraphBuilder`. Graph builds and validation use ORT CPU by
+default; `--backend coreml` or `--backend trtx` explicitly selects another compiled-in backend.
+There is no intermediate JSON IR. Plain `convert` succeeds when `builder.build()` returns
+`Ok(MLGraph)`. `--no-backend-graph-build` instead exports a reloadable `.webnn` graph and sibling
+Safetensors archive without compiling it for any backend. `--validate` exports, reloads, builds,
+and compares it to native ORT.
 
 Decomposed attention is not promised to be bit-identical to a source backend fused-attention
 kernel. This matters for quantized models that immediately feed attention into
@@ -33,9 +34,9 @@ Supported ONNX opset range: **1–26** (see `MIN_SUPPORTED_OPSET` / `MAX_SUPPORT
   while building the ONNX and CoreML protobuf bindings.
 - A sibling `rustnn` checkout at `../rustnn`. This is the path dependency used
   by `Cargo.toml` while the stacked RustNN changes are under review.
-- ONNX Runtime 1.27 or newer when running conversions or tests with the ORT
-  backend. RustNN can download the pinned version into its own ignored
-  `target/onnxruntime` directory:
+- ONNX Runtime 1.27 or newer when building or validating graphs with the ORT
+  backend. Export-only `convert --no-backend-graph-build` does not load ONNX Runtime. RustNN can
+  download the pinned version into its own ignored `target/onnxruntime` directory:
 
 ```powershell
 make -C ../rustnn onnxruntime-download
@@ -73,10 +74,11 @@ cargo run -- convert --input model.onnx `
 If `model.dims.json` sits beside the ONNX file and no overrides were passed on the CLI, dimension
 bindings are loaded from that sidecar (`freeDimensionOverrides` or a flat JSON object).
 
-With `--output`, artifacts are overwritten below the operating system's cache directory in
-`onnx2webnn/onnx` and `onnx2webnn/webnn`; add `--validate` to reload the saved pair immediately and
-compare deterministic execution against native ORT. Set `O2W_CACHE_DIR` to relocate both caches,
-or `O2W_ONNX_CACHE` and `O2W_WEBNN_CACHE` to override either cache independently. RustNN stores
+With `--no-backend-graph-build` or `--validate`, artifacts are overwritten below the operating
+system's cache directory in `onnx2webnn/onnx` and `onnx2webnn/webnn`. `--validate` reloads the
+saved pair and compares deterministic execution against native ORT; export alone does not select
+or initialize an execution backend. Set `O2W_CACHE_DIR` to relocate both caches, or `O2W_ONNX_CACHE` and
+`O2W_WEBNN_CACHE` to override either cache independently. RustNN stores
 logical Int4/Uint4 constants as their original packed nibble bytes in a
 versioned U8 Safetensors extension while the `.webnn` declaration retains the logical dtype and
 shape. This is a RustNN archive convention, not a native Safetensors 4-bit dtype.
@@ -88,8 +90,8 @@ a fused packed-weight kernel instead. In particular, `MatMulNBits accuracy_level
 quantize activations to Int8 internally, which the WebNN lowering cannot represent; such models are
 recorded as validation-blocked rather than numerically supported.
 
-`--validate-cached` reuses existing cache artifacts and is exclusive with `--output` and
-`--validate`.
+`--validate-cached` reuses existing cache artifacts and is exclusive with
+`--no-backend-graph-build` and `--validate`.
 
 Merged decoders (optimum's `decoder_model_merged*.onnx`) branch at runtime on `use_cache_branch`.
 WebNN has no runtime `If`, so pin the input and convert each branch separately:
@@ -120,11 +122,14 @@ manage graph selection and KV-cache handoff themselves.
 | `--allow-missing-external-data` | Zero-fill external tensors whose data file is absent (weight-stripped skeleton models) |
 | `--experimental-dynamic-inputs` | Preserve unresolved symbolic dims as dynamic metadata |
 | `--debug` | Verbose conversion logging (global) |
-| `--output` | Overwrite cache-backed `.onnx`, `.webnn`, and Safetensors artifacts |
-| `--validate` | After `--output`, reload and numerically compare against native ORT |
+| `--backend ort\|coreml\|trtx` | Select the graph-build/validation backend (global; default `ort`); CoreML and TensorRT require their Cargo features |
+| `--no-backend-graph-build` | Overwrite cache-backed `.onnx`, `.webnn`, and Safetensors artifacts without compiling a backend graph |
+| `--validate` | Overwrite and reload the cache artifacts, then numerically compare against native ORT |
 | `--validate-cached` | Validate existing cache artifacts without reconverting |
 
-On success the CLI prints the selected backend's graph-build result.
+Plain `convert` and `convert --validate` print the selected backend's graph-build result.
+`--no-backend-graph-build` reports that no build was performed; passing `--backend` other than
+`ort` in this mode is rejected because it would have no effect.
 
 `validate-files` accepts local ONNX paths without a manifest. Repeat `--model PATH` for each case;
 either omit `--inputs` to use deterministic feeds or supply one complete SafeTensors input archive
@@ -145,15 +150,15 @@ specialization cost, not measured performance parity. A separate performance-lim
 per-operator warning identify converted paths with known major runtime costs; they remain
 functionally supported. See
 [`docs/operator-conversion-status.md`](docs/operator-conversion-status.md) for the generated
-opset-26 inventory. With `coreml` enabled on macOS, converted and reloaded graphs explicitly use
-CoreML; otherwise they use ORT unless `trtx` explicitly selects TensorRT. Native comparison always
-uses CPU ORT.
+opset-26 inventory. The `coreml` and `trtx` Cargo features make those backends available but do not
+select them; use `--backend coreml` or `--backend trtx`. Native comparison always uses CPU ORT.
 
 ## Model sweep
 
 `tests/models/manifest.json` lists the transformers.js exports the converter is expected to handle,
 with their dimension overrides and pinned inputs; `tests/model_skeletons.rs` converts each entry and
-builds it in ORT. This broad manifest is generated by `scripts/generate_manifest.py` and intentionally
+builds it in ORT by default, or CoreML when CI sets `O2W_TEST_BACKEND=coreml`. This broad manifest
+is generated by `scripts/generate_manifest.py` and intentionally
 tracks the publisher repositories through their default `main` revisions. It is diagnostic coverage,
 not an immutable CI gate.
 

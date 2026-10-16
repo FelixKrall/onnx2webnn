@@ -1,6 +1,6 @@
 //! Cache reload and deterministic native-ORT validation for exported WebNN graphs.
 use crate::onnx::builder::OnnxBuilder;
-use crate::onnx::convert::{OnnxError, ValidatedGraph};
+use crate::onnx::convert::{BackendChoice, OnnxError, ValidatedGraph};
 use crate::protos::onnx::{
     tensor_shape_proto::dimension::Value as DimensionValue, type_proto::Value as TypeProtoValue,
     ModelProto, TensorProto_DataType, ValueInfoProto,
@@ -48,6 +48,22 @@ pub fn validate_cached_model_with_options(
     free_dim_overrides: &HashMap<String, u32>,
     pinned_inputs: &HashMap<String, i64>,
 ) -> Result<ValidationSummary, OnnxError> {
+    validate_cached_model_with_options_on_backend(
+        onnx_path,
+        webnn_path,
+        free_dim_overrides,
+        pinned_inputs,
+        BackendChoice::Ort,
+    )
+}
+
+pub fn validate_cached_model_with_options_on_backend(
+    onnx_path: impl AsRef<Path>,
+    webnn_path: impl AsRef<Path>,
+    free_dim_overrides: &HashMap<String, u32>,
+    pinned_inputs: &HashMap<String, i64>,
+    backend: BackendChoice,
+) -> Result<ValidationSummary, OnnxError> {
     let onnx_bytes = fs::read(onnx_path.as_ref())?;
     let model = ModelProto::decode(onnx_bytes.as_slice())
         .map_err(|e| OnnxError::ProtobufError(e.to_string()))?;
@@ -58,6 +74,7 @@ pub fn validate_cached_model_with_options(
         &model,
         inputs,
         pinned_inputs,
+        backend,
     )
 }
 
@@ -68,6 +85,22 @@ pub fn validate_cached_model_with_inputs(
     inputs: Vec<OnnxInput>,
     pinned_inputs: &HashMap<String, i64>,
 ) -> Result<ValidationSummary, OnnxError> {
+    validate_cached_model_with_inputs_on_backend(
+        onnx_path,
+        webnn_path,
+        inputs,
+        pinned_inputs,
+        BackendChoice::Ort,
+    )
+}
+
+pub fn validate_cached_model_with_inputs_on_backend(
+    onnx_path: impl AsRef<Path>,
+    webnn_path: impl AsRef<Path>,
+    inputs: Vec<OnnxInput>,
+    pinned_inputs: &HashMap<String, i64>,
+    backend: BackendChoice,
+) -> Result<ValidationSummary, OnnxError> {
     let bytes = fs::read(onnx_path.as_ref())?;
     let model = ModelProto::decode(bytes.as_slice())
         .map_err(|e| OnnxError::ProtobufError(e.to_string()))?;
@@ -77,6 +110,7 @@ pub fn validate_cached_model_with_inputs(
         &model,
         inputs,
         pinned_inputs,
+        backend,
     )
 }
 
@@ -86,16 +120,18 @@ fn validate_with_inputs(
     model: &ModelProto,
     inputs: Vec<OnnxInput>,
     pinned_inputs: &HashMap<String, i64>,
+    backend: BackendChoice,
 ) -> Result<ValidationSummary, OnnxError> {
+    let backend_options = crate::onnx::convert::backend_context_options(backend)?;
     let reference = run_onnx_path_with_inputs(onnx_path, clone_inputs(&inputs))
         .map_err(|e| OnnxError::Validation(format!("native ORT run failed: {e}")))?;
     let graph_info = load_graph_from_path(webnn_path)
         .map_err(|e| OnnxError::Validation(format!("failed to reload WebNN cache: {e}")))?;
-    let mut context = MLContext::create(&crate::onnx::convert::backend_context_options())
-        .map_err(|e| OnnxError::Validation(format!("MLContext::create failed: {e}")))?;
+    let mut context = MLContext::create(&backend_options)
+        .map_err(|e| OnnxError::Backend(format!("{backend} context creation failed: {e}")))?;
     let graph = context
         .rustnn_build_graph(graph_info)
-        .map_err(|e| OnnxError::Validation(format!("cached graph build failed: {e}")))?;
+        .map_err(|e| OnnxError::Backend(format!("{backend} cached graph build failed: {e}")))?;
     let mut validated = ValidatedGraph { context, graph };
     let input_count = validated.graph.input_descriptors.len();
     let actual = dispatch_and_collect(&mut validated, model, &inputs, pinned_inputs)?;
@@ -709,7 +745,12 @@ fn dispatch_and_collect(
     validated
         .context
         .dispatch(&mut validated.graph, &input_bindings, &output_bindings)
-        .map_err(|e| OnnxError::Validation(format!("cached graph dispatch failed: {e}")))?;
+        .map_err(|e| {
+            OnnxError::Backend(format!(
+                "{:?} cached graph dispatch failed: {e}",
+                validated.context.rustnn_backend()
+            ))
+        })?;
     output_map
         .into_iter()
         .map(|(onnx_name, key)| {

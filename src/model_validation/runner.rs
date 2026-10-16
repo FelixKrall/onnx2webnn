@@ -5,7 +5,10 @@
 
 use super::full_model::cache_full_model;
 use super::manifest::{load_manifest_from, Entry, Selection};
-use crate::{convert_onnx, validate_cached_model_with_options, ConvertOptions};
+use crate::{
+    convert_onnx_with_backend, validate_cached_model_with_options_on_backend, BackendChoice,
+    ConvertOptions,
+};
 use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -45,6 +48,7 @@ pub struct RunOptions {
     pub manifest: PathBuf,
     pub jobs: usize,
     pub webnn_cache: PathBuf,
+    pub backend: BackendChoice,
 }
 
 impl RunOptions {
@@ -59,6 +63,7 @@ impl RunOptions {
                 .unwrap_or_else(|| root.join("tests/models/manifest.json")),
             jobs: 1,
             webnn_cache: crate::cache::webnn_cache_dir()?,
+            backend: BackendChoice::Ort,
         })
     }
 }
@@ -234,7 +239,7 @@ impl Sweep {
         ));
         std::fs::create_dir_all(webnn_path.parent().expect("cache parent"))
             .map_err(|e| format!("export: {e}"))?;
-        convert_onnx(
+        convert_onnx_with_backend(
             &onnx_path,
             ConvertOptions {
                 free_dim_overrides: entry.override_dims.clone(),
@@ -244,16 +249,18 @@ impl Sweep {
                 zero_fill_missing_external_data: false,
                 output_path: Some(webnn_path.clone()),
             },
+            self.options.backend,
         )
         .map_err(|e| format!("conversion/export: {e}"))?;
         if !webnn_path.exists() || !webnn_path.with_extension("safetensors").exists() {
             return Err("export did not produce .webnn and .safetensors".to_string());
         }
-        let summary = validate_cached_model_with_options(
+        let summary = validate_cached_model_with_options_on_backend(
             &onnx_path,
             &webnn_path,
             &entry.override_dims,
             &entry.pin_inputs,
+            self.options.backend,
         )
         .map_err(|e| classify(&e.to_string()))?;
         Ok((

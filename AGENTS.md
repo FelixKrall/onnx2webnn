@@ -1,15 +1,16 @@
 # onnx2webnn
 
-> **Last edited:** `2026-10-14T13:39:33Z`<br>
-> **Checkout:** `validation-enhancements` at `1a06c6d`
+> **Last edited:** `2026-10-16T12:26:06Z`<br>
+> **Checkout:** `validation-enhancements` at `38e54e9`
 >
 > **Freshness:** Use this document only when this provenance is recent relative to the relevant
 > code and commits; otherwise verify the implementation, tests, and Git history before relying
 > on it.
 
-ONNX → WebNN conversion crate. Rust lowering lives in `src/onnx/`; graph validation uses
-[rustnn](../rustnn) **ORT `build()`** on `MLGraphBuilder` (see `ValidatedGraph` in
-`src/onnx/convert.rs`). There is no JSON IR in the committed tree.
+ONNX → WebNN conversion crate. Rust lowering lives in `src/onnx/`; graph builds use
+[rustnn](../rustnn) **ORT `build()`** by default on `MLGraphBuilder` (see `ValidatedGraph` in
+`src/onnx/convert.rs`). Export-only `convert --no-backend-graph-build` uses an uncompiled builder. There is no JSON IR
+in the committed tree.
 
 ## WebNN specification
 
@@ -91,8 +92,9 @@ cargo run -- convert --input model.onnx `
 | `--experimental-dynamic-inputs` | `ConvertOptions::experimental_dynamic_inputs` | Preserve unresolved symbolic input dims as dynamic metadata |
 | `--debug` | global | Enable conversion debug output (`src/debug.rs`) |
 
-Success prints the backend graph-build result and operator-support statistics. `--output` saves
-`.webnn` and Safetensors; `--validate` reloads and compares them to native CPU ORT.
+Success prints operator-support statistics. `--no-backend-graph-build` saves `.webnn` and
+Safetensors without a backend build; `--validate` saves, reloads, and compares them to native CPU ORT. `--backend` selects the
+graph-build/validation backend (`ort` by default), with `coreml` and `trtx` requiring their features.
 `validate-files` accepts local ONNX files and optional complete SafeTensors input archives.
 
 ## Library API

@@ -18,7 +18,7 @@
 
 // Main ONNX to WebNN conversion logic
 
-use crate::onnx::builder::{map_rustnn_error, tensor_proto_to_bytes, OnnxBuilder};
+use crate::onnx::builder::{tensor_proto_to_bytes, OnnxBuilder};
 use crate::protos::onnx::{
     tensor_shape_proto::dimension::Value as DimensionValue, type_proto::Value as TypeProtoValue,
     ModelProto, TensorProto_DataType,
@@ -26,21 +26,54 @@ use crate::protos::onnx::{
 use prost::Message;
 use rustnn::graph::{Dimension, DynamicDimension};
 use rustnn::mlcontext::{
-    MLContext, MLContextOptions, MLGraph, MLGraphBuilder, MLNamedOperands, MLOperand,
-    MLPowerPreference,
+    MLContext, MLContextOptions, MLGraph, MLGraphBuilder, MLOperand, MLPowerPreference,
 };
 use rustnn::DataType;
 use serde_json::Value as JsonValue;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use thiserror::Error;
 use webnn_onnx_utils::{data_types as utils_data_types, identifiers};
 
-/// ONNX model lowered and validated via rustnn ORT `build()`.
+/// ONNX model lowered and compiled through the selected RustNN backend.
 pub struct ValidatedGraph<'ctx> {
     pub context: MLContext<'ctx>,
     pub graph: MLGraph<'ctx>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum BackendChoice {
+    #[default]
+    Ort,
+    Coreml,
+    Trtx,
+}
+
+impl FromStr for BackendChoice {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "ort" => Ok(Self::Ort),
+            "coreml" => Ok(Self::Coreml),
+            "trtx" => Ok(Self::Trtx),
+            _ => Err(format!(
+                "invalid backend {value:?}; expected ort, coreml, or trtx"
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for BackendChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Ort => "ort",
+            Self::Coreml => "coreml",
+            Self::Trtx => "trtx",
+        })
+    }
 }
 
 const MIN_SUPPORTED_OPSET: i64 = 1;
@@ -105,6 +138,12 @@ pub enum OnnxError {
 
     #[error("validation failed: {0}")]
     Validation(String),
+
+    #[error("backend error: {0}")]
+    Backend(String),
+
+    #[error("WebNN export failed: {0}")]
+    Export(String),
 }
 
 impl OnnxError {
@@ -188,8 +227,7 @@ pub struct ConvertOptions {
     /// weight-stripped "skeleton" model exercise the full conversion and ORT
     /// graph build (values never matter for graph structure).
     pub zero_fill_missing_external_data: bool,
-    /// Write the lowered graph as a rustnn `.webnn` file plus sibling
-    /// `.safetensors` constants before building it for structural validation.
+    /// Write the lowered graph as `.webnn` plus sibling `.safetensors` constants.
     pub output_path: Option<PathBuf>,
 }
 
@@ -1668,10 +1706,31 @@ fn load_external_tensor_data(
 
 pub fn convert_onnx<P: AsRef<Path>>(
     onnx_path: P,
-    mut options: ConvertOptions,
+    options: ConvertOptions,
 ) -> Result<ValidatedGraph<'static>, OnnxError> {
+    convert_onnx_with_backend(onnx_path, options, BackendChoice::Ort)
+}
+
+pub fn convert_onnx_with_backend<P: AsRef<Path>>(
+    onnx_path: P,
+    options: ConvertOptions,
+    backend: BackendChoice,
+) -> Result<ValidatedGraph<'static>, OnnxError> {
+    let (model, options) = load_model_from_path(onnx_path.as_ref(), options)?;
+    convert_model_with_backend(model, &options, backend)
+}
+
+/// Export portable WebNN artifacts without initializing or compiling an execution backend.
+pub fn export_onnx<P: AsRef<Path>>(onnx_path: P, options: ConvertOptions) -> Result<(), OnnxError> {
+    let (model, options) = load_model_from_path(onnx_path.as_ref(), options)?;
+    export_model_proto(model, &options)
+}
+
+fn load_model_from_path(
+    onnx_path_ref: &Path,
+    mut options: ConvertOptions,
+) -> Result<(ModelProto, ConvertOptions), OnnxError> {
     // Read ONNX file
-    let onnx_path_ref = onnx_path.as_ref();
     let onnx_bytes = fs::read(onnx_path_ref)?;
 
     // Parse protobuf
@@ -1711,7 +1770,7 @@ pub fn convert_onnx<P: AsRef<Path>>(
         }
     }
 
-    convert_model(model, &options)
+    Ok((model, options))
 }
 
 /// Cache an ONNX model with all external tensor data embedded in the protobuf.
@@ -1945,22 +2004,39 @@ fn inline_constant_ifs(model: &mut ModelProto, options: &ConvertOptions) {
     }
 }
 
-/// Select the backend explicitly so feature combinations cannot silently change CI coverage.
-pub(crate) fn backend_context_options() -> MLContextOptions {
-    #[cfg(feature = "trtx")]
-    {
-        MLContextOptions::new(MLPowerPreference::Default, true)
-            .with_rustnn_backend_hint(rustnn::mlcontext::Backend::Trtx)
-    }
-    #[cfg(all(not(feature = "trtx"), feature = "coreml", target_os = "macos"))]
-    {
-        MLContextOptions::new(MLPowerPreference::Default, false)
-            .with_rustnn_backend_hint(rustnn::mlcontext::Backend::Coreml)
-    }
-    #[cfg(not(any(feature = "trtx", all(feature = "coreml", target_os = "macos"))))]
-    {
-        MLContextOptions::new(MLPowerPreference::Default, false)
-            .with_rustnn_backend_hint(rustnn::mlcontext::Backend::Onnx)
+/// Select a compiled-in backend without letting Cargo features silently choose execution.
+pub(crate) fn backend_context_options(
+    backend: BackendChoice,
+) -> Result<MLContextOptions, OnnxError> {
+    match backend {
+        BackendChoice::Ort => Ok(MLContextOptions::new(MLPowerPreference::Default, false)
+            .with_rustnn_backend_hint(rustnn::mlcontext::Backend::Onnx)),
+        BackendChoice::Coreml => {
+            #[cfg(all(feature = "coreml", target_os = "macos"))]
+            {
+                Ok(MLContextOptions::new(MLPowerPreference::Default, false)
+                    .with_rustnn_backend_hint(rustnn::mlcontext::Backend::Coreml))
+            }
+            #[cfg(not(all(feature = "coreml", target_os = "macos")))]
+            {
+                Err(OnnxError::Backend(
+                    "coreml requires a macOS build with --features coreml".into(),
+                ))
+            }
+        }
+        BackendChoice::Trtx => {
+            #[cfg(feature = "trtx")]
+            {
+                Ok(MLContextOptions::new(MLPowerPreference::Default, true)
+                    .with_rustnn_backend_hint(rustnn::mlcontext::Backend::Trtx))
+            }
+            #[cfg(not(feature = "trtx"))]
+            {
+                Err(OnnxError::Backend(
+                    "trtx requires a build with --features trtx".into(),
+                ))
+            }
+        }
     }
 }
 
@@ -1971,17 +2047,17 @@ mod backend_selection_tests {
 
     #[test]
     fn conversion_context_uses_requested_backend() {
-        let context = MLContext::create(&backend_context_options()).unwrap();
-        #[cfg(feature = "trtx")]
-        assert_eq!(context.rustnn_backend(), Backend::Trtx);
-        #[cfg(all(not(feature = "trtx"), feature = "coreml", target_os = "macos"))]
-        assert_eq!(context.rustnn_backend(), Backend::Coreml);
-        #[cfg(not(any(feature = "trtx", all(feature = "coreml", target_os = "macos"))))]
+        let context =
+            MLContext::create(&backend_context_options(BackendChoice::Ort).unwrap()).unwrap();
         assert_eq!(context.rustnn_backend(), Backend::Onnx);
+        #[cfg(not(feature = "trtx"))]
+        assert!(backend_context_options(BackendChoice::Trtx).is_err());
+        #[cfg(not(all(feature = "coreml", target_os = "macos")))]
+        assert!(backend_context_options(BackendChoice::Coreml).is_err());
     }
 }
 
-/// Lower an in-memory ONNX [`ModelProto`] to [`MLGraphBuilder`] and validate with ORT `build()`.
+/// Lower an in-memory ONNX model and compile it with the default ORT backend.
 pub fn convert_model_proto(
     model: ModelProto,
     options: &ConvertOptions,
@@ -1989,11 +2065,59 @@ pub fn convert_model_proto(
     convert_model(model, options)
 }
 
-/// Lower ONNX to [`MLGraphBuilder`] and validate with ORT `build()`.
+pub fn convert_model_proto_with_backend(
+    model: ModelProto,
+    options: &ConvertOptions,
+    backend: BackendChoice,
+) -> Result<ValidatedGraph<'static>, OnnxError> {
+    convert_model_with_backend(model, options, backend)
+}
+
+/// Export an in-memory ONNX model without initializing an execution backend.
+pub fn export_model_proto(model: ModelProto, options: &ConvertOptions) -> Result<(), OnnxError> {
+    if options.output_path.is_none() {
+        return Err(OnnxError::Export("export requires an output path".into()));
+    }
+    let mut converter = prepare_model(model, options)?;
+    let mut builder = MLGraphBuilder::new_uncompiled();
+    record_and_save(&mut converter, options, &mut builder)?;
+    Ok(())
+}
+
+/// Lower ONNX to [`MLGraphBuilder`] and compile with the default ORT backend.
 pub(crate) fn convert_model(
-    mut model: ModelProto,
+    model: ModelProto,
     options: &ConvertOptions,
 ) -> Result<ValidatedGraph<'static>, OnnxError> {
+    convert_model_with_backend(model, options, BackendChoice::Ort)
+}
+
+fn convert_model_with_backend(
+    model: ModelProto,
+    options: &ConvertOptions,
+    backend: BackendChoice,
+) -> Result<ValidatedGraph<'static>, OnnxError> {
+    let context_options = backend_context_options(backend)?;
+    let mut converter = prepare_model(model, options)?;
+    let mut context = MLContext::create(&context_options)
+        .map_err(|e| OnnxError::Backend(format!("{backend} context creation failed: {e}")))?;
+    let mut ml_builder = MLGraphBuilder::new(&mut context)
+        .map_err(|e| OnnxError::Backend(format!("{backend} builder creation failed: {e}")))?;
+    let outputs = record_and_save(&mut converter, options, &mut ml_builder)?;
+    let output_refs: BTreeMap<&str, MLOperand> = outputs
+        .iter()
+        .map(|(name, operand)| (name.as_str(), *operand))
+        .collect();
+    let graph = ml_builder
+        .build(&output_refs)
+        .map_err(|e| OnnxError::Backend(format!("{backend} graph build failed: {e}")))?;
+    Ok(ValidatedGraph { context, graph })
+}
+
+fn prepare_model(
+    mut model: ModelProto,
+    options: &ConvertOptions,
+) -> Result<OnnxConverter, OnnxError> {
     let source_nodes: Vec<_> = model
         .graph
         .as_ref()
@@ -2038,14 +2162,17 @@ pub(crate) fn convert_model(
         crate::onnx::ops::catalog::report_eliminated_source_nodes(&source_nodes, &graph.node);
     }
     // Move, don't clone: `model` carries every weight tensor.
-    let mut converter = OnnxConverter::new(model)?;
+    let converter = OnnxConverter::new(model)?;
     converter.extract_metadata()?;
+    Ok(converter)
+}
 
-    let mut context = MLContext::create(&backend_context_options())
-        .map_err(|e| OnnxError::ShapeInference(format!("MLContext::create failed: {e}")))?;
-
-    let mut ml_builder = MLGraphBuilder::new(&mut context).map_err(map_rustnn_error)?;
-    let mut onnx_builder = OnnxBuilder::new(&mut ml_builder);
+fn record_and_save<'ctx, 'builder>(
+    converter: &mut OnnxConverter,
+    options: &ConvertOptions,
+    ml_builder: &mut MLGraphBuilder<'ctx, 'builder>,
+) -> Result<BTreeMap<String, MLOperand>, OnnxError> {
+    let mut onnx_builder = OnnxBuilder::new(ml_builder);
 
     converter.convert_with_builder(&mut onnx_builder, options)?;
 
@@ -2089,13 +2216,9 @@ pub(crate) fn convert_model(
         onnx_builder
             .builder
             .rustnn_save_webnn(&output_refs, path)
-            .map_err(map_rustnn_error)?;
+            .map_err(|error| OnnxError::Export(error.to_string()))?;
     }
-    let output_refs: MLNamedOperands = outputs.iter().map(|(k, v)| (k.as_str(), *v)).collect();
-
-    let graph = onnx_builder.finish_build(output_refs)?;
-
-    Ok(ValidatedGraph { context, graph })
+    Ok(outputs)
 }
 
 #[cfg(test)]
