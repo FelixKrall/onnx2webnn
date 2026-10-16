@@ -130,6 +130,40 @@ fn complete_inputs_validate_names_dtypes_shapes_and_symbols() {
 }
 
 #[test]
+fn explicit_feeds_can_supply_a_quantization_scale() {
+    let dir = tempfile::tempdir().unwrap();
+    let model_path = dir.path().join("feedable-scale.onnx");
+    let fixture = model(
+        13,
+        graph(
+            "feedable_scale",
+            vec![f32_input("x", &[3]), f32_input("scale", &[])],
+            vec![u8_output("y", &[3])],
+            vec![node("QuantizeLinear", "q", &["x", "scale"], &["y"], &[])],
+            vec![],
+        ),
+    );
+    fs::write(&model_path, fixture.encode_to_vec()).unwrap();
+    let feeds = dir.path().join("feeds.safetensors");
+    let values: Vec<u8> = [0.0f32, 0.25, 0.5]
+        .into_iter()
+        .flat_map(f32::to_le_bytes)
+        .collect();
+    inputs_file(
+        &feeds,
+        &[
+            ("x", Dtype::F32, vec![3], values),
+            ("scale", Dtype::F32, vec![], 0.25f32.to_le_bytes().to_vec()),
+        ],
+    );
+    let (_, loaded) =
+        load_safetensors_inputs(&model_path, &feeds, &HashMap::new(), &HashMap::new()).unwrap();
+    assert_eq!(loaded.len(), 2);
+    let scale = loaded.iter().find(|input| input.name == "scale").unwrap();
+    assert!(matches!(&scale.data, TensorData::Float32(values) if values == &[0.25]));
+}
+
+#[test]
 fn scalar_and_zero_element_inputs_load() {
     let dir = tempfile::tempdir().unwrap();
     for (shape, storage_shape, bytes) in [

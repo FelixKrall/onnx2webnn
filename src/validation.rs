@@ -1,4 +1,6 @@
 //! Cache reload and deterministic native-ORT validation for exported WebNN graphs.
+mod quantized_inputs;
+
 use crate::onnx::builder::OnnxBuilder;
 use crate::onnx::convert::{BackendChoice, OnnxError, ValidatedGraph};
 use crate::protos::onnx::{
@@ -67,7 +69,12 @@ pub fn validate_cached_model_with_options_on_backend(
     let onnx_bytes = fs::read(onnx_path.as_ref())?;
     let model = ModelProto::decode(onnx_bytes.as_slice())
         .map_err(|e| OnnxError::ProtobufError(e.to_string()))?;
-    let inputs = deterministic_inputs(&model, free_dim_overrides, pinned_inputs)?;
+    let inputs = deterministic_inputs(
+        &model,
+        Some(onnx_path.as_ref()),
+        free_dim_overrides,
+        pinned_inputs,
+    )?;
     validate_with_inputs(
         onnx_path.as_ref(),
         webnn_path.as_ref(),
@@ -229,7 +236,7 @@ pub fn load_safetensors_inputs(
             }
         }
     }
-    let mut inputs = deterministic_inputs(&model, &resolved, pins)?;
+    let mut inputs = deterministic_inputs(&model, None, &resolved, pins)?;
     for input in &mut inputs {
         if pins.contains_key(&input.name) {
             continue;
@@ -495,6 +502,7 @@ fn input_data(
 
 fn deterministic_inputs(
     model: &ModelProto,
+    model_path: Option<&Path>,
     free_dim_overrides: &HashMap<String, u32>,
     pinned_inputs: &HashMap<String, i64>,
 ) -> Result<Vec<OnnxInput>, OnnxError> {
@@ -512,12 +520,23 @@ fn deterministic_inputs(
         .map(|input| {
             let (elem_type, shape) = tensor_dims(input, free_dim_overrides)?;
             let count = checked_element_count(&input.name, &shape)?;
-            let data = input_data(
-                elem_type,
-                count,
-                &input.name,
-                pinned_inputs.get(&input.name).copied(),
-            )?;
+            let pinned_value = pinned_inputs.get(&input.name).copied();
+            let data = if pinned_value.is_some() || semantic_input_value(&input.name).is_some() {
+                input_data(elem_type, count, &input.name, pinned_value)?
+            } else if let Some(path) = model_path {
+                match quantized_inputs::quantized_input_data(
+                    model,
+                    path,
+                    &input.name,
+                    elem_type,
+                    count,
+                )? {
+                    Some(data) => data,
+                    None => deterministic_data(elem_type, count, &input.name)?,
+                }
+            } else {
+                deterministic_data(elem_type, count, &input.name)?
+            };
             Ok(OnnxInput {
                 name: input.name.clone(),
                 shape,

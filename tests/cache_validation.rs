@@ -50,6 +50,36 @@ fn saved_add_graph_reloads_and_matches_native_ort() {
 }
 
 #[test]
+fn scale_aware_quantized_feed_reloads_and_matches_native_ort() {
+    let dir = tempfile::tempdir().expect("temporary cache");
+    let source = dir.path().join("quantized.onnx");
+    let webnn = dir.path().join("quantized.webnn");
+    let fixture = model(
+        13,
+        graph(
+            "quantized_feed",
+            vec![f32_input("x", &[17])],
+            vec![f32_output("y", &[17])],
+            vec![
+                node("QuantizeLinear", "q", &["x", "scale", "zp"], &["q"], &[]),
+                node("DequantizeLinear", "dq", &["q", "scale", "zp"], &["y"], &[]),
+            ],
+            vec![f32_init("scale", &[], &[0.25]), u8_init("zp", &[], &[128])],
+        ),
+    );
+    fs::write(&source, fixture.encode_to_vec()).expect("write ONNX fixture");
+    convert_onnx(
+        &source,
+        ConvertOptions {
+            output_path: Some(webnn.clone()),
+            ..ConvertOptions::default()
+        },
+    )
+    .expect("convert quantized graph");
+    validate_cached_model(&source, &webnn).expect("compare scale-aware feed after reload");
+}
+
+#[test]
 fn uncompiled_export_reloads_and_matches_native_ort() {
     let dir = tempfile::tempdir().expect("temporary export directory");
     let source = dir.path().join("source.onnx");
