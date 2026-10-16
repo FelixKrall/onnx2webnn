@@ -1,21 +1,16 @@
 # ONNX → WebNN operator conversion status
 
-> **Last edited:** `2026-10-16T16:52:36Z`<br>
-> **Checkout:** `validation-enhancements` at `b55262d`
+> **Last edited:** `2026-10-16T18:04:29Z`<br>
+> **Checkout:** `validation-enhancements` at `afb644f`
 >
 > **Freshness:** Use this document only when this provenance is recent relative to the relevant
 > code and commits; otherwise verify the implementation, tests, and Git history before relying
 > on it.
 
-The coverage and operator-status tables are generated views; their source of truth is
-`src/onnx/ops/catalog.rs`. The surrounding explanations are maintained manually. Regenerate or
-check the tables with `python3 scripts/generate_operator_catalog.py` (add `--check` for drift
-detection). The baseline is the 198 non-deprecated standard `ai.onnx` operator names active at
-opset 26.
-
-An operator marked implemented has at least one executable form. It does not imply that every
-schema revision, attribute combination, data type, rank, optional input/output, or dynamic-shape
-form is supported. The scope column records known material restrictions.
+Tables are generated from [`src/onnx/ops/catalog.rs`](../src/onnx/ops/catalog.rs): run
+`python3 scripts/generate_operator_catalog.py` to update them, or add `--check` to detect drift.
+Coverage counts the 198 non-deprecated standard operators in ONNX opset 26. “Supported” means at
+least one form executes; see each row's scope for restrictions.
 
 ## Status categories
 
@@ -27,14 +22,12 @@ form is supported. The scope column records known material restrictions.
 | **Pattern-only** | Executes only when a specific static export pattern can be eliminated or inlined. |
 | **Unsupported** | No executable lowering exists on this branch. |
 
-Direct WebNN is the spec-level subset of executable support. Decomposed, folded, and pattern-only
-operators execute, but are not native WebNN operator mappings.
+Only **Direct WebNN** counts as a native WebNN mapping.
 
 ### Estimated performance impact
 
-The performance-impact column is populated only for **Decomposed** operators. These estimates are
-derived from the current emitted WebNN graph, not from cross-backend benchmarks; actual cost depends
-on tensor shapes, backend fusion, memory movement, and hardware.
+Impact estimates apply only to **Decomposed** paths. They describe graph structure, not measured
+backend performance.
 
 | Tier | Meaning |
 |------|---------|
@@ -43,10 +36,8 @@ on tensor shapes, backend fusion, memory movement, and hardware.
 | **high** | The lowering loses a fused, quantized, integer-accumulation, attention, or sparse-dispatch path and can materially increase compute or memory traffic. |
 | **not inferred** | Impact varies too strongly with the accepted equation, input count, shape, or backend to estimate from the lowering alone. |
 
-**Performance-limited** is a separate flag on a decomposed path that loses a major runtime
-capability, such as sparse expert dispatch, low-bit matmul, fused attention, or integer
-accumulation. It signals a known structural performance risk, not a benchmark result or a
-conversion failure. The scope column explains the specific limitation.
+**Performance-limited** flags a decomposed path that loses a major capability, such as sparse
+dispatch or low-bit matmul. It is a warning, not a conversion failure.
 
 ## Coverage
 
@@ -284,22 +275,10 @@ The generated Python supported-op data derives from the same Rust catalog.
 
 ### MoE interpretation
 
-The previous documentation called MoE impossible because **native sparse MoE execution** cannot be
-represented in standard WebNN. That limitation remains. This branch nevertheless executes the
-supported `MoE` and `QMoE` forms by evaluating every expert and blending the selected outputs.
-This is functional fallback support, not sparse-dispatch performance parity.
+`MoE` and `QMoE` run every expert and blend outputs: functional support, but no sparse-dispatch
+performance parity.
 
-## Reproducing the inventory
-
-```bash
-python scripts/generate_onnx_opsets.py --min 26 --max 26 -o docs/onnx-opsets
-python scripts/onnx_ops_to_csv.py model.onnx --check-webnn
-```
-
-Source of truth: `src/onnx/ops/catalog.rs`, checked against the handler registry in
-`src/onnx/ops/mod.rs` and the opset gate in
-`src/onnx/convert.rs`. Numerical model results are tracked separately in
-[model-validation-status.md](./model-validation-status.md).
+Numerical results: [model validation status and triage](model-validation-status-triage.md).
 
 ## References
 
