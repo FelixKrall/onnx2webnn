@@ -1,16 +1,17 @@
 # ONNX → WebNN operator conversion status
 
-> **Last edited:** `2026-10-14T14:52:43Z`<br>
-> **Checkout:** `validation-enhancements` at `b2baf08`
+> **Last edited:** `2026-10-16T16:52:36Z`<br>
+> **Checkout:** `validation-enhancements` at `b55262d`
 >
 > **Freshness:** Use this document only when this provenance is recent relative to the relevant
 > code and commits; otherwise verify the implementation, tests, and Git history before relying
 > on it.
 
-This document is generated from `src/onnx/ops/catalog.rs`; regenerate or check it with
-`python3 scripts/generate_operator_catalog.py` (add `--check` for drift detection). It contains no
-implementation phases or rollout plan. The baseline is the 198 non-deprecated standard
-`ai.onnx` operator names active at opset 26.
+The coverage and operator-status tables are generated views; their source of truth is
+`src/onnx/ops/catalog.rs`. The surrounding explanations are maintained manually. Regenerate or
+check the tables with `python3 scripts/generate_operator_catalog.py` (add `--check` for drift
+detection). The baseline is the 198 non-deprecated standard `ai.onnx` operator names active at
+opset 26.
 
 An operator marked implemented has at least one executable form. It does not imply that every
 schema revision, attribute combination, data type, rank, optional input/output, or dynamic-shape
@@ -49,6 +50,8 @@ conversion failure. The scope column explains the specific limitation.
 
 ## Coverage
 
+**Generated table. Source of truth:** `src/onnx/ops/catalog.rs`. **Regenerate:** `python3 scripts/generate_operator_catalog.py`.
+
 | Opset-26 standard ONNX coverage | Count | Share |
 |---------------------------------|------:|------:|
 | Total non-deprecated `ai.onnx` names | 198 | 100% |
@@ -60,6 +63,8 @@ conversion failure. The scope column explains the specific limitation.
 The generated Python supported-op data derives from the same Rust catalog.
 
 ## Complete opset-26 status matrix
+
+**Generated table. Source of truth:** `src/onnx/ops/catalog.rs`. **Regenerate:** `python3 scripts/generate_operator_catalog.py`.
 
 | ONNX operator | Status | Execution scope and WebNN limitation | Estimated perf impact | Performance-limited |
 |---------------|--------|--------------------------------------|-----------------------|---------------------|
@@ -263,6 +268,8 @@ The generated Python supported-op data derives from the same Rust catalog.
 | `Xor` | Direct WebNN | Direct standardized WebNN primitive; handler schema checks and WebNN operand-type limits apply. |  |  |
 
 ## Additional contrib and fused operators
+
+**Generated table. Source of truth:** `src/onnx/ops/catalog.rs`. **Regenerate:** `python3 scripts/generate_operator_catalog.py`.
 
 | ONNX operator | Status | Execution scope and WebNN limitation | Estimated perf impact | Performance-limited |
 |---------------|--------|--------------------------------------|-----------------------|---------------------|

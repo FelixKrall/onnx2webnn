@@ -46,6 +46,8 @@ def update_doc(original: str, matrix: str) -> str:
     before_coverage, _ = first.split("## Coverage\n", 1)
     coverage = (
         "## Coverage\n\n"
+        "**Generated table. Source of truth:** `src/onnx/ops/catalog.rs`. "
+        "**Regenerate:** `python3 scripts/generate_operator_catalog.py`.\n\n"
         "| Opset-26 standard ONNX coverage | Count | Share |\n"
         "|---------------------------------|------:|------:|\n"
         "| Total non-deprecated `ai.onnx` names | 198 | 100% |\n"
@@ -57,9 +59,13 @@ def update_doc(original: str, matrix: str) -> str:
     )
     return (
         before_coverage + coverage + "## Complete opset-26 status matrix\n\n"
+        "**Generated table. Source of truth:** `src/onnx/ops/catalog.rs`. "
+        "**Regenerate:** `python3 scripts/generate_operator_catalog.py`.\n\n"
         "| ONNX operator | Status | Execution scope and WebNN limitation | Estimated perf impact | Performance-limited |\n"
         "|---------------|--------|--------------------------------------|-----------------------|---------------------|\n"
         + "".join(rows[:198]) + "\n## Additional contrib and fused operators\n\n"
+        "**Generated table. Source of truth:** `src/onnx/ops/catalog.rs`. "
+        "**Regenerate:** `python3 scripts/generate_operator_catalog.py`.\n\n"
         "| ONNX operator | Status | Execution scope and WebNN limitation | Estimated perf impact | Performance-limited |\n"
         "|---------------|--------|--------------------------------------|-----------------------|---------------------|\n"
         + "".join(rows[198:]) + "\n### MoE interpretation" + tail
