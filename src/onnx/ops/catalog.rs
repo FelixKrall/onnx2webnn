@@ -373,6 +373,7 @@ impl OperatorReport {
                 part as f64 * 100.0 / whole as f64
             }
         };
+        println!();
         println!("Operator support (post-fold/specialization):");
         println!("  Legend: fully = direct; partially = decomposed/folded/pattern-only; unsupported = unavailable/rejected.");
         println!("  Performance-limited = known major runtime cost; a subset of partially supported, not a failure.");
@@ -386,14 +387,15 @@ impl OperatorReport {
             );
         }
         println!(
-            "  performance-limited (within partially): {} nodes ({:.1}% of partial), {} unique ops",
+            "  performance-limited (within partially): {} nodes ({:.1}% of total, {:.1}% of partial), {} unique ops",
             summary.perf_limited_nodes,
+            percent(summary.perf_limited_nodes, total),
             percent(summary.perf_limited_nodes, summary.counts[1]),
             summary.perf_limited_names.len()
         );
         for (domain, op) in &summary.perf_limited_names {
             if let Some(entry) = capability(op) {
-                println!("    {domain}::{op}: {}", entry.scope);
+                println!("    - {domain}::{op}: {}", entry.scope);
             }
         }
         let pending = self.nodes.iter().filter(|node| !node.attempted).count();
@@ -416,6 +418,7 @@ impl OperatorReport {
                 );
             }
         }
+        println!();
     }
 }
 

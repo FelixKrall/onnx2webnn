@@ -96,6 +96,49 @@ fn conditional_cast_path_reports_decomposition() {
 }
 
 #[test]
+fn performance_limited_reports_total_and_partial_node_percentages() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("matmul_integer.onnx");
+    let fixture = model(
+        17,
+        graph(
+            "matmul_integer",
+            vec![u8_input("a", &[1, 2])],
+            vec![i32_output("y", &[1, 1])],
+            vec![
+                node("MatMulInteger", "matmul", &["a", "b"], &["product"], &[]),
+                node("Identity", "identity", &["product"], &["y"], &[]),
+            ],
+            vec![u8_init("b", &[2, 1], &[3, 4])],
+        ),
+    );
+    fs::write(&path, fixture.encode_to_vec()).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_onnx2webnn"))
+        .args(["convert", "--input", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("partially: 1 nodes (50.0%)"), "{stdout}");
+    assert!(
+        stdout.contains("\n\nOperator support (post-fold/specialization):"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "performance-limited (within partially): 1 nodes (50.0% of total, 100.0% of partial)"
+        ),
+        "{stdout}"
+    );
+    assert!(stdout.contains("    - ai.onnx::MatMulInteger:"), "{stdout}");
+    assert!(stdout.contains("\n\n✓"), "{stdout}");
+}
+
+#[test]
 fn unsupported_form_reports_node_and_rejection_reason() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("lp_pool.onnx");

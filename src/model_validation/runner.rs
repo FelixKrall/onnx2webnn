@@ -16,6 +16,7 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex, OnceLock};
 
 type ModelCell = Arc<OnceLock<Result<PathBuf, String>>>;
+const MODEL_BARRIER: &str = "------------------------------------------------------------";
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum WeightMode {
@@ -115,8 +116,14 @@ impl fmt::Display for RunSummary {
         if self.failed.is_empty() {
             writeln!(f, "  (none)")?;
         } else {
-            for failure in &self.failed {
-                writeln!(f, "  FAIL {}: {}", failure.label, failure.error)?;
+            for (index, failure) in self.failed.iter().enumerate() {
+                if index != 0 {
+                    writeln!(f)?;
+                }
+                writeln!(f, "  FAIL {}", failure.label)?;
+                for line in failure.error.lines() {
+                    writeln!(f, "    {line}")?;
+                }
             }
         }
         writeln!(f)?;
@@ -208,8 +215,8 @@ impl Sweep {
         match result {
             Ok((inputs, pins, outputs)) => {
                 eprintln!(
-                    "\n\n{progress}\nok   {label}\n     {inputs} inputs + {pins} pinned, {outputs} outputs ({})",
-                    self.options.weights
+                    "\n{progress}\nok   {label}\n     {inputs} inputs + {pins} pinned, {outputs} outputs ({})\n{MODEL_BARRIER}\n",
+                    self.options.weights,
                 );
                 self.results.lock().unwrap().push(ModelResult {
                     index,
@@ -218,7 +225,7 @@ impl Sweep {
                 });
             }
             Err(error) => {
-                eprintln!("\n\n{progress}\nFAIL {label}\n     {error}");
+                eprintln!("\n{progress}\nFAIL {label}\n     {error}\n{MODEL_BARRIER}\n");
                 self.results.lock().unwrap().push(ModelResult {
                     index,
                     label,
@@ -335,10 +342,38 @@ mod tests {
                 "  PASS #0 first\n",
                 "  PASS #2 third\n\n\n",
                 "Failed (1):\n",
-                "  FAIL #1 second: comparison: mismatch\n\n\n",
+                "  FAIL #1 second\n",
+                "    comparison: mismatch\n\n\n",
                 "Overall: 2/3 passed (66.7%)"
             )
         );
         assert!(summary.has_failures());
+    }
+
+    #[test]
+    fn failed_models_have_separate_details_and_spacing() {
+        let summary = RunSummary {
+            selected: 2,
+            passed: 0,
+            succeeded: vec![],
+            failed: vec![
+                ModelFailure {
+                    label: "#0 first".into(),
+                    error: "conversion: unsupported op\nnode: bad".into(),
+                },
+                ModelFailure {
+                    label: "#1 second".into(),
+                    error: "comparison: mismatch".into(),
+                },
+            ],
+        };
+        assert!(summary.to_string().contains(concat!(
+            "Failed (2):\n",
+            "  FAIL #0 first\n",
+            "    conversion: unsupported op\n",
+            "    node: bad\n\n",
+            "  FAIL #1 second\n",
+            "    comparison: mismatch\n",
+        )));
     }
 }
