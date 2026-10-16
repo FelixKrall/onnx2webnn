@@ -1,7 +1,7 @@
 # Real-weight validation failures
 
-> **Last edited:** `2026-10-16T18:04:29Z`<br>
-> **Checkout:** `validation-enhancements` at `afb644f`
+> **Last edited:** `2026-10-16T23:16:29Z`<br>
+> **Checkout:** `validation-enhancements` at `ae2e0cc`
 >
 > **Freshness:** Use this document only when this provenance is recent relative to the relevant
 > code and commits; otherwise verify the implementation, tests, and Git history before relying
@@ -17,7 +17,9 @@ Reviewed first blockers for real-weight validation. See the
 - RustNN: `28fb3bbe`
 - Manifest: 51 current cases within a completed 52-case sweep
 - Runtime: CPU ONNX Runtime 1.29.0
-- Result: 47/51 passed, no skips; 52-case run took 7m 2.3s, peak RSS 26.4 GiB
+- Result for the current manifest: 47/49 eligible passed; two invalid source ONNX cases were
+  attempted but excluded from the conversion metric. The 52-case run took 7m 2.3s, peak RSS
+  26.4 GiB.
 
 ```bash
 ORT_DYLIB_PATH=../rustnn/target/onnxruntime/onnxruntime-linux-x64-1.29.0/lib/libonnxruntime.so.1.29.0 \

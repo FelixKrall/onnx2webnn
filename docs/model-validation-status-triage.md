@@ -1,7 +1,7 @@
 # Full-model numerical validation status and triage
 
-> **Last edited:** `2026-10-16T18:04:29Z`<br>
-> **Checkout:** `validation-enhancements` at `afb644f`
+> **Last edited:** `2026-10-16T23:16:29Z`<br>
+> **Checkout:** `validation-enhancements` at `ae2e0cc`
 >
 > **Freshness:** Use this document only when this provenance is recent relative to the relevant
 > code and commits; otherwise verify the implementation, tests, and Git history before relying
@@ -57,7 +57,9 @@ cover ORT `accuracy_level=4` Int8-activation execution, which still blocks Voxtr
 - ORT: repository-local Linux x64 1.29.0 build
 - Manifest: `tests/models/manifest.json` (51 cases, 44 unique ONNX files)
 - Skeleton verification: 51/51 passed; the test took 81.1s (133.2s including the release build)
-- Real verification: 47/51 passed; complete cold-cache run, one worker, no skips; 10m 43.6s, peak RSS 30.3 GiB
+- Real verification: **47/49 eligible passed**; 51 attempted, including two invalid source ONNX
+  cases excluded from the conversion metric; complete cold-cache run, one worker, no skips;
+  10m 43.6s, peak RSS 30.3 GiB
 
 These results describe the listed checkout, not every newer revision.
 
@@ -69,11 +71,13 @@ ORT_DYLIB_PATH=../rustnn/target/onnxruntime/onnxruntime-linux-x64-1.29.0/lib/lib
 
 ### Summary
 
-| Weight mode | Pass | Fail | Download skipped | Result |
-|-------------|-----:|-----:|-----------------:|--------|
-| Real | 47 | 4 | 0 | Complete (51/51) |
+| Weight mode | Eligible pass | Eligible fail | Invalid source ONNX | Download skipped | Result |
+|-------------|--------------:|--------------:|--------------------:|-----------------:|--------|
+| Real | 47 | 2 | 2 | 0 | Complete (51 attempted; 49 eligible) |
 
-See [failure evidence](real-weight-validation-failures.md) for the four blockers.
+The two O1 cases remain in the manifest and run ledger but cannot measure conversion while native
+ORT rejects their source model. See [failure evidence](real-weight-validation-failures.md) for both
+conversion disagreements and the upstream blockers.
 
 ### Current failure families
 
@@ -154,11 +158,12 @@ privacy-filter rerun confirmed ONNX and sidecar reuse.
 
 ## Coverage change history
 
-Only coverage-changing milestones are listed; Git retains older ledgers.
+Only coverage-changing milestones are listed; Git retains older ledgers. Earlier historical
+fractions use attempted-case denominators; the current comparable row uses eligible cases.
 
 | Date / tested revisions | Change | Comparable coverage effect |
 |-------------------------|--------|----------------------------|
-| 2026-09-17 — after `25ea94c` | Removed one passing FP32 RoFormer case from the generated population. | **48/52 → 47/51**; same four blockers, no comparable regression. |
+| 2026-09-17 — after `25ea94c` | Removed one passing FP32 RoFormer case from the generated population. | **48/50 → 47/49 eligible**; same four attempted blockers, no comparable regression. |
 | 2026-09-17 — `6f6ad8a`, RustNN `65e76e67` | Fixed Bool Cast, Slice strides, and q4/q8 tolerances. | **45 → 48/52**; DETR, Donut encoder, and Qwen passed. |
 | 2026-09-16 — `24fdd50`, RustNN `7f07a5e1` | Added packed-4-bit reload and measured q4 tolerance. | q4 export blocker cleared; SmolLM2 and Janus passed, **42 → 45/52**. |
 | 2026-09-15 — `ec5ba275`, RustNN `7f07a5e1` | Reconciled branch-specialized WebNN inputs/outputs with native ONNX. | **32 → 42/52**. |
