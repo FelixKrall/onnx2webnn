@@ -1708,7 +1708,8 @@ pub fn convert_onnx<P: AsRef<Path>>(
     onnx_path: P,
     options: ConvertOptions,
 ) -> Result<ValidatedGraph<'static>, OnnxError> {
-    convert_onnx_with_backend(onnx_path, options, BackendChoice::Ort)
+    let (model, options) = load_model_from_path(onnx_path.as_ref(), options)?;
+    convert_model(model, &options)
 }
 
 pub fn convert_onnx_with_backend<P: AsRef<Path>>(
@@ -2004,7 +2005,20 @@ fn inline_constant_ifs(model: &mut ModelProto, options: &ConvertOptions) {
     }
 }
 
-/// Select a compiled-in backend without letting Cargo features silently choose execution.
+/// Use the same build-default backend selection as the original conversion path.
+pub(crate) fn default_backend_context_options() -> MLContextOptions {
+    #[cfg(feature = "trtx")]
+    {
+        MLContextOptions::new(MLPowerPreference::Default, true)
+            .with_rustnn_backend_hint(rustnn::mlcontext::Backend::Trtx)
+    }
+    #[cfg(not(feature = "trtx"))]
+    {
+        MLContextOptions::new(MLPowerPreference::Default, false)
+    }
+}
+
+/// Select an explicitly requested compiled-in backend.
 pub(crate) fn backend_context_options(
     backend: BackendChoice,
 ) -> Result<MLContextOptions, OnnxError> {
@@ -2055,9 +2069,19 @@ mod backend_selection_tests {
         #[cfg(not(all(feature = "coreml", target_os = "macos")))]
         assert!(backend_context_options(BackendChoice::Coreml).is_err());
     }
+
+    #[cfg(not(feature = "trtx"))]
+    #[test]
+    fn conversion_context_uses_build_default_backend() {
+        let context = MLContext::create(&default_backend_context_options()).unwrap();
+        #[cfg(all(feature = "coreml", target_os = "macos"))]
+        assert_eq!(context.rustnn_backend(), Backend::Coreml);
+        #[cfg(not(all(feature = "coreml", target_os = "macos")))]
+        assert_eq!(context.rustnn_backend(), Backend::Onnx);
+    }
 }
 
-/// Lower an in-memory ONNX model and compile it with the default ORT backend.
+/// Lower an in-memory ONNX model and compile it with the build-default backend.
 pub fn convert_model_proto(
     model: ModelProto,
     options: &ConvertOptions,
@@ -2084,12 +2108,12 @@ pub fn export_model_proto(model: ModelProto, options: &ConvertOptions) -> Result
     Ok(())
 }
 
-/// Lower ONNX to [`MLGraphBuilder`] and compile with the default ORT backend.
+/// Lower ONNX to [`MLGraphBuilder`] and compile with the build-default backend.
 pub(crate) fn convert_model(
     model: ModelProto,
     options: &ConvertOptions,
 ) -> Result<ValidatedGraph<'static>, OnnxError> {
-    convert_model_with_backend(model, options, BackendChoice::Ort)
+    convert_model_with_context_options(model, options, default_backend_context_options(), "default")
 }
 
 fn convert_model_with_backend(
@@ -2098,6 +2122,15 @@ fn convert_model_with_backend(
     backend: BackendChoice,
 ) -> Result<ValidatedGraph<'static>, OnnxError> {
     let context_options = backend_context_options(backend)?;
+    convert_model_with_context_options(model, options, context_options, &backend.to_string())
+}
+
+fn convert_model_with_context_options(
+    model: ModelProto,
+    options: &ConvertOptions,
+    context_options: MLContextOptions,
+    backend: &str,
+) -> Result<ValidatedGraph<'static>, OnnxError> {
     let mut converter = prepare_model(model, options)?;
     let mut context = MLContext::create(&context_options)
         .map_err(|e| OnnxError::Backend(format!("{backend} context creation failed: {e}")))?;

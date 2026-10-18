@@ -50,12 +50,12 @@ pub fn validate_cached_model_with_options(
     free_dim_overrides: &HashMap<String, u32>,
     pinned_inputs: &HashMap<String, i64>,
 ) -> Result<ValidationSummary, OnnxError> {
-    validate_cached_model_with_options_on_backend(
+    validate_cached_model_with_options_selected_backend(
         onnx_path,
         webnn_path,
         free_dim_overrides,
         pinned_inputs,
-        BackendChoice::Ort,
+        None,
     )
 }
 
@@ -65,6 +65,22 @@ pub fn validate_cached_model_with_options_on_backend(
     free_dim_overrides: &HashMap<String, u32>,
     pinned_inputs: &HashMap<String, i64>,
     backend: BackendChoice,
+) -> Result<ValidationSummary, OnnxError> {
+    validate_cached_model_with_options_selected_backend(
+        onnx_path,
+        webnn_path,
+        free_dim_overrides,
+        pinned_inputs,
+        Some(backend),
+    )
+}
+
+fn validate_cached_model_with_options_selected_backend(
+    onnx_path: impl AsRef<Path>,
+    webnn_path: impl AsRef<Path>,
+    free_dim_overrides: &HashMap<String, u32>,
+    pinned_inputs: &HashMap<String, i64>,
+    backend: Option<BackendChoice>,
 ) -> Result<ValidationSummary, OnnxError> {
     let onnx_bytes = fs::read(onnx_path.as_ref())?;
     let model = ModelProto::decode(onnx_bytes.as_slice())
@@ -92,12 +108,12 @@ pub fn validate_cached_model_with_inputs(
     inputs: Vec<OnnxInput>,
     pinned_inputs: &HashMap<String, i64>,
 ) -> Result<ValidationSummary, OnnxError> {
-    validate_cached_model_with_inputs_on_backend(
+    validate_cached_model_with_inputs_selected_backend(
         onnx_path,
         webnn_path,
         inputs,
         pinned_inputs,
-        BackendChoice::Ort,
+        None,
     )
 }
 
@@ -107,6 +123,22 @@ pub fn validate_cached_model_with_inputs_on_backend(
     inputs: Vec<OnnxInput>,
     pinned_inputs: &HashMap<String, i64>,
     backend: BackendChoice,
+) -> Result<ValidationSummary, OnnxError> {
+    validate_cached_model_with_inputs_selected_backend(
+        onnx_path,
+        webnn_path,
+        inputs,
+        pinned_inputs,
+        Some(backend),
+    )
+}
+
+fn validate_cached_model_with_inputs_selected_backend(
+    onnx_path: impl AsRef<Path>,
+    webnn_path: impl AsRef<Path>,
+    inputs: Vec<OnnxInput>,
+    pinned_inputs: &HashMap<String, i64>,
+    backend: Option<BackendChoice>,
 ) -> Result<ValidationSummary, OnnxError> {
     let bytes = fs::read(onnx_path.as_ref())?;
     let model = ModelProto::decode(bytes.as_slice())
@@ -127,18 +159,22 @@ fn validate_with_inputs(
     model: &ModelProto,
     inputs: Vec<OnnxInput>,
     pinned_inputs: &HashMap<String, i64>,
-    backend: BackendChoice,
+    backend: Option<BackendChoice>,
 ) -> Result<ValidationSummary, OnnxError> {
-    let backend_options = crate::onnx::convert::backend_context_options(backend)?;
+    let backend_options = match backend {
+        Some(backend) => crate::onnx::convert::backend_context_options(backend)?,
+        None => crate::onnx::convert::default_backend_context_options(),
+    };
+    let backend_label = backend.map_or_else(|| "default".to_owned(), |backend| backend.to_string());
     let reference = run_onnx_path_with_inputs(onnx_path, clone_inputs(&inputs))
         .map_err(|e| OnnxError::Validation(format!("native ORT run failed: {e}")))?;
     let graph_info = load_graph_from_path(webnn_path)
         .map_err(|e| OnnxError::Validation(format!("failed to reload WebNN cache: {e}")))?;
     let mut context = MLContext::create(&backend_options)
-        .map_err(|e| OnnxError::Backend(format!("{backend} context creation failed: {e}")))?;
-    let graph = context
-        .rustnn_build_graph(graph_info)
-        .map_err(|e| OnnxError::Backend(format!("{backend} cached graph build failed: {e}")))?;
+        .map_err(|e| OnnxError::Backend(format!("{backend_label} context creation failed: {e}")))?;
+    let graph = context.rustnn_build_graph(graph_info).map_err(|e| {
+        OnnxError::Backend(format!("{backend_label} cached graph build failed: {e}"))
+    })?;
     let mut validated = ValidatedGraph { context, graph };
     let input_count = validated.graph.input_descriptors.len();
     let actual = dispatch_and_collect(&mut validated, model, &inputs, pinned_inputs)?;
