@@ -2242,7 +2242,7 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "ureq 2.12.1",
- "webnn-onnx-utils 0.1.1 (git+https://github.com/rustnn/webnn-onnx-utils?branch=main)",
+ "webnn-onnx-utils",
 ]
 
 [[package]]
@@ -3084,7 +3084,7 @@ dependencies = [
  "tracing-subscriber",
  "trtx",
  "webnn-graph",
- "webnn-onnx-utils 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "webnn-onnx-utils",
  "zstd",
 ]
 
@@ -4320,23 +4320,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 1.0.69",
- "webnn-onnx-utils 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
-]
-
-[[package]]
-name = "webnn-onnx-utils"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4e27dc3ae7bb6b6db1002fe4c50f5fd105f248aa3e35e0c2cff1db6e7cd6b8b6"
-dependencies = [
- "half",
- "once_cell",
- "prost",
- "prost-build",
- "prost-types",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
+ "webnn-onnx-utils",
 ]
 
 [[package]]

@@ -19,8 +19,8 @@ use rustnn::operator_options::MLResample2dOptions;
 pub struct ResizeHandler;
 
 impl OpHandler for ResizeHandler {
-    fn supports(&self, op_type: &str) -> bool {
-        op_type == "Resize"
+    fn supported_ops(&self) -> &'static [&'static str] {
+        &["Resize"]
     }
 
     fn convert(

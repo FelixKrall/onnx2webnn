@@ -117,7 +117,7 @@ def _print_opset_status(opsets: dict[str, int]) -> bool:
     for domain, version in sorted(opsets.items()):
         supported = is_webnn_supported_opset(domain, version)
         status = "ok" if supported else "unsupported"
-        print(f"  opset {domain}={version}: {status} (webnn-graph accepts {WEBNN_MIN_OPSET}-{WEBNN_MAX_OPSET} for ai.onnx)")
+        print(f"  opset {domain}={version}: {status} (onnx2webnn accepts {WEBNN_MIN_OPSET}-{WEBNN_MAX_OPSET} for ai.onnx)")
         if not supported:
             ok = False
     return ok

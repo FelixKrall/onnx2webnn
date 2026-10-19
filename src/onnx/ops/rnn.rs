@@ -23,8 +23,8 @@ use rustnn::DataType;
 pub struct RnnHandler;
 
 impl OpHandler for RnnHandler {
-    fn supports(&self, op_type: &str) -> bool {
-        matches!(op_type, "GRU" | "LSTM" | "RotaryEmbedding")
+    fn supported_ops(&self) -> &'static [&'static str] {
+        &["GRU", "LSTM", "RotaryEmbedding"]
     }
 
     fn convert(

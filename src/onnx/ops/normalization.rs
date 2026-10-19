@@ -28,20 +28,19 @@ use rustnn::DataType;
 pub struct NormalizationHandler;
 
 impl OpHandler for NormalizationHandler {
-    fn supports(&self, op_type: &str) -> bool {
-        matches!(
-            op_type,
-            "BatchNormalization"
-                | "InstanceNormalization"
-                | "LayerNormalization"
-                | "GroupNormalization"
-                | "RMSNormalization"
-                | "SimplifiedLayerNormalization"
-                | "SkipSimplifiedLayerNormalization"
-                | "Softmax"
-                | "LogSoftmax"
-                | "Hardmax"
-        )
+    fn supported_ops(&self) -> &'static [&'static str] {
+        &[
+            "BatchNormalization",
+            "InstanceNormalization",
+            "LayerNormalization",
+            "GroupNormalization",
+            "RMSNormalization",
+            "SimplifiedLayerNormalization",
+            "SkipSimplifiedLayerNormalization",
+            "Softmax",
+            "LogSoftmax",
+            "Hardmax",
+        ]
     }
 
     fn convert(

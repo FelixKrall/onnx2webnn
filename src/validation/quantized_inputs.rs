@@ -17,6 +17,13 @@ fn invalid(name: &str, reason: impl std::fmt::Display) -> OnnxError {
     ))
 }
 
+fn fallback(name: &str, reason: &str) -> Result<Option<TensorData>, OnnxError> {
+    eprintln!(
+        "warning: cannot synthesize scale-aware input {name}: {reason}; using deterministic feed"
+    );
+    Ok(None)
+}
+
 /// Return a feed only for a single direct Q/DQ consumer with constant scalar parameters.
 pub(super) fn quantized_input_data(
     model: &ModelProto,
@@ -39,7 +46,7 @@ pub(super) fn quantized_input_data(
         }
         if node.input.first().is_some_and(|input| input == name) && quantizer {
             if boundary.replace(node).is_some() {
-                return Err(invalid(name, "multiple quantization boundaries"));
+                return fallback(name, "multiple quantization boundaries");
             }
         } else if node.input.iter().any(|input| input == name) {
             other_use = true;
@@ -49,7 +56,7 @@ pub(super) fn quantized_input_data(
         return Ok(None);
     };
     if other_use {
-        return Err(invalid(name, "both quantized and other consumers"));
+        return fallback(name, "both quantized and other consumers");
     }
     let scale_name = node
         .input
@@ -97,10 +104,10 @@ pub(super) fn quantized_input_data(
             .iter()
             .any(|attr| attr.name == "output_dtype" && attr.i != 0)
         {
-            return Err(invalid(
+            return fallback(
                 name,
-                "explicit output_dtype requires supplied inputs",
-            ));
+                "explicit output_dtype is not handled by the feed generator",
+            );
         }
         zero_point
             .as_ref()
@@ -109,7 +116,7 @@ pub(super) fn quantized_input_data(
     let (min, max) = match quant_dtype {
         x if x == TensorProto_DataType::Uint8 as i32 => (0i16, 255i16),
         x if x == TensorProto_DataType::Int8 as i32 => (-128i16, 127i16),
-        _ => return Err(invalid(name, "only int8/uint8 boundaries are supported")),
+        _ => return fallback(name, "only int8/uint8 scale-aware feeds are supported"),
     };
     let zero = match zero_point {
         Some(value) if value.data_type == quant_dtype && value.bytes.len() == 1 => {
@@ -215,6 +222,21 @@ fn scalar_initializer(
         x if x == TensorProto_DataType::Float as i32 => 4,
         x if x == TensorProto_DataType::Float16 as i32 => 2,
         x if x == TensorProto_DataType::Int8 as i32 || x == TensorProto_DataType::Uint8 as i32 => 1,
+        x if x == TensorProto_DataType::Int16 as i32
+            || x == TensorProto_DataType::Uint16 as i32 =>
+        {
+            2
+        }
+        x if x == TensorProto_DataType::Int32 as i32
+            || x == TensorProto_DataType::Uint32 as i32 =>
+        {
+            4
+        }
+        x if x == TensorProto_DataType::Int64 as i32
+            || x == TensorProto_DataType::Uint64 as i32 =>
+        {
+            8
+        }
         _ => {
             return Err(invalid(
                 input_name,
@@ -353,6 +375,17 @@ mod tests {
         assert_eq!(values[8], 0.0);
         assert_eq!(values[16], 2.0);
         assert_eq!(values.iter().filter(|&&value| value == 0.0).count(), 1);
+        let Some(TensorData::Float32(repeated)) = quantized_input_data(
+            &fixture,
+            Path::new("unused.onnx"),
+            "x",
+            TensorProto_DataType::Float as i32,
+            17,
+        )
+        .unwrap() else {
+            panic!("expected repeatable scale-aware input");
+        };
+        assert_eq!(values, repeated);
     }
 
     #[test]
@@ -378,6 +411,35 @@ mod tests {
         .expect("zero scale is invalid")
         .to_string()
         .contains("finite and positive"));
+    }
+
+    #[test]
+    fn unsupported_integer_zero_point_uses_generic_feed() {
+        let fixture = model(
+            13,
+            graph(
+                "unsupported_quantized_feed",
+                vec![f32_input("x", &[3])],
+                vec![i32_output("y", &[3])],
+                vec![node(
+                    "QuantizeLinear",
+                    "q",
+                    &["x", "scale", "zp"],
+                    &["y"],
+                    &[],
+                )],
+                vec![f32_init("scale", &[], &[0.25]), i32_init("zp", &[], &[0])],
+            ),
+        );
+        assert!(quantized_input_data(
+            &fixture,
+            Path::new("unused.onnx"),
+            "x",
+            TensorProto_DataType::Float as i32,
+            3,
+        )
+        .unwrap()
+        .is_none());
     }
 
     #[test]

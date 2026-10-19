@@ -236,15 +236,6 @@ pub enum LoweringPath {
     PatternOnly,
 }
 
-impl LoweringPath {
-    fn label(&self) -> &'static str {
-        match self {
-            Self::Direct => "fully",
-            Self::Decomposed | Self::Folded | Self::PatternOnly => "partially",
-        }
-    }
-}
-
 pub fn catalog_path(op_type: &str) -> Option<LoweringPath> {
     match capability(op_type)?.status {
         "Direct WebNN" => Some(LoweringPath::Direct),
@@ -263,6 +254,32 @@ struct NodeAssessment {
     path: Option<LoweringPath>,
     reason: Option<String>,
     attempted: bool,
+}
+
+#[derive(Clone, Copy, Ord, PartialOrd, Eq, PartialEq)]
+#[repr(usize)]
+enum SupportClass {
+    Fully,
+    Partially,
+    Unsupported,
+}
+
+impl SupportClass {
+    fn from_path(path: Option<LoweringPath>) -> Self {
+        match path {
+            Some(LoweringPath::Direct) => Self::Fully,
+            Some(_) => Self::Partially,
+            None => Self::Unsupported,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Fully => "fully",
+            Self::Partially => "partially",
+            Self::Unsupported => "unsupported",
+        }
+    }
 }
 
 struct ReportSummary {
@@ -318,7 +335,7 @@ impl OperatorReport {
 
     fn summary(&self) -> ReportSummary {
         let mut counts = [0usize; 3];
-        let mut unique: BTreeMap<&str, usize> = BTreeMap::new();
+        let mut unique: BTreeMap<&str, SupportClass> = BTreeMap::new();
         let mut perf_limited_nodes = 0;
         let mut perf_limited_names = BTreeSet::new();
         for node in &self.nodes {
@@ -328,20 +345,12 @@ impl OperatorReport {
                 perf_limited_nodes += 1;
                 perf_limited_names.insert((node.domain.clone(), node.op.clone()));
             }
-            let class = match &node.path {
-                Some(path) if path.label() == "fully" => 0,
-                Some(_) => 1,
-                None if capability(&node.op).is_some_and(|entry| entry.status == "Unsupported") => {
-                    2
-                }
-                None if node.reason.is_some() => 2,
-                None => match catalog_path(&node.op) {
-                    Some(LoweringPath::Direct) => 0,
-                    Some(_) => 1,
-                    None => 2,
-                },
+            let class = match (node.path, node.reason.as_ref()) {
+                (Some(path), _) => SupportClass::from_path(Some(path)),
+                (None, Some(_)) => SupportClass::Unsupported,
+                (None, None) => SupportClass::from_path(catalog_path(&node.op)),
             };
-            counts[class] += 1;
+            counts[class as usize] += 1;
             unique
                 .entry(&node.op)
                 .and_modify(|previous| *previous = (*previous).max(class))
@@ -349,7 +358,7 @@ impl OperatorReport {
         }
         let mut unique_counts = [0usize; 3];
         for class in unique.values() {
-            unique_counts[*class] += 1;
+            unique_counts[*class as usize] += 1;
         }
         ReportSummary {
             counts,
@@ -377,7 +386,13 @@ impl OperatorReport {
         println!("Operator support (post-fold/specialization):");
         println!("  Legend: fully = direct; partially = decomposed/folded/pattern-only; unsupported = unavailable/rejected.");
         println!("  Performance-limited = known major runtime cost; a subset of partially supported, not a failure.");
-        for (index, label) in ["fully", "partially", "unsupported"].iter().enumerate() {
+        for class in [
+            SupportClass::Fully,
+            SupportClass::Partially,
+            SupportClass::Unsupported,
+        ] {
+            let index = class as usize;
+            let label = class.label();
             println!(
                 "  {label}: {} nodes ({:.1}%), {} unique ops ({:.1}%)",
                 summary.counts[index],
@@ -390,7 +405,7 @@ impl OperatorReport {
             "  performance-limited (within partially): {} nodes ({:.1}% of total, {:.1}% of partial), {} unique ops",
             summary.perf_limited_nodes,
             percent(summary.perf_limited_nodes, total),
-            percent(summary.perf_limited_nodes, summary.counts[1]),
+            percent(summary.perf_limited_nodes, summary.counts[SupportClass::Partially as usize]),
             summary.perf_limited_names.len()
         );
         for (domain, op) in &summary.perf_limited_names {
@@ -519,6 +534,20 @@ mod tests {
         );
         assert_eq!(OPERATOR_CAPABILITIES.len(), 206);
         let registry = OpRegistry::new();
+        let mut handled = BTreeSet::new();
+        for handler in &registry.handlers {
+            assert!(
+                !handler.supported_ops().is_empty(),
+                "registered handler has no operator list"
+            );
+            for &name in handler.supported_ops() {
+                assert!(handled.insert(name), "multiple handlers claim {name}");
+                assert!(
+                    capability(name).is_some_and(|entry| entry.status != "Unsupported"),
+                    "handler supports {name} without a supported catalog entry"
+                );
+            }
+        }
         for entry in OPERATOR_CAPABILITIES {
             assert!(
                 matches!(

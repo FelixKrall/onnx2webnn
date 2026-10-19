@@ -52,21 +52,20 @@ struct GbqTable<'a> {
 }
 
 impl OpHandler for UtilityHandler {
-    fn supports(&self, op_type: &str) -> bool {
-        matches!(
-            op_type,
-            "Shape"
-                | "OneHot"
-                | "Gather"
-                | "GatherBlockQuantized"
-                | "GatherND"
-                | "GatherElements"
-                | "ReverseSequence"
-                | "Slice"
-                | "ConstantOfShape"
-                | "Range"
-                | "Trilu"
-        )
+    fn supported_ops(&self) -> &'static [&'static str] {
+        &[
+            "Shape",
+            "OneHot",
+            "Gather",
+            "GatherBlockQuantized",
+            "GatherND",
+            "GatherElements",
+            "ReverseSequence",
+            "Slice",
+            "ConstantOfShape",
+            "Range",
+            "Trilu",
+        ]
     }
 
     fn convert(

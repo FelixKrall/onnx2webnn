@@ -139,6 +139,10 @@ jobs:
         if: runner.os == 'Linux'
         run: O2W_CATALOG_BIN=target/release/onnx2webnn python3 scripts/generate_operator_catalog.py --check
 
+      - name: Test Python operator catalog adapter
+        if: runner.os == 'Linux'
+        run: python3 -m unittest discover -s scripts -p 'test_webnn_onnx_ops.py'
+
       # tests/model_skeletons.rs converts the transformers.js exports in
       # tests/models/manifest.json. With CI set it builds weight-stripped
       # skeletons from the Hugging Face Hub with range requests (graph and

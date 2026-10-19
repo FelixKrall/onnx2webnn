@@ -33,51 +33,47 @@ use rustnn::DataType;
 pub struct ActivationHandler;
 
 impl OpHandler for ActivationHandler {
-    fn supports(&self, op_type: &str) -> bool {
-        matches!(
-            op_type,
-            "Relu"
-                | "Gelu"
-                | "Tanh"
-                | "Sigmoid"
-                | "Sqrt"
-                | "Exp"
-                | "Log"
-                | "Abs"
-                | "Neg"
-                | "Erf"
-                | "Cos"
-                | "Sin"
-                | "Identity"
-                // Unary math (no attributes)
-                | "Floor"
-                | "Ceil"
-                | "Sign"
-                | "Tan"
-                | "Reciprocal"
-                | "Round"
-                | "HardSwish"
-                | "Softplus"
-                | "Softsign"
-                // Parametric activations
-                | "Elu"
-                | "LeakyRelu"
-                | "HardSigmoid"
-                | "Clip"
-                | "PRelu"
-                // Decomposed activations
-                | "Swish"
-                | "Celu"
-                | "Selu"
-                | "Mish"
-                | "ThresholdedRelu"
-                | "Sinh"
-                | "Cosh"
-                | "Asinh"
-                | "Acosh"
-                | "Atanh"
-                | "Shrink"
-        )
+    fn supported_ops(&self) -> &'static [&'static str] {
+        &[
+            "Relu",
+            "Gelu",
+            "Tanh",
+            "Sigmoid",
+            "Sqrt",
+            "Exp",
+            "Log",
+            "Abs",
+            "Neg",
+            "Erf",
+            "Cos",
+            "Sin",
+            "Identity",
+            "Floor",
+            "Ceil",
+            "Sign",
+            "Tan",
+            "Reciprocal",
+            "Round",
+            "HardSwish",
+            "Softplus",
+            "Softsign",
+            "Elu",
+            "LeakyRelu",
+            "HardSigmoid",
+            "Clip",
+            "PRelu",
+            "Swish",
+            "Celu",
+            "Selu",
+            "Mish",
+            "ThresholdedRelu",
+            "Sinh",
+            "Cosh",
+            "Asinh",
+            "Acosh",
+            "Atanh",
+            "Shrink",
+        ]
     }
 
     fn convert(

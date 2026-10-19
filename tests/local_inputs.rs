@@ -314,6 +314,8 @@ fn two_local_models_use_supplied_inputs() {
     }
     let output = Command::new(env!("CARGO_BIN_EXE_onnx2webnn"))
         .args(&args)
+        .env("O2W_ONNX_CACHE", dir.path().join("onnx"))
+        .env("O2W_WEBNN_CACHE", dir.path().join("webnn"))
         .output()
         .unwrap();
     assert!(
@@ -353,6 +355,8 @@ fn numerical_disagreement_fails_local_command() {
             "--inputs",
             feeds.to_str().unwrap(),
         ])
+        .env("O2W_ONNX_CACHE", dir.path().join("onnx"))
+        .env("O2W_WEBNN_CACHE", dir.path().join("webnn"))
         .output()
         .unwrap();
     assert!(!output.status.success());

@@ -51,8 +51,8 @@ use rustnn::DataType;
 pub struct ConvHandler;
 
 impl OpHandler for ConvHandler {
-    fn supports(&self, op_type: &str) -> bool {
-        matches!(op_type, "Conv" | "ConvTranspose" | "ConvInteger")
+    fn supported_ops(&self) -> &'static [&'static str] {
+        &["Conv", "ConvTranspose", "ConvInteger"]
     }
 
     fn convert(

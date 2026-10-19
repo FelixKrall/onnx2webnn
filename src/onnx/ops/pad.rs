@@ -33,8 +33,8 @@ use std::collections::HashMap;
 pub struct PadHandler;
 
 impl OpHandler for PadHandler {
-    fn supports(&self, op_type: &str) -> bool {
-        op_type == "Pad"
+    fn supported_ops(&self) -> &'static [&'static str] {
+        &["Pad"]
     }
 
     fn convert(

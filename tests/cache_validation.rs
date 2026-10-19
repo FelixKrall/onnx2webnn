@@ -80,6 +80,42 @@ fn scale_aware_quantized_feed_reloads_and_matches_native_ort() {
 }
 
 #[test]
+fn ambiguous_quantized_feed_falls_back_with_a_warning() {
+    let dir = tempfile::tempdir().expect("temporary cache");
+    let source = dir.path().join("shared-input.onnx");
+    let fixture = model(
+        13,
+        graph(
+            "shared_input",
+            vec![f32_input("x", &[17])],
+            vec![f32_output("y", &[17]), i64_output("shape", &[1])],
+            vec![
+                node("QuantizeLinear", "q", &["x", "scale", "zp"], &["q"], &[]),
+                node("DequantizeLinear", "dq", &["q", "scale", "zp"], &["y"], &[]),
+                node("Shape", "shape", &["x"], &["shape"], &[]),
+            ],
+            vec![f32_init("scale", &[], &[0.25]), u8_init("zp", &[], &[128])],
+        ),
+    );
+    fs::write(&source, fixture.encode_to_vec()).expect("write ONNX fixture");
+    let result = Command::new(env!("CARGO_BIN_EXE_onnx2webnn"))
+        .args(["convert", "--input"])
+        .arg(&source)
+        .arg("--validate")
+        .env("O2W_ONNX_CACHE", dir.path().join("onnx"))
+        .env("O2W_WEBNN_CACHE", dir.path().join("webnn"))
+        .output()
+        .expect("run converter");
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(String::from_utf8_lossy(&result.stderr)
+        .contains("both quantized and other consumers; using deterministic feed"));
+}
+
+#[test]
 fn uncompiled_export_reloads_and_matches_native_ort() {
     let dir = tempfile::tempdir().expect("temporary export directory");
     let source = dir.path().join("source.onnx");
@@ -207,6 +243,84 @@ fn cli_validate_exports_and_builds_without_an_export_flag() {
     );
     assert!(String::from_utf8_lossy(&result.stdout).contains("deterministic validation passed"));
     assert_eq!(fs::read_dir(dir.path().join("webnn")).unwrap().count(), 2);
+}
+
+#[test]
+fn cli_build_and_export_skips_numerical_validation() {
+    let dir = tempfile::tempdir().expect("temporary cache");
+    let source = dir.path().join("source.onnx");
+    let fixture = model(
+        17,
+        graph(
+            "identity",
+            vec![f32_input("x", &[1])],
+            vec![f32_output("y", &[1])],
+            vec![node("Identity", "identity", &["x"], &["y"], &[])],
+            vec![],
+        ),
+    );
+    fs::write(&source, fixture.encode_to_vec()).expect("write fixture");
+    let result = Command::new(env!("CARGO_BIN_EXE_onnx2webnn"))
+        .args(["convert", "--input"])
+        .arg(&source)
+        .arg("--build-and-export")
+        .env("O2W_ONNX_CACHE", dir.path().join("onnx"))
+        .env("O2W_WEBNN_CACHE", dir.path().join("webnn"))
+        .output()
+        .expect("run converter");
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("graph build succeeded"), "{stdout}");
+    assert!(!stdout.contains("validation passed"), "{stdout}");
+    assert_eq!(fs::read_dir(dir.path().join("webnn")).unwrap().count(), 2);
+}
+
+#[test]
+fn cli_pinned_input_is_used_for_fresh_and_cached_validation() {
+    let dir = tempfile::tempdir().expect("temporary cache");
+    let source = dir.path().join("pinned.onnx");
+    let fixture = model(
+        17,
+        graph(
+            "pinned",
+            vec![f32_input("x", &[1]), i64_input("flag", &[1])],
+            vec![f32_output("y", &[1])],
+            vec![
+                node(
+                    "Cast",
+                    "cast_flag",
+                    &["flag"],
+                    &["flag_float"],
+                    &[attr_int(
+                        "to",
+                        onnx2webnn::protos::onnx::TensorProto_DataType::Float as i64,
+                    )],
+                ),
+                node("Add", "add", &["x", "flag_float"], &["y"], &[]),
+            ],
+            vec![],
+        ),
+    );
+    fs::write(&source, fixture.encode_to_vec()).expect("write fixture");
+    for mode in ["--validate", "--validate-cached"] {
+        let result = Command::new(env!("CARGO_BIN_EXE_onnx2webnn"))
+            .args(["convert", "--input"])
+            .arg(&source)
+            .args(["--pin-input", "flag=1", mode])
+            .env("O2W_ONNX_CACHE", dir.path().join("onnx"))
+            .env("O2W_WEBNN_CACHE", dir.path().join("webnn"))
+            .output()
+            .expect("run converter");
+        assert!(
+            result.status.success(),
+            "{mode}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
 }
 
 #[test]

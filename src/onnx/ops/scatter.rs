@@ -31,8 +31,8 @@ impl ScatterHandler {
 }
 
 impl OpHandler for ScatterHandler {
-    fn supports(&self, op_type: &str) -> bool {
-        matches!(op_type, "ScatterND" | "ScatterElements")
+    fn supported_ops(&self) -> &'static [&'static str] {
+        &["ScatterND", "ScatterElements"]
     }
 
     fn convert<'a>(

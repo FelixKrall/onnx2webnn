@@ -30,11 +30,14 @@ use rustnn::operator_options::MLPool2dOptions;
 pub struct PoolHandler;
 
 impl OpHandler for PoolHandler {
-    fn supports(&self, op_type: &str) -> bool {
-        matches!(
-            op_type,
-            "MaxPool" | "AveragePool" | "LpPool" | "GlobalMaxPool" | "GlobalAveragePool"
-        )
+    fn supported_ops(&self) -> &'static [&'static str] {
+        &[
+            "MaxPool",
+            "AveragePool",
+            "LpPool",
+            "GlobalMaxPool",
+            "GlobalAveragePool",
+        ]
     }
 
     fn convert(

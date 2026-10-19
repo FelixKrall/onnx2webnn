@@ -1,7 +1,7 @@
 # onnx2webnn
 
-> **Last edited:** `2026-10-16T18:04:29Z`<br>
-> **Checkout:** `validation-enhancements` at `afb644f`
+> **Last edited:** `2026-10-19T16:59:19Z`<br>
+> **Checkout:** `validation-enhancements` at `f0fb3dd`
 >
 > **Freshness:** Use this document only when this provenance is recent relative to the relevant
 > code and commits; otherwise verify the implementation, tests, and Git history before relying
@@ -10,8 +10,9 @@
 onnx2webnn lowers ONNX opsets **1–26** through [RustNN](../rustnn)'s WebNN builder. `convert`
 builds the graph with CPU ORT by default; `--backend coreml` or `--backend trtx` selects an
 available alternative.
-`--no-backend-graph-build` exports a reloadable `.webnn`/Safetensors pair without building it;
-`--validate` reloads that pair and compares execution with native CPU ORT. See
+`--no-backend-graph-build` exports a reloadable `.webnn`/Safetensors pair without building it.
+`--build-and-export` saves the pair and builds it without numerical comparison; `--validate`
+also reloads the pair and compares execution with native CPU ORT. These modes are exclusive. See
 [operator coverage](docs/operator-conversion-status.md) and
 [model results](docs/model-validation-status-triage.md).
 
@@ -59,7 +60,7 @@ Without CLI overrides, `model.dims.json` can supply dimension bindings. Download
 standard Hugging Face cache; WebNN exports overwrite the OS cache's `onnx2webnn/webnn` directory.
 Set `O2W_CACHE_DIR`, `O2W_ONNX_CACHE`, or `O2W_WEBNN_CACHE` to override locations.
 `--validate-cached` reloads existing artifacts without reconversion and is exclusive with
-`--validate` and `--no-backend-graph-build`.
+`--validate`, `--build-and-export`, and `--no-backend-graph-build`.
 
 WebNN lacks fused `MatMulNBits`; conversion dequantizes packed q4/q8 weights before floating-point
 matmul. ORT `accuracy_level=4` can instead use Int8 activations, so numerical parity is not assured.
@@ -90,6 +91,7 @@ dynamic shapes or further specialization.
 | `--debug` | Verbose conversion logging (global) |
 | `--backend ort\|coreml\|trtx` | Select the graph-build/validation backend (global; default `ort`); CoreML and TensorRT require their Cargo features |
 | `--no-backend-graph-build` | Overwrite cache-backed `.onnx`, `.webnn`, and Safetensors artifacts without compiling a backend graph |
+| `--build-and-export` | Overwrite cache artifacts and compile the selected backend graph without numerical comparison |
 | `--validate` | Overwrite and reload the cache artifacts, then numerically compare against native ORT |
 | `--validate-cached` | Validate existing cache artifacts without reconverting |
 
@@ -108,6 +110,9 @@ cargo run -- validate-files --model first.onnx --inputs first.safetensors \
 Operator statistics are code-backed; “fully supported” is a lowering classification, not measured
 hardware parity. Performance-limited paths remain functional. Cargo features make CoreML/TensorRT
 available, while `--backend` selects one; native comparison remains CPU ORT.
+Deterministic fallback feeds are reproducible. Scale-aware quantization feeds use fixed model
+scale/zero-point values; ambiguous quantization patterns warn and use the generic deterministic
+feed, while malformed quantization parameters still fail validation.
 
 ## Model sweep
 

@@ -57,8 +57,10 @@ fn supported_direct_node_reports_full_coverage() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("fully: 1 nodes (100.0%)"), "{stdout}");
-    assert!(stdout.contains("0 unique ops (0.0%)") || stdout.contains("1 unique ops (100.0%)"));
+    assert!(
+        stdout.contains("fully: 1 nodes (100.0%), 1 unique ops (100.0%)"),
+        "{stdout}"
+    );
 }
 
 #[test]

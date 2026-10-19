@@ -85,15 +85,19 @@ enum Command {
         experimental_dynamic_inputs: bool,
 
         /// Export the graph and ONNX model to the OS cache without a backend build
-        #[arg(long, conflicts_with = "validate")]
+        #[arg(long, conflicts_with_all = ["validate", "build_and_export"])]
         no_backend_graph_build: bool,
+
+        /// Export cache artifacts and build the selected backend graph without validation
+        #[arg(long, conflicts_with_all = ["validate", "validate_cached"])]
+        build_and_export: bool,
 
         /// Export, reload, dispatch deterministic inputs, and compare with native ORT
         #[arg(long)]
         validate: bool,
 
         /// Validate existing cache artifacts only; does not read or convert the source ONNX.
-        #[arg(long, conflicts_with_all = ["validate", "no_backend_graph_build"])]
+        #[arg(long, conflicts_with_all = ["validate", "no_backend_graph_build", "build_and_export"])]
         validate_cached: bool,
     },
 
@@ -249,6 +253,7 @@ fn main() -> anyhow::Result<()> {
             optimize,
             experimental_dynamic_inputs,
             no_backend_graph_build,
+            build_and_export,
             validate,
             validate_cached,
         } => {
@@ -329,7 +334,7 @@ fn main() -> anyhow::Result<()> {
                     &onnx_cache,
                     &webnn_cache,
                     &validation_overrides,
-                    &HashMap::new(),
+                    &pinned_inputs,
                     backend,
                 )
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -340,7 +345,7 @@ fn main() -> anyhow::Result<()> {
                 return Ok(());
             }
 
-            let cache_paths = (no_backend_graph_build || validate)
+            let cache_paths = (no_backend_graph_build || build_and_export || validate)
                 .then(|| cache_paths(input_path))
                 .transpose()?;
             if let Some((onnx_cache, _)) = &cache_paths {
@@ -352,7 +357,7 @@ fn main() -> anyhow::Result<()> {
                 free_dim_overrides,
                 optimize,
                 experimental_dynamic_inputs,
-                pinned_inputs,
+                pinned_inputs: pinned_inputs.clone(),
                 zero_fill_missing_external_data: allow_missing_external_data,
                 output_path: cache_paths.as_ref().map(|(_, webnn)| webnn.clone()),
             };
@@ -380,7 +385,7 @@ fn main() -> anyhow::Result<()> {
                         onnx_cache,
                         webnn_cache,
                         &validation_overrides,
-                        &HashMap::new(),
+                        &pinned_inputs,
                         backend,
                     )
                     .map_err(|e| anyhow::anyhow!("{e}"))?;

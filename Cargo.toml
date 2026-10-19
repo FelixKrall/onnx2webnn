@@ -40,3 +40,6 @@ huggingface-hub = { git = "https://github.com/huggingface/huggingface_hub_rust.g
 [dev-dependencies]
 pretty_env_logger = "0.5"
 tempfile = "3.8"
+
+[patch.crates-io]
+webnn-onnx-utils = { git = "https://github.com/rustnn/webnn-onnx-utils", branch = "main" }

@@ -38,21 +38,20 @@ use rustnn::operator_options::{
 pub struct ReshapeHandler;
 
 impl OpHandler for ReshapeHandler {
-    fn supports(&self, op_type: &str) -> bool {
-        matches!(
-            op_type,
-            "Reshape"
-                | "Transpose"
-                | "Concat"
-                | "Split"
-                | "SplitToSequence"
-                | "SequenceAt"
-                | "Unsqueeze"
-                | "Squeeze"
-                | "Tile"
-                | "Expand"
-                | "Flatten"
-        )
+    fn supported_ops(&self) -> &'static [&'static str] {
+        &[
+            "Reshape",
+            "Transpose",
+            "Concat",
+            "Split",
+            "SplitToSequence",
+            "SequenceAt",
+            "Unsqueeze",
+            "Squeeze",
+            "Tile",
+            "Expand",
+            "Flatten",
+        ]
     }
 
     fn convert<'a>(

@@ -152,8 +152,15 @@ pub struct ConversionResult {
 
 /// Trait for handling ONNX operator conversion
 pub trait OpHandler {
-    /// Check if this handler supports the given operator type
-    fn supports(&self, op_type: &str) -> bool;
+    /// Operator names handled by this converter, when available as a static list.
+    fn supported_ops(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    /// Check if this handler supports the given operator type.
+    fn supports(&self, op_type: &str) -> bool {
+        self.supported_ops().contains(&op_type)
+    }
 
     /// Lower an ONNX node onto [`OnnxBuilder`].
     fn convert<'a>(
@@ -167,6 +174,7 @@ pub trait OpHandler {
 /// Registry for operator handlers
 pub struct OpRegistry {
     handlers: Vec<Box<dyn OpHandler>>,
+    handler_by_op: HashMap<&'static str, usize>,
 }
 
 impl OpRegistry {
@@ -195,10 +203,19 @@ impl OpRegistry {
             Box::new(RnnHandler),
         ];
 
-        OpRegistry { handlers }
+        let mut handler_by_op = HashMap::new();
+        for (index, handler) in handlers.iter().enumerate() {
+            for &op in handler.supported_ops() {
+                handler_by_op.entry(op).or_insert(index);
+            }
+        }
+        OpRegistry {
+            handlers,
+            handler_by_op,
+        }
     }
 
-    /// Returns true if any registered handler claims support for `op_type`.
+    /// Returns true if the catalog and a registered handler both support `op_type`.
     ///
     /// This mirrors the dispatch in [`convert_node`], but performs no conversion. It lets the
     /// converter fail fast with a clean [`OnnxError::UnsupportedOps`] before graph setup (input and
@@ -210,10 +227,10 @@ impl OpRegistry {
     /// `convert_with_builder` stays aligned with [`convert_node`].
     pub fn is_supported(&self, op_type: &str) -> bool {
         catalog::capability(op_type).is_some_and(|entry| entry.status != "Unsupported")
-            && self.handlers.iter().any(|h| h.supports(op_type))
+            && self.handler_by_op.contains_key(op_type)
     }
 
-    /// Collect every graph node whose `op_type` has no registered handler.
+    /// Collect graph nodes without both a supported catalog entry and a handler.
     pub fn collect_unsupported_nodes(&self, nodes: &[NodeProto]) -> Vec<UnsupportedOpEntry> {
         nodes
             .iter()
@@ -264,11 +281,8 @@ impl OpRegistry {
             return Ok(ConversionResult::default());
         }
 
-        for handler in &self.handlers {
-            if handler.supports(op_type) {
-                let result = handler.convert(node, context, builder)?;
-                return Ok(result);
-            }
+        if let Some(&index) = self.handler_by_op.get(op_type) {
+            return self.handlers[index].convert(node, context, builder);
         }
 
         // No handler found
