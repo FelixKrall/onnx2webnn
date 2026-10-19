@@ -22,7 +22,7 @@ fn build_fixture_opset_9() -> ModelProto {
                 "test_Slice",
                 &["data"],
                 &["output"],
-                &[attr_ints("starts", &[0, 0]), attr_ints("ends", &[1, 2])],
+                &[attr_ints("ends", &[1, 2]), attr_ints("starts", &[0, 0])],
             )],
             vec![],
         ),

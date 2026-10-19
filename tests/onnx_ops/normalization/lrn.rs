@@ -23,10 +23,10 @@ fn build_fixture_opset_13() -> ModelProto {
                 &["X"],
                 &["Y"],
                 &[
-                    attr_float("bias", 1.0),
-                    attr_int("size", 1),
                     attr_float("alpha", 9.999999747378752e-05),
                     attr_float("beta", 0.75),
+                    attr_float("bias", 1.0),
+                    attr_int("size", 1),
                 ],
             )],
             vec![],

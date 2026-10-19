@@ -23,9 +23,9 @@ fn build_fixture_opset_9() -> ModelProto {
                 &["data"],
                 &["output"],
                 &[
+                    attr_string("mode", "constant"),
                     attr_ints("pads", &[0, 0, 0, 0, 0, 0, 0, 0]),
                     attr_float("value", 0.0),
-                    attr_string("mode", "constant"),
                 ],
             )],
             vec![],
