@@ -1294,6 +1294,7 @@ Provide --override-dim {}=<value> or enable --experimental-dynamic-inputs.",
             if !outputs.is_empty()
                 && !has_dynamic_output_metadata
                 && onnx_node.op_type.as_str() != "Cast"
+                && onnx_node.op_type.as_str() != "Constant"
                 && onnx_node.op_type.as_str() != "ConstantOfShape"
                 && !is_element_wise_logical_onnx_op(onnx_node.op_type.as_str())
                 && outputs

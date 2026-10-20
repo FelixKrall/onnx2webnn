@@ -3,7 +3,8 @@
 use crate::onnx::builder::tensor_proto_to_bytes;
 use crate::onnx::convert::OnnxError;
 use crate::protos::onnx::{
-    tensor_proto::DataLocation, ModelProto, NodeProto, TensorProto, TensorProto_DataType,
+    tensor_proto::DataLocation, GraphProto, ModelProto, NodeProto, TensorProto,
+    TensorProto_DataType,
 };
 use half::f16;
 use rustnn::TensorData;
@@ -63,7 +64,9 @@ pub(super) fn quantized_input_data(
         .get(1)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| invalid(name, "missing scale"))?;
-    let scale = scalar_initializer(graph.initializer.as_slice(), model_path, scale_name, name)?;
+    let Some(scale) = scalar_parameter(graph, model_path, scale_name, name)? else {
+        return fallback(name, "scale is not a fixed scalar initializer or Constant");
+    };
     let scale = match scale.data_type {
         x if x == TensorProto_DataType::Float as i32 => f32::from_le_bytes(
             scale
@@ -86,12 +89,17 @@ pub(super) fn quantized_input_data(
         return Err(invalid(name, "scale must be finite and positive"));
     }
 
-    let zero_point = node
-        .input
-        .get(2)
-        .filter(|value| !value.is_empty())
-        .map(|value| scalar_initializer(graph.initializer.as_slice(), model_path, value, name))
-        .transpose()?;
+    let zero_point = if let Some(value) = node.input.get(2).filter(|value| !value.is_empty()) {
+        let Some(zero_point) = scalar_parameter(graph, model_path, value, name)? else {
+            return fallback(
+                name,
+                "zero point is not a fixed scalar initializer or Constant",
+            );
+        };
+        Some(zero_point)
+    } else {
+        None
+    };
     let quant_dtype = if node.op_type == "DequantizeLinear" {
         elem_type
     } else {
@@ -199,24 +207,56 @@ struct ScalarInitializer {
     bytes: Vec<u8>,
 }
 
-fn scalar_initializer(
-    tensors: &[TensorProto],
+/// Resolve a scalar parameter without evaluating arbitrary ONNX subgraphs.
+fn scalar_parameter(
+    graph: &GraphProto,
     model_path: &Path,
     tensor_name: &str,
     input_name: &str,
-) -> Result<ScalarInitializer, OnnxError> {
-    let mut matches = tensors.iter().filter(|tensor| tensor.name == tensor_name);
-    let tensor = matches.next().ok_or_else(|| {
-        invalid(
-            input_name,
-            format!("{tensor_name} is not a fixed initializer"),
-        )
-    })?;
-    if matches.next().is_some() || !tensor.dims.iter().all(|&dim| dim == 1) {
+) -> Result<Option<ScalarInitializer>, OnnxError> {
+    let mut initializers = graph
+        .initializer
+        .iter()
+        .filter(|tensor| tensor.name == tensor_name);
+    let initializer = initializers.next();
+    let mut producers = graph
+        .node
+        .iter()
+        .filter(|node| node.output.iter().any(|name| name == tensor_name));
+    let producer = producers.next();
+    if initializers.next().is_some()
+        || producers.next().is_some()
+        || (initializer.is_some() && producer.is_some())
+    {
         return Err(invalid(
             input_name,
-            format!("{tensor_name} is not a unique scalar"),
+            format!("{tensor_name} has multiple definitions"),
         ));
+    }
+    let tensor = match (initializer, producer) {
+        (Some(tensor), None) => Some(tensor),
+        (None, Some(node))
+            if (node.domain.is_empty() || node.domain == "ai.onnx")
+                && node.op_type == "Constant" =>
+        {
+            node.attribute
+                .iter()
+                .find(|attr| attr.name == "value")
+                .and_then(|attr| attr.t.as_ref())
+        }
+        _ => None,
+    };
+    let Some(tensor) = tensor else {
+        return Ok(None);
+    };
+    if tensor.dims.iter().any(|&dim| dim <= 0) {
+        return Err(invalid(
+            input_name,
+            format!("{tensor_name} has invalid dimensions"),
+        ));
+    }
+    if !tensor.dims.iter().all(|&dim| dim == 1) {
+        return Ok(None);
     }
     let width = match tensor.data_type {
         x if x == TensorProto_DataType::Float as i32 => 4,
@@ -255,10 +295,10 @@ fn scalar_initializer(
             format!("{tensor_name} has {} bytes, expected {width}", bytes.len()),
         ));
     }
-    Ok(ScalarInitializer {
+    Ok(Some(ScalarInitializer {
         data_type: tensor.data_type,
         bytes,
-    })
+    }))
 }
 
 fn read_external_scalar(
@@ -389,6 +429,49 @@ mod tests {
     }
 
     #[test]
+    fn constant_node_scale_and_zero_point_use_scale_aware_feed() {
+        let fixture = model(
+            13,
+            graph(
+                "constant_quantization_parameters",
+                vec![f32_input("x", &[17])],
+                vec![u8_output("y", &[17])],
+                vec![
+                    node(
+                        "Constant",
+                        "scale",
+                        &[],
+                        &["scale"],
+                        &[attr_tensor("value", f32_init("", &[], &[0.25]))],
+                    ),
+                    node(
+                        "Constant",
+                        "zp",
+                        &[],
+                        &["zp"],
+                        &[attr_tensor("value", u8_init("", &[], &[128]))],
+                    ),
+                    node("QuantizeLinear", "q", &["x", "scale", "zp"], &["y"], &[]),
+                ],
+                vec![],
+            ),
+        );
+        let Some(TensorData::Float32(values)) = quantized_input_data(
+            &fixture,
+            Path::new("unused.onnx"),
+            "x",
+            TensorProto_DataType::Float as i32,
+            17,
+        )
+        .unwrap() else {
+            panic!("expected scale-aware input from Constant parameters");
+        };
+        assert_eq!(values[0], -2.0);
+        assert_eq!(values[8], 0.0);
+        assert_eq!(values[16], 2.0);
+    }
+
+    #[test]
     fn invalid_scale_is_not_used_as_a_fallback_range() {
         let fixture = model(
             13,
@@ -411,6 +494,66 @@ mod tests {
         .expect("zero scale is invalid")
         .to_string()
         .contains("finite and positive"));
+    }
+
+    #[test]
+    fn invalid_constant_node_scale_fails() {
+        let fixture = model(
+            13,
+            graph(
+                "invalid_constant_scale",
+                vec![f32_input("x", &[3])],
+                vec![u8_output("y", &[3])],
+                vec![
+                    node(
+                        "Constant",
+                        "scale",
+                        &[],
+                        &["scale"],
+                        &[attr_tensor("value", f32_init("", &[], &[0.0]))],
+                    ),
+                    node("QuantizeLinear", "q", &["x", "scale"], &["y"], &[]),
+                ],
+                vec![],
+            ),
+        );
+        assert!(quantized_input_data(
+            &fixture,
+            Path::new("unused.onnx"),
+            "x",
+            TensorProto_DataType::Float as i32,
+            3,
+        )
+        .err()
+        .expect("zero Constant scale is invalid")
+        .to_string()
+        .contains("finite and positive"));
+    }
+
+    #[test]
+    fn computed_scale_uses_generic_feed() {
+        let fixture = model(
+            13,
+            graph(
+                "computed_scale",
+                vec![f32_input("x", &[3])],
+                vec![u8_output("y", &[3])],
+                vec![
+                    node("Identity", "scale_identity", &["source"], &["scale"], &[]),
+                    node("QuantizeLinear", "q", &["x", "scale"], &["y"], &[]),
+                ],
+                vec![f32_init("source", &[], &[0.25])],
+            ),
+        );
+        assert!(quantized_input_data(
+            &fixture,
+            Path::new("unused.onnx"),
+            "x",
+            TensorProto_DataType::Float as i32,
+            3,
+        )
+        .unwrap()
+        .is_none());
     }
 
     #[test]
@@ -512,7 +655,7 @@ mod tests {
     }
 
     #[test]
-    fn ambiguous_or_feedable_quantization_parameters_require_explicit_inputs() {
+    fn unsupported_parameter_sources_fall_back_but_feedable_parameters_require_inputs() {
         let mut fixture = model(
             13,
             graph(
@@ -523,19 +666,26 @@ mod tests {
                 vec![],
             ),
         );
-        for name in ["x", "scale"] {
-            assert!(quantized_input_data(
-                &fixture,
-                Path::new("unused.onnx"),
-                name,
-                TensorProto_DataType::Float as i32,
-                4,
-            )
-            .err()
-            .expect("quantization parameter needs supplied inputs")
-            .to_string()
-            .contains("supply explicit inputs"));
-        }
+        assert!(quantized_input_data(
+            &fixture,
+            Path::new("unused.onnx"),
+            "x",
+            TensorProto_DataType::Float as i32,
+            4
+        )
+        .unwrap()
+        .is_none());
+        assert!(quantized_input_data(
+            &fixture,
+            Path::new("unused.onnx"),
+            "scale",
+            TensorProto_DataType::Float as i32,
+            4
+        )
+        .err()
+        .expect("feedable quantization parameter needs supplied input")
+        .to_string()
+        .contains("supply explicit inputs"));
         fixture
             .graph
             .as_mut()
@@ -549,10 +699,8 @@ mod tests {
             TensorProto_DataType::Float as i32,
             4,
         )
-        .err()
-        .expect("per-axis scale needs supplied inputs")
-        .to_string()
-        .contains("not a unique scalar"));
+        .unwrap()
+        .is_none());
     }
 
     #[test]

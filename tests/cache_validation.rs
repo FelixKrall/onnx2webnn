@@ -80,6 +80,54 @@ fn scale_aware_quantized_feed_reloads_and_matches_native_ort() {
 }
 
 #[test]
+fn constant_node_quantization_parameters_validate_after_reload() {
+    let dir = tempfile::tempdir().expect("temporary cache");
+    let source = dir.path().join("constant-quantized.onnx");
+    let fixture = model(
+        13,
+        graph(
+            "constant_quantization_parameters",
+            vec![f32_input("x", &[17])],
+            vec![f32_output("y", &[17])],
+            vec![
+                node(
+                    "Constant",
+                    "scale",
+                    &[],
+                    &["scale"],
+                    &[attr_tensor("value", f32_init("", &[], &[0.25]))],
+                ),
+                node(
+                    "Constant",
+                    "zp",
+                    &[],
+                    &["zp"],
+                    &[attr_tensor("value", u8_init("", &[], &[128]))],
+                ),
+                node("QuantizeLinear", "q", &["x", "scale", "zp"], &["q"], &[]),
+                node("DequantizeLinear", "dq", &["q", "scale", "zp"], &["y"], &[]),
+            ],
+            vec![],
+        ),
+    );
+    fs::write(&source, fixture.encode_to_vec()).expect("write ONNX fixture");
+    let result = Command::new(env!("CARGO_BIN_EXE_onnx2webnn"))
+        .args(["convert", "--input"])
+        .arg(&source)
+        .arg("--validate")
+        .env("O2W_ONNX_CACHE", dir.path().join("onnx"))
+        .env("O2W_WEBNN_CACHE", dir.path().join("webnn"))
+        .output()
+        .expect("run converter");
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&result.stderr).contains("using deterministic feed"));
+}
+
+#[test]
 fn ambiguous_quantized_feed_falls_back_with_a_warning() {
     let dir = tempfile::tempdir().expect("temporary cache");
     let source = dir.path().join("shared-input.onnx");
