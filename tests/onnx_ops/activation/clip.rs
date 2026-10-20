@@ -23,8 +23,8 @@ fn build_fixture_opset_9() -> ModelProto {
                 &["input"],
                 &["output"],
                 &[
-                    attr_float("min", -3.4028234663852886e+38),
                     attr_float("max", 3.4028234663852886e+38),
+                    attr_float("min", -3.4028234663852886e+38),
                 ],
             )],
             vec![],

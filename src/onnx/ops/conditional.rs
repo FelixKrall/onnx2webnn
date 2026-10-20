@@ -15,8 +15,8 @@ use crate::protos::onnx::NodeProto;
 pub struct ConditionalHandler;
 
 impl OpHandler for ConditionalHandler {
-    fn supports(&self, op_type: &str) -> bool {
-        matches!(op_type, "Where")
+    fn supported_ops(&self) -> &'static [&'static str] {
+        &["Where"]
     }
 
     fn convert(

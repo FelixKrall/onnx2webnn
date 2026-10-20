@@ -33,8 +33,8 @@ use rustnn::operator_options::{MLReduceOptions, MLTransposeOptions};
 pub struct EinsumHandler;
 
 impl OpHandler for EinsumHandler {
-    fn supports(&self, op_type: &str) -> bool {
-        op_type == "Einsum"
+    fn supported_ops(&self) -> &'static [&'static str] {
+        &["Einsum"]
     }
 
     fn convert(

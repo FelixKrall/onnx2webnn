@@ -43,8 +43,8 @@ use rustnn::DataType;
 pub struct MoeHandler;
 
 impl OpHandler for MoeHandler {
-    fn supports(&self, op_type: &str) -> bool {
-        matches!(op_type, "MoE" | "QMoE")
+    fn supported_ops(&self) -> &'static [&'static str] {
+        &["MoE", "QMoE"]
     }
 
     fn convert(

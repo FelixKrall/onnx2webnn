@@ -51,8 +51,8 @@ use rustnn::DataType;
 pub struct ConvHandler;
 
 impl OpHandler for ConvHandler {
-    fn supports(&self, op_type: &str) -> bool {
-        matches!(op_type, "Conv" | "ConvTranspose" | "ConvInteger")
+    fn supported_ops(&self) -> &'static [&'static str] {
+        &["Conv", "ConvTranspose", "ConvInteger"]
     }
 
     fn convert(
@@ -68,12 +68,17 @@ impl OpHandler for ConvHandler {
             "unnamed".to_string()
         };
 
-        match op_type {
+        let mut result = match op_type {
             "Conv" => self.convert_conv(node, &node_name, context, b, false),
             "ConvTranspose" => self.convert_conv(node, &node_name, context, b, true),
             "ConvInteger" => self.convert_conv_integer(node, &node_name, context, b),
             _ => Err(OnnxError::unsupported_op(op_type.to_string(), node_name)),
+        }?;
+        if context.input_rank(node.input.first().map(String::as_str).unwrap_or_default()) == Some(3)
+        {
+            result.lowering = Some(crate::onnx::ops::catalog::LoweringPath::Decomposed);
         }
+        Ok(result)
     }
 }
 

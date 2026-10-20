@@ -23,8 +23,8 @@ fn build_fixture_opset_9() -> ModelProto {
                 &["X"],
                 &["Y"],
                 &[
-                    attr_ints("kernel_shape", &[2, 2]),
                     attr_string("auto_pad", "NOTSET"),
+                    attr_ints("kernel_shape", &[2, 2]),
                     attr_int("storage_order", 0),
                 ],
             )],
@@ -53,9 +53,9 @@ fn build_fixture_opset_22() -> ModelProto {
                 &["X"],
                 &["Y"],
                 &[
-                    attr_ints("kernel_shape", &[2, 2]),
                     attr_string("auto_pad", "NOTSET"),
                     attr_int("ceil_mode", 0),
+                    attr_ints("kernel_shape", &[2, 2]),
                     attr_int("storage_order", 0),
                 ],
             )],
@@ -84,9 +84,9 @@ fn build_fixture_opset_22_float16() -> ModelProto {
                 &["X"],
                 &["Y"],
                 &[
-                    attr_ints("kernel_shape", &[2, 2]),
                     attr_string("auto_pad", "NOTSET"),
                     attr_int("ceil_mode", 0),
+                    attr_ints("kernel_shape", &[2, 2]),
                     attr_int("storage_order", 0),
                 ],
             )],
@@ -119,9 +119,9 @@ fn build_fixture_opset_22_bfloat16() -> ModelProto {
                 &["X"],
                 &["Y"],
                 &[
-                    attr_ints("kernel_shape", &[2, 2]),
                     attr_string("auto_pad", "NOTSET"),
                     attr_int("ceil_mode", 0),
+                    attr_ints("kernel_shape", &[2, 2]),
                     attr_int("storage_order", 0),
                 ],
             )],

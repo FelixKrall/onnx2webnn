@@ -93,11 +93,14 @@ pub(crate) fn decode_float_tensor_as_f32(
 pub struct MatMulHandler;
 
 impl OpHandler for MatMulHandler {
-    fn supports(&self, op_type: &str) -> bool {
-        matches!(
-            op_type,
-            "MatMul" | "Gemm" | "MatMulNBits" | "MatMulInteger" | "MatMulBnb4"
-        )
+    fn supported_ops(&self) -> &'static [&'static str] {
+        &[
+            "MatMul",
+            "Gemm",
+            "MatMulNBits",
+            "MatMulInteger",
+            "MatMulBnb4",
+        ]
     }
 
     fn convert(

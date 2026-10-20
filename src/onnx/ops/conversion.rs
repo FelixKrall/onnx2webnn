@@ -23,16 +23,15 @@ use serde_json::json;
 pub struct ConversionHandler;
 
 impl OpHandler for ConversionHandler {
-    fn supports(&self, op_type: &str) -> bool {
-        matches!(
-            op_type,
-            "Cast"
-                | "Constant"
-                | "QuantizeLinear"
-                | "DequantizeLinear"
-                | "DynamicQuantizeLinear"
-                | "CastLike"
-        )
+    fn supported_ops(&self) -> &'static [&'static str] {
+        &[
+            "Cast",
+            "Constant",
+            "QuantizeLinear",
+            "DequantizeLinear",
+            "DynamicQuantizeLinear",
+            "CastLike",
+        ]
     }
 
     fn convert(
@@ -127,7 +126,10 @@ impl ConversionHandler {
             } else {
                 b.record_operand(&[&output_name], out);
             }
-            return Ok(ConversionResult::default());
+            return Ok(ConversionResult {
+                lowering: Some(crate::onnx::ops::catalog::LoweringPath::Decomposed),
+                ..ConversionResult::default()
+            });
         }
         // float64 is lowered to float32 (WebNN has no float64).
         let mut to_type = requested_type;

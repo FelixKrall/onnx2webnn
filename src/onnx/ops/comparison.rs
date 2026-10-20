@@ -36,21 +36,20 @@ fn is_binary_logical(op_type: &str) -> bool {
 }
 
 impl OpHandler for ComparisonHandler {
-    fn supports(&self, op_type: &str) -> bool {
-        matches!(
-            op_type,
-            "Greater"
-                | "Less"
-                | "Equal"
-                | "GreaterOrEqual"
-                | "LessOrEqual"
-                | "Not"
-                | "And"
-                | "Or"
-                | "Xor"
-                | "IsNaN"
-                | "IsInf"
-        )
+    fn supported_ops(&self) -> &'static [&'static str] {
+        &[
+            "Greater",
+            "Less",
+            "Equal",
+            "GreaterOrEqual",
+            "LessOrEqual",
+            "Not",
+            "And",
+            "Or",
+            "Xor",
+            "IsNaN",
+            "IsInf",
+        ]
     }
 
     fn convert(

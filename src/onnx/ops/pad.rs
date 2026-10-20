@@ -26,6 +26,7 @@ use crate::onnx::builder_helpers::{ml_number_from_tensor, output_label, record_n
 use crate::onnx::convert::OnnxError;
 use crate::onnx::ops::{ConversionContext, ConversionResult, OpHandler};
 use crate::protos::onnx::{NodeProto, TensorProto, TensorProto_DataType};
+use rustnn::operator_enums::MLPaddingMode;
 use rustnn::operator_options::MLPadOptions;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -33,8 +34,8 @@ use std::collections::HashMap;
 pub struct PadHandler;
 
 impl OpHandler for PadHandler {
-    fn supports(&self, op_type: &str) -> bool {
-        op_type == "Pad"
+    fn supported_ops(&self) -> &'static [&'static str] {
+        &["Pad"]
     }
 
     fn convert(
@@ -82,7 +83,7 @@ impl PadHandler {
             mode,
             value: None,
         };
-        if pad_opts.mode == "constant" {
+        if pad_opts.mode == MLPaddingMode::Constant {
             if let Some(value) = read_constant_value(node, context, &inputs[0])? {
                 pad_opts.value = Some(value);
             }
@@ -184,18 +185,18 @@ pub fn infer_pad_output_shape(input_shape: &[i64], pads: &[i64]) -> Option<Vec<i
     Some(out)
 }
 
-fn read_mode(node: &NodeProto) -> String {
+fn read_mode(node: &NodeProto) -> MLPaddingMode {
     for attr in node.attribute.as_slice() {
         if attr.name.as_str() == "mode" && !attr.s.is_empty() {
             let mode = String::from_utf8_lossy(&attr.s).to_ascii_lowercase();
             return match mode.as_str() {
-                "reflect" => "reflection".to_string(),
-                "edge" => "edge".to_string(),
-                _ => "constant".to_string(),
+                "reflect" => MLPaddingMode::Reflection,
+                "edge" => MLPaddingMode::Edge,
+                _ => MLPaddingMode::Constant,
             };
         }
     }
-    "constant".to_string()
+    MLPaddingMode::Constant
 }
 
 fn read_constant_value(

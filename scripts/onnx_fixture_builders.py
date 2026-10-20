@@ -484,7 +484,8 @@ def _build_attrs(
 ) -> list:
     skip_cast_attrs = {"saturate", "round_mode"}
     attrs = []
-    for name, attr in schema.attributes.items():
+    for name in sorted(schema.attributes):
+        attr = schema.attributes[name]
         if op_type == "Cast" and name in skip_cast_attrs:
             continue
         if op_type == "Split" and name == "axis":

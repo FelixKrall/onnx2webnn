@@ -36,8 +36,8 @@ use rustnn::DataType;
 pub struct AttentionHandler;
 
 impl OpHandler for AttentionHandler {
-    fn supports(&self, op_type: &str) -> bool {
-        op_type == "GroupQueryAttention"
+    fn supported_ops(&self) -> &'static [&'static str] {
+        &["GroupQueryAttention"]
     }
 
     fn convert(

@@ -20,8 +20,8 @@ use std::collections::HashMap;
 pub struct MiscHandler;
 
 impl OpHandler for MiscHandler {
-    fn supports(&self, op_type: &str) -> bool {
-        matches!(op_type, "Mean" | "Sum" | "CumProd")
+    fn supported_ops(&self) -> &'static [&'static str] {
+        &["Mean", "Sum", "CumProd"]
     }
 
     fn convert(

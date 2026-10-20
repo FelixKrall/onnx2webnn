@@ -19,8 +19,8 @@ use rustnn::operator_options::MLResample2dOptions;
 pub struct ResizeHandler;
 
 impl OpHandler for ResizeHandler {
-    fn supports(&self, op_type: &str) -> bool {
-        op_type == "Resize"
+    fn supported_ops(&self) -> &'static [&'static str] {
+        &["Resize"]
     }
 
     fn convert(
@@ -45,7 +45,9 @@ impl OpHandler for ResizeHandler {
         let mode = parse_resize_mode(node)?;
         // 3-D input (N, C, W): resample along W through a 4-D (N, C, 1, W) view.
         if let Some(shape) = lookup_shape(&inputs[0], context).filter(|s| s.len() == 3) {
-            return convert_1d_resize(node, &node_name, context, b, &mode, &shape);
+            let mut result = convert_1d_resize(node, &node_name, context, b, &mode, &shape)?;
+            result.lowering = Some(crate::onnx::ops::catalog::LoweringPath::Decomposed);
+            return Ok(result);
         }
         let axes: [usize; 2] = [2, 3];
         let (spatial_scales, spatial_sizes) =

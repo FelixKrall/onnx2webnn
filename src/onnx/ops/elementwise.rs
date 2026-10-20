@@ -27,11 +27,8 @@ use rustnn::mlcontext::MLOperand;
 pub struct ElementwiseHandler;
 
 impl OpHandler for ElementwiseHandler {
-    fn supports(&self, op_type: &str) -> bool {
-        matches!(
-            op_type,
-            "Add" | "Sub" | "Mul" | "Div" | "Pow" | "Min" | "Max" | "Mod"
-        )
+    fn supported_ops(&self) -> &'static [&'static str] {
+        &["Add", "Sub", "Mul", "Div", "Pow", "Min", "Max", "Mod"]
     }
 
     fn convert(

@@ -20,23 +20,22 @@ use std::collections::HashMap;
 pub struct ReductionHandler;
 
 impl OpHandler for ReductionHandler {
-    fn supports(&self, op_type: &str) -> bool {
-        matches!(
-            op_type,
-            "ReduceMean"
-                | "ReduceSum"
-                | "ReduceMax"
-                | "ReduceMin"
-                | "ReduceL1"
-                | "ReduceL2"
-                | "ReduceLogSum"
-                | "ReduceLogSumExp"
-                | "ReduceProd"
-                | "ReduceSumSquare"
-                | "ArgMin"
-                | "ArgMax"
-                | "CumSum"
-        )
+    fn supported_ops(&self) -> &'static [&'static str] {
+        &[
+            "ReduceMean",
+            "ReduceSum",
+            "ReduceMax",
+            "ReduceMin",
+            "ReduceL1",
+            "ReduceL2",
+            "ReduceLogSum",
+            "ReduceLogSumExp",
+            "ReduceProd",
+            "ReduceSumSquare",
+            "ArgMin",
+            "ArgMax",
+            "CumSum",
+        ]
     }
 
     fn convert(
