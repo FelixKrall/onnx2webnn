@@ -25,6 +25,7 @@ use crate::onnx::builder_helpers::{i64_slice_to_mldim, output_label, record_node
 use crate::onnx::convert::{sanitize_identifier, OnnxError};
 use crate::onnx::ops::{ConversionContext, ConversionResult, OpHandler};
 use crate::protos::onnx::NodeProto;
+use rustnn::operator_enums::MLPaddingMode;
 use rustnn::operator_options::MLPool2dOptions;
 
 pub struct PoolHandler;
@@ -307,7 +308,7 @@ fn zero_pad_spatial(
             vec![0, 0, pads[1], pads[3]],
             rustnn::operator_options::MLPadOptions {
                 label: label.to_string(),
-                mode: "constant".to_string(),
+                mode: MLPaddingMode::Constant,
                 value: None,
             },
         )
