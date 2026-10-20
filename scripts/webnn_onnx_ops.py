@@ -14,13 +14,5 @@ WEBNN_SUPPORTED_ONNX_OPS: frozenset[str] = frozenset(
     and entry["status"] not in {"Unsupported", "Pattern-only"}
 )
 
-WEBNN_MIN_OPSET: int = 1
-WEBNN_MAX_OPSET: int = 26
-
-
 def is_webnn_supported_op(domain: str, op_type: str) -> bool:
     return domain == "ai.onnx" and op_type in WEBNN_SUPPORTED_ONNX_OPS
-
-
-def is_webnn_supported_opset(domain: str, version: int) -> bool:
-    return domain != "ai.onnx" or WEBNN_MIN_OPSET <= version <= WEBNN_MAX_OPSET
