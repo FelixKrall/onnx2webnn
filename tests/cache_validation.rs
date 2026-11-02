@@ -80,6 +80,36 @@ fn scale_aware_quantized_feed_reloads_and_matches_native_ort() {
 }
 
 #[test]
+fn rank_four_quantized_feed_with_scalar_parameters_round_trips() {
+    let dir = tempfile::tempdir().expect("temporary cache");
+    let source = dir.path().join("quantized.onnx");
+    let webnn = dir.path().join("quantized.webnn");
+    let fixture = model(
+        25,
+        graph(
+            "rank_four_quantized_feed",
+            vec![f32_input("x", &[1, 3, 2, 4])],
+            vec![f32_output("y", &[1, 3, 2, 4])],
+            vec![
+                node("QuantizeLinear", "q", &["x", "scale", "zp"], &["q"], &[]),
+                node("DequantizeLinear", "dq", &["q", "scale", "zp"], &["y"], &[]),
+            ],
+            vec![f32_init("scale", &[], &[0.25]), u8_init("zp", &[], &[128])],
+        ),
+    );
+    fs::write(&source, fixture.encode_to_vec()).expect("write fixture");
+    convert_onnx(
+        &source,
+        ConvertOptions {
+            output_path: Some(webnn.clone()),
+            ..ConvertOptions::default()
+        },
+    )
+    .expect("convert scalar quantization parameters for rank-four input");
+    validate_cached_model(&source, &webnn).expect("compare rank-four quantization after reload");
+}
+
+#[test]
 fn constant_node_quantization_parameters_validate_after_reload() {
     let dir = tempfile::tempdir().expect("temporary cache");
     let source = dir.path().join("constant-quantized.onnx");

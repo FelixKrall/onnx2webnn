@@ -1,6 +1,6 @@
 # onnx2webnn
 
-onnx2webnn lowers ONNX opsets **1–26** through [RustNN](../rustnn)'s WebNN builder. `convert`
+onnx2webnn lowers ONNX opsets **1–26** through [RustNN](https://github.com/rustnn/rustnn)'s WebNN builder. `convert`
 builds the graph with CPU ORT by default; `--backend coreml` or `--backend trtx` selects an
 available alternative.
 `--no-backend-graph-build` exports a reloadable `.webnn`/Safetensors pair without building it.
@@ -15,9 +15,9 @@ also reloads the pair and compares execution with native CPU ORT. These modes ar
 
 - A stable Rust toolchain.
 - `protoc` (Debian/Ubuntu: `protobuf-compiler`; macOS: Homebrew `protobuf`).
-- A sibling `../rustnn` checkout, as required by `Cargo.toml`.
-- ONNX Runtime 1.27+ for ORT graph builds and validation. Export-only conversion does not load it.
-  RustNN can download the pinned version:
+- Cargo downloads the tested RustNN revision pinned in `Cargo.toml`.
+- ONNX Runtime 1.29+ for ORT graph builds and validation. Export-only conversion does not load it.
+  An optional sibling RustNN checkout can download the runtime:
 
 ```powershell
 make -C ../rustnn onnxruntime-download
@@ -33,6 +33,12 @@ cargo build --release
 ```
 
 The `Makefile` also provides `build`, `test`, `fmt`, and `check` targets.
+
+Update the RustNN revision and `Cargo.lock` together after testing compatibility. The weekly
+[compatibility workflow](.github/workflows/rustnn-compatibility.yml) also checks compilation
+against RustNN `main` on Linux and macOS; it is diagnostic and can be run manually.
+For local RustNN development, override the Git dependency with
+`cargo --config 'patch."https://github.com/rustnn/rustnn".rustnn.path="../rustnn"' check`.
 
 ## Convert
 
