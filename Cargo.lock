@@ -2929,7 +2929,7 @@ dependencies = [
 [[package]]
 name = "rustnn"
 version = "0.6.0"
-source = "git+https://github.com/rustnn/rustnn?rev=baad08a79431d979ce683fc165aba3b0c978c75a#baad08a79431d979ce683fc165aba3b0c978c75a"
+source = "git+https://github.com/rustnn/rustnn?branch=main#baad08a79431d979ce683fc165aba3b0c978c75a"
 dependencies = [
  "base64 0.23.1",
  "block",

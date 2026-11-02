@@ -15,7 +15,7 @@ also reloads the pair and compares execution with native CPU ORT. These modes ar
 
 - A stable Rust toolchain.
 - `protoc` (Debian/Ubuntu: `protobuf-compiler`; macOS: Homebrew `protobuf`).
-- Cargo downloads the tested RustNN revision pinned in `Cargo.toml`.
+- Cargo downloads the tested RustNN revision recorded in `Cargo.lock`; `Cargo.toml` tracks `main`.
 - ONNX Runtime 1.29+ for ORT graph builds and validation. Export-only conversion does not load it.
   An optional sibling RustNN checkout can download the runtime:
 
@@ -27,14 +27,15 @@ Set `ORT_DYLIB_PATH` to the downloaded shared library before ORT use; see
 [CI setup](.github/workflows/ci.yml) for platform paths.
 
 ```powershell
-cargo build
+cargo build --locked
 # or
-cargo build --release
+cargo build --release --locked
 ```
 
 The `Makefile` also provides `build`, `test`, `fmt`, and `check` targets.
 
-Update the RustNN revision and `Cargo.lock` together after testing compatibility. The weekly
+Run `cargo update -p rustnn` to advance RustNN, test compatibility, and commit the updated
+`Cargo.lock`. The weekly
 [compatibility workflow](.github/workflows/rustnn-compatibility.yml) also checks compilation
 against RustNN `main` on Linux and macOS; it is diagnostic and can be run manually.
 For local RustNN development, override the Git dependency with
