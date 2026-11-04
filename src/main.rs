@@ -16,8 +16,10 @@
  * limitations under the License.
  */
 
+use anyhow::Context;
 use clap::{Args, Parser, Subcommand};
 use rustnn::mlcontext::Backend;
+use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -68,10 +70,6 @@ enum Command {
         /// Output .webnn file or extensionless directory (created as needed)
         #[arg(long, short)]
         output: Option<PathBuf>,
-
-        /// JSON file with dimension overrides (freeDimensionOverrides object)
-        #[arg(long = "override-dims-file")]
-        override_dims_file: Option<PathBuf>,
 
         /// Zero-fill external tensors whose data file is missing (weight-stripped
         /// skeleton models; graph structure only)
@@ -132,12 +130,31 @@ struct ModelArgs {
     /// Complete SafeTensors execution inputs, paired by position with each --model
     #[arg(long = "input", short = 'i')]
     inputs: Vec<PathBuf>,
-    /// Symbolic dimension binding shared by every model, NAME=VALUE (repeatable)
+    /// Symbolic dimension binding for a single model, NAME=VALUE (repeatable)
     #[arg(long = "override-dim")]
     override_dims: Vec<String>,
-    /// Freeze a graph input in every model, NAME=VALUE (repeatable)
+    /// Freeze a graph input for a single model, NAME=VALUE (repeatable)
     #[arg(long = "pin-input")]
     pin_inputs: Vec<String>,
+    /// JSON array of per-model dimension overrides and input pins
+    #[arg(long = "override-dims-pininput-file")]
+    settings_file: Option<PathBuf>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelConfig {
+    model: PathBuf,
+    #[serde(default)]
+    override_dims: HashMap<String, u32>,
+    #[serde(default)]
+    pin_inputs: HashMap<String, serde_json::Value>,
+}
+
+#[derive(Clone, Default)]
+struct ModelSettings {
+    overrides: HashMap<String, u32>,
+    pins: HashMap<String, i64>,
 }
 
 fn parse_overrides(specs: Vec<String>) -> anyhow::Result<HashMap<String, u32>> {
@@ -276,29 +293,6 @@ fn normalized_output(path: &Path) -> anyhow::Result<PathBuf> {
     Ok(resolved)
 }
 
-fn dimension_overrides(
-    file: Option<&Path>,
-    specs: Vec<String>,
-) -> anyhow::Result<HashMap<String, u32>> {
-    let mut overrides = HashMap::new();
-    if let Some(path) = file {
-        let json: serde_json::Value = serde_json::from_slice(&std::fs::read(path)?)?;
-        let values = json.get("freeDimensionOverrides").unwrap_or(&json).as_object()
-            .ok_or_else(|| anyhow::anyhow!("override-dims-file must be a JSON object (optionally nested under freeDimensionOverrides)"))?;
-        for (name, value) in values {
-            let value = value
-                .as_u64()
-                .and_then(|value| u32::try_from(value).ok())
-                .ok_or_else(|| {
-                    anyhow::anyhow!("override value for '{name}' must be a u32 integer")
-                })?;
-            overrides.insert(name.clone(), value);
-        }
-    }
-    overrides.extend(parse_overrides(specs)?);
-    Ok(overrides)
-}
-
 fn check_input_count(models: &[PathBuf], inputs: &[PathBuf]) -> anyhow::Result<()> {
     anyhow::ensure!(
         inputs.is_empty() || inputs.len() == models.len(),
@@ -307,6 +301,93 @@ fn check_input_count(models: &[PathBuf], inputs: &[PathBuf]) -> anyhow::Result<(
         inputs.len()
     );
     Ok(())
+}
+
+/// Match configuration entries by model path, independently of argument order.
+fn model_settings(
+    models: &[PathBuf],
+    override_dims: Vec<String>,
+    pin_inputs: Vec<String>,
+    settings_file: Option<&Path>,
+) -> anyhow::Result<Vec<ModelSettings>> {
+    let single_options = !override_dims.is_empty() || !pin_inputs.is_empty();
+    anyhow::ensure!(
+        models.len() == 1 || !single_options,
+        "--override-dim and --pin-input require one --model; use --override-dims-pininput-file for multiple models"
+    );
+    let Some(path) = settings_file else {
+        let settings = ModelSettings {
+            overrides: parse_overrides(override_dims)?,
+            pins: parse_pins(pin_inputs)?,
+        };
+        return Ok(vec![settings; models.len()]);
+    };
+    anyhow::ensure!(
+        !single_options,
+        "--override-dims-pininput-file cannot be combined with --override-dim or --pin-input"
+    );
+    let entries: Vec<ModelConfig> = serde_json::from_slice(&std::fs::read(path)?)
+        .with_context(|| format!("invalid model settings file: {}", path.display()))?;
+    let model_paths = models
+        .iter()
+        .map(|model| normalized_output(model))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let mut settings = HashMap::new();
+    for entry in entries {
+        let model = normalized_output(
+            &path
+                .parent()
+                .unwrap_or_else(|| Path::new(""))
+                .join(&entry.model),
+        )?;
+        anyhow::ensure!(
+            model_paths.contains(&model),
+            "settings model was not supplied through --model: {}",
+            model.display()
+        );
+        anyhow::ensure!(
+            !settings.contains_key(&model),
+            "duplicate settings for model: {}",
+            model.display()
+        );
+        anyhow::ensure!(
+            entry
+                .override_dims
+                .keys()
+                .all(|name| !name.trim().is_empty()),
+            "empty dimension name for model: {}",
+            model.display()
+        );
+        anyhow::ensure!(
+            entry.pin_inputs.keys().all(|name| !name.trim().is_empty()),
+            "empty input pin name for model: {}",
+            model.display()
+        );
+        let pins = parse_pins(
+            entry
+                .pin_inputs
+                .into_iter()
+                .map(|(name, value)| format!("{name}={value}"))
+                .collect(),
+        )
+        .with_context(|| format!("invalid input pins for model: {}", model.display()))?;
+        settings.insert(
+            model,
+            ModelSettings {
+                overrides: entry.override_dims,
+                pins,
+            },
+        );
+    }
+    model_paths
+        .iter()
+        .map(|model| {
+            settings
+                .get(model)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("missing settings for model: {}", model.display()))
+        })
+        .collect()
 }
 
 fn validation_backend(backend: Option<Backend>) -> anyhow::Result<Backend> {
@@ -363,9 +444,9 @@ fn main() -> anyhow::Result<()> {
                     inputs,
                     override_dims,
                     pin_inputs,
+                    settings_file,
                 },
             output,
-            override_dims_file,
             allow_missing_external_data,
             optimize,
             experimental_dynamic_inputs,
@@ -377,15 +458,16 @@ fn main() -> anyhow::Result<()> {
             }
             anyhow::ensure!(validate || inputs.is_empty(), "--input requires --validate");
             check_input_count(&models, &inputs)?;
-            let overrides = dimension_overrides(override_dims_file.as_deref(), override_dims)?;
-            let pins = parse_pins(pin_inputs)?;
+            let settings =
+                model_settings(&models, override_dims, pin_inputs, settings_file.as_deref())?;
             let targets = conversion_targets(&models, output.as_deref())?;
             let mut failed = 0;
             for (index, (model, (onnx, graph))) in models.iter().zip(&targets).enumerate() {
+                let ModelSettings { overrides, pins } = &settings[index];
                 let run = || -> anyhow::Result<()> {
                     let (effective, supplied) = if let Some(input) = inputs.get(index) {
                         let (dims, tensors) =
-                            onnx2webnn::load_safetensors_inputs(model, input, &overrides, &pins)?;
+                            onnx2webnn::load_safetensors_inputs(model, input, overrides, pins)?;
                         (dims, Some(tensors))
                     } else {
                         (overrides.clone(), None)
@@ -420,7 +502,7 @@ fn main() -> anyhow::Result<()> {
                             onnx,
                             graph,
                             &effective,
-                            &pins,
+                            pins,
                             supplied,
                             validation_backend(backend)?,
                         )?;
@@ -448,6 +530,7 @@ fn main() -> anyhow::Result<()> {
                     inputs,
                     override_dims,
                     pin_inputs,
+                    settings_file,
                 },
             graphs,
             ..
@@ -458,10 +541,11 @@ fn main() -> anyhow::Result<()> {
                 graphs.is_empty() || graphs.len() == models.len(),
                 "--graph must be omitted or supplied once per --model"
             );
-            let overrides = parse_overrides(override_dims)?;
-            let pins = parse_pins(pin_inputs)?;
+            let settings =
+                model_settings(&models, override_dims, pin_inputs, settings_file.as_deref())?;
             let mut failed = 0;
             for (index, model) in models.iter().enumerate() {
+                let ModelSettings { overrides, pins } = &settings[index];
                 let run = || -> anyhow::Result<onnx2webnn::ValidationSummary> {
                     let graph = match graphs.get(index) {
                         Some(graph) => graph.clone(),
@@ -474,12 +558,12 @@ fn main() -> anyhow::Result<()> {
                     );
                     let (effective, supplied) = if let Some(input) = inputs.get(index) {
                         let (dims, tensors) =
-                            onnx2webnn::load_safetensors_inputs(model, input, &overrides, &pins)?;
+                            onnx2webnn::load_safetensors_inputs(model, input, overrides, pins)?;
                         (dims, Some(tensors))
                     } else {
                         (overrides.clone(), None)
                     };
-                    validate_graph(model, &graph, &effective, &pins, supplied, backend)
+                    validate_graph(model, &graph, &effective, pins, supplied, backend)
                 };
                 match run() {
                     Ok(summary) => println!(

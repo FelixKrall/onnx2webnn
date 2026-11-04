@@ -1,5 +1,5 @@
-> **Last edited:** `2026-11-04T16:35:20Z`<br>
-> **Checkout:** `feat/consolidate-cli` at `0d40df1`
+> **Last edited:** `2026-11-04T18:17:07Z`<br>
+> **Checkout:** `feat/consolidate-cli` at `098e8aa`
 >
 > **Freshness:** Use this document only when this provenance is recent relative to the relevant
 > code and commits; otherwise verify the implementation, tests, and Git history before relying
@@ -91,9 +91,9 @@ dynamic shapes or further specialization.
 | `-i`, `--input PATH` | Optional complete SafeTensors execution inputs, paired with models in argument order; requires `--validate` on `convert` |
 | `-o`, `--output PATH` | Write to a `.webnn` file for one model, or an extensionless directory containing `<model-stem>.webnn`. Multiple models require a directory; colliding outputs are rejected before writes. Omit to use the cache. |
 | `--optimize` | Enable constant folding during conversion (off by default) |
-| `--override-dim NAME=VALUE` | Bind a symbolic dim (repeatable); unnamed zero dims are addressed as `<input>_dim<axis>` |
-| `--override-dims-file PATH` | Conversion-only JSON overrides (`freeDimensionOverrides` or flat object); CLI bindings take precedence |
-| `--pin-input NAME=VALUE` | Freeze a graph input to `true`/`false`/an integer (repeatable) |
+| `--override-dim NAME=VALUE` | Single-model only. Bind a symbolic dim (repeatable); unnamed zero dims are addressed as `<input>_dim<axis>` |
+| `--pin-input NAME=VALUE` | Single-model only. Freeze a graph input to `true`/`false`/an integer (repeatable) |
+| `--override-dims-pininput-file PATH` | JSON array matching each `--model` to its own dimension overrides and input pins; available on `convert` and `validate-cached` |
 | `--allow-missing-external-data` | Zero-fill absent external tensors for structural conversion |
 | `--experimental-dynamic-inputs` | Preserve unresolved symbolic dims as dynamic metadata during conversion |
 | `--debug` | Verbose converter diagnostics (shared across modes); `RUST_LOG` controls environment logging |
@@ -103,8 +103,10 @@ dynamic shapes or further specialization.
 Shared `--backend` and `--debug` options must follow the mode name, for example
 `onnx2webnn convert --backend onnx --model model.onnx`. Options before the mode are rejected.
 
-`convert` accepts multiple `--model` paths. Backend, optimization, dimensions, and pins apply to
-every model. Batch commands continue after individual model failures, print a summary, and exit
+`convert` accepts multiple `--model` paths. Backend and optimization apply to every model.
+With multiple models, `--override-dim` and `--pin-input` are rejected; use
+`--override-dims-pininput-file` for model-specific settings. Batch commands continue after
+individual model failures, print a summary, and exit
 nonzero if any model fails. Conversion always exports; `--backend` additionally builds the graph.
 
 Pair every model with a complete `--input` SafeTensors archive, or omit all input files for
@@ -116,6 +118,37 @@ the source model. Validation requires `--backend` before any model processing or
 cargo run -- convert --model first.onnx --input first.safetensors \
   --model second.onnx --input second.safetensors \
   --output exported --backend onnx --validate
+```
+
+### Per-model dimensions and input pins
+
+Pass `--override-dims-pininput-file settings.json` to configure models independently. The file
+contains an array with exactly one entry per selected model; entries are matched by model path,
+not array order. Relative `model` paths resolve from the JSON file's directory; absolute paths
+are also accepted. Duplicate, missing, and unmatched entries are rejected before processing.
+The file cannot be combined with `--override-dim` or `--pin-input`, even
+for a single model. Omitted `override_dims` and `pin_inputs` fields default to empty maps.
+Dimensions must be `u32` integers; pins accept booleans or signed `i64` integers.
+
+```json
+[
+  {
+    "model": "encoder.onnx",
+    "override_dims": {"batch_size": 1, "sequence_length": 128}
+  },
+  {
+    "model": "decoder.onnx",
+    "override_dims": {"batch_size": 1, "sequence_length": 1},
+    "pin_inputs": {"use_cache_branch": false}
+  }
+]
+```
+
+With `settings.json` and both models in the current directory:
+
+```bash
+cargo run -- convert --model encoder.onnx --model decoder.onnx \
+  --override-dims-pininput-file settings.json --output exported
 ```
 
 ### Validate existing artifacts

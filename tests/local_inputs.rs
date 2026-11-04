@@ -297,19 +297,52 @@ fn two_local_models_use_supplied_inputs() {
         "--backend".to_string(),
         "onnx".to_string(),
     ];
+    let mut settings = Vec::new();
     for index in 0..2 {
         let model_path = dir.path().join(format!("model{index}.onnx"));
         let feeds = dir.path().join(format!("feeds{index}.safetensors"));
-        identity_model(&model_path, TensorProto_DataType::Float as i32, &[1]);
+        let mut fixture = model(
+            17,
+            graph(
+                "configured",
+                vec![f32_input("x", &[1]), i64_input("flag", &[1])],
+                vec![f32_output("y", &[1])],
+                vec![
+                    node("Cast", "cast", &["flag"], &["f"], &[attr_int("to", 1)]),
+                    node("Add", "add", &["x", "f"], &["y"], &[]),
+                ],
+                vec![],
+            ),
+        );
+        let graph = fixture.graph.as_mut().unwrap();
+        for value in graph.input.iter_mut().chain(graph.output.iter_mut()) {
+            if value.name == "flag" {
+                continue;
+            }
+            if let Some(onnx2webnn::protos::onnx::type_proto::Value::TensorType(tensor)) =
+                &mut value.r#type.as_mut().unwrap().value
+            {
+                tensor.shape.as_mut().unwrap().dim[0].value = Some(Value::DimParam("n".into()));
+            }
+        }
+        fs::write(&model_path, fixture.encode_to_vec()).unwrap();
+        let length = index + 1;
         inputs_file(
             &feeds,
             &[(
                 "x",
                 Dtype::F32,
-                vec![1],
-                (index as f32 + 0.25).to_le_bytes().to_vec(),
+                vec![length],
+                (0..length)
+                    .flat_map(|_| (index as f32 + 0.25).to_le_bytes())
+                    .collect(),
             )],
         );
+        settings.push(serde_json::json!({
+            "model": format!("model{index}.onnx"),
+            "override_dims": {"n": length},
+            "pin_inputs": {"flag": index == 1}
+        }));
         args.extend([
             "--model".into(),
             model_path.display().to_string(),
@@ -317,6 +350,13 @@ fn two_local_models_use_supplied_inputs() {
             feeds.display().to_string(),
         ]);
     }
+    settings.reverse();
+    let settings_path = dir.path().join("settings.json");
+    fs::write(&settings_path, serde_json::to_vec(&settings).unwrap()).unwrap();
+    args.extend([
+        "--override-dims-pininput-file".into(),
+        settings_path.display().to_string(),
+    ]);
     let output = Command::new(env!("CARGO_BIN_EXE_onnx2webnn"))
         .args(&args)
         .env("O2W_ONNX_CACHE", dir.path().join("onnx"))
