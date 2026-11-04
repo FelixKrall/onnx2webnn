@@ -1,5 +1,5 @@
-> **Last edited:** `2026-11-04T12:09:38Z`<br>
-> **Checkout:** `feat/consolidate-cli` at `26173d3`
+> **Last edited:** `2026-11-04T16:35:20Z`<br>
+> **Checkout:** `feat/consolidate-cli` at `0d40df1`
 >
 > **Freshness:** Use this document only when this provenance is recent relative to the relevant
 > code and commits; otherwise verify the implementation, tests, and Git history before relying
@@ -96,9 +96,12 @@ dynamic shapes or further specialization.
 | `--pin-input NAME=VALUE` | Freeze a graph input to `true`/`false`/an integer (repeatable) |
 | `--allow-missing-external-data` | Zero-fill absent external tensors for structural conversion |
 | `--experimental-dynamic-inputs` | Preserve unresolved symbolic dims as dynamic metadata during conversion |
-| `--debug` | Verbose converter diagnostics (global); `RUST_LOG` controls environment logging |
+| `--debug` | Verbose converter diagnostics (shared across modes); `RUST_LOG` controls environment logging |
 | `--backend NAME` | Optional graph-build backend; required for every numerical validation. Names: `onnx`, `coreml`, `trtx`, `litert`, `cann`, `burn-cpu`; the runtime must be compiled in and available |
 | `--validate` | On `convert`, export, build, reload, and numerically compare against native CPU ORT |
+
+Shared `--backend` and `--debug` options must follow the mode name, for example
+`onnx2webnn convert --backend onnx --model model.onnx`. Options before the mode are rejected.
 
 `convert` accepts multiple `--model` paths. Backend, optimization, dimensions, and pins apply to
 every model. Batch commands continue after individual model failures, print a summary, and exit

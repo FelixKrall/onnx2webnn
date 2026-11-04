@@ -36,6 +36,12 @@ use onnx2webnn::{
     long_about = None
 )]
 struct Cli {
+    #[command(subcommand)]
+    cmd: Command,
+}
+
+#[derive(Args)]
+struct CommonArgs {
     /// Enable debug output
     #[arg(long, global = true)]
     debug: bool,
@@ -43,17 +49,19 @@ struct Cli {
     /// Execution backend for graph builds; required for validation
     #[arg(long, global = true)]
     backend: Option<Backend>,
-
-    #[command(subcommand)]
-    cmd: Command,
 }
 
 #[derive(Subcommand)]
 enum Command {
     /// Print the code-backed operator catalog as JSON
-    OperatorCatalog,
+    OperatorCatalog {
+        #[command(flatten)]
+        common: CommonArgs,
+    },
     /// Lower ONNX and either build or export the WebNN graph
     Convert {
+        #[command(flatten)]
+        common: CommonArgs,
         #[command(flatten)]
         models: ModelArgs,
 
@@ -85,6 +93,8 @@ enum Command {
 
     /// Numerically validate manifest models against reloaded WebNN artifacts
     ValidateManifest {
+        #[command(flatten)]
+        common: CommonArgs,
         /// Manifest selection: all or match=<text>
         #[arg(long)]
         selection: String,
@@ -104,6 +114,8 @@ enum Command {
 
     /// Validate existing WebNN graphs against ONNX models without conversion
     ValidateCached {
+        #[command(flatten)]
+        common: CommonArgs,
         #[command(flatten)]
         models: ModelArgs,
         /// Existing .webnn file, paired by position with each --model; omit for cache lookup
@@ -325,16 +337,22 @@ fn finish_batch(action: &str, total: usize, failed: usize) -> anyhow::Result<()>
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let backend = cli.backend;
-    if !matches!(cli.cmd, Command::OperatorCatalog) {
+    let common = match &cli.cmd {
+        Command::OperatorCatalog { common }
+        | Command::Convert { common, .. }
+        | Command::ValidateCached { common, .. }
+        | Command::ValidateManifest { common, .. } => common,
+    };
+    let backend = common.backend;
+    if !matches!(cli.cmd, Command::OperatorCatalog { .. }) {
         std::env::set_var("O2W_OPERATOR_REPORT", "1");
     }
-    if cli.debug {
+    if common.debug {
         std::env::set_var("RUST_LOG", "debug");
     }
     pretty_env_logger::init();
     match cli.cmd {
-        Command::OperatorCatalog => println!(
+        Command::OperatorCatalog { .. } => println!(
             "{}",
             serde_json::to_string_pretty(onnx2webnn::onnx::ops::catalog::OPERATOR_CAPABILITIES)?
         ),
@@ -352,6 +370,7 @@ fn main() -> anyhow::Result<()> {
             optimize,
             experimental_dynamic_inputs,
             validate,
+            ..
         } => {
             if validate {
                 validation_backend(backend)?;
@@ -431,6 +450,7 @@ fn main() -> anyhow::Result<()> {
                     pin_inputs,
                 },
             graphs,
+            ..
         } => {
             let backend = validation_backend(backend)?;
             check_input_count(&models, &inputs)?;
@@ -481,6 +501,7 @@ fn main() -> anyhow::Result<()> {
             weights,
             manifest,
             jobs,
+            ..
         } => {
             let backend = validation_backend(backend)?;
             let selection = Selection::parse(&selection).map_err(anyhow::Error::msg)?;
