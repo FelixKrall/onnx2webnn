@@ -1,7 +1,7 @@
 # ONNX → WebNN operator conversion status
 
-> **Last edited:** `2026-10-20T10:04:36Z`<br>
-> **Checkout:** `validation-enhancements` at `59d28c6`
+> **Last edited:** `2026-11-04T12:07:35Z`<br>
+> **Checkout:** `feat/consolidate-cli` at `26173d3`
 >
 > **Freshness:** Use this document only when this provenance is recent relative to the relevant
 > code and commits; otherwise verify the implementation, tests, and Git history before relying
@@ -12,7 +12,7 @@ Tables are generated from [`src/onnx/ops/catalog.rs`](../src/onnx/ops/catalog.rs
 Coverage counts the 198 non-deprecated standard operators in ONNX opset 26. “Supported” means at
 least one form executes; see each row's scope for restrictions.
 
-For one model, `onnx2webnn convert --input model.onnx --no-backend-graph-build` prints operator
+For one model, `onnx2webnn convert --model model.onnx` prints operator
 statistics after folding and specialization, including rejected forms, without building a backend
 graph. The Python operator test generator uses the generated catalog JSON through
 `scripts/webnn_onnx_ops.py`.

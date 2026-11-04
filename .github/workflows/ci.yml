@@ -159,7 +159,7 @@ jobs:
           O2W_ONNX_CACHE: ${{ runner.temp }}/onnx2webnn-ci-models
           O2W_WEBNN_CACHE: ${{ runner.temp }}/onnx2webnn-ci-webnn
         run: |
-          target/release/onnx2webnn --backend ${{ matrix.test_backend }} validate-models \
+          target/release/onnx2webnn --backend ${{ matrix.test_backend }} validate-manifest \
             --manifest tests/models/ci-validation.json \
             --selection all \
             --weights real \

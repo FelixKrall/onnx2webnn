@@ -84,7 +84,7 @@ jobs:
           O2W_WEBNN_CACHE: ${{ runner.temp }}/onnx2webnn-webnn
         run: |
           set +e
-          target/release/onnx2webnn validate-models \
+          target/release/onnx2webnn validate-manifest --backend onnx \
             --manifest tests/models/manifest.json \
             --selection all \
             --weights real \
