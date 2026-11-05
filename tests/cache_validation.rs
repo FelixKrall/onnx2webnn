@@ -145,6 +145,7 @@ fn constant_node_quantization_parameters_validate_after_reload() {
         .args(["convert", "--backend", "onnx", "--model"])
         .arg(&source)
         .arg("--validate")
+        .arg("--no-constant-fold")
         .env("O2W_ONNX_CACHE", dir.path().join("onnx"))
         .env("O2W_WEBNN_CACHE", dir.path().join("webnn"))
         .output()

@@ -1,5 +1,5 @@
-> **Last edited:** `2026-11-04T18:17:07Z`<br>
-> **Checkout:** `feat/consolidate-cli` at `098e8aa`
+> **Last edited:** `2026-11-05T12:45:31Z`<br>
+> **Checkout:** `feat/consolidate-cli` at `e6a02f3`
 >
 > **Freshness:** Use this document only when this provenance is recent relative to the relevant
 > code and commits; otherwise verify the implementation, tests, and Git history before relying
@@ -50,7 +50,7 @@ For local RustNN development, override the Git dependency with
 ## Convert
 
 ```powershell
-cargo run -- convert --model model.onnx --optimize --override-dim batch_size=1
+cargo run -- convert --model model.onnx --override-dim batch_size=1
 ```
 
 Dynamic ONNX inputs (unresolved symbolic dims kept as WebNN dynamic metadata):
@@ -73,7 +73,7 @@ Merged decoders (optimum's `decoder_model_merged*.onnx`) branch at runtime on `u
 WebNN has no runtime `If`, so pin the input and convert each branch separately:
 
 ```powershell
-cargo run -- convert --model decoder_model_merged.onnx --optimize `
+cargo run -- convert --model decoder_model_merged.onnx `
   --pin-input use_cache_branch=false `
   --override-dim batch_size=1 --override-dim decoder_sequence_length=4 `
   --override-dim past_decoder_sequence_length=0 ...
@@ -90,7 +90,7 @@ dynamic shapes or further specialization.
 | `--model PATH` | ONNX model path (required, repeatable) |
 | `-i`, `--input PATH` | Optional complete SafeTensors execution inputs, paired with models in argument order; requires `--validate` on `convert` |
 | `-o`, `--output PATH` | Write to a `.webnn` file for one model, or an extensionless directory containing `<model-stem>.webnn`. Multiple models require a directory; colliding outputs are rejected before writes. Omit to use the cache. |
-| `--optimize` | Enable constant folding during conversion (off by default) |
+| `--no-constant-fold` | Disable optional constant-folding passes on `convert` and `validate-manifest` (enabled by default); required simplifications remain |
 | `--override-dim NAME=VALUE` | Single-model only. Bind a symbolic dim (repeatable); unnamed zero dims are addressed as `<input>_dim<axis>` |
 | `--pin-input NAME=VALUE` | Single-model only. Freeze a graph input to `true`/`false`/an integer (repeatable) |
 | `--override-dims-pininput-file PATH` | JSON array matching each `--model` to its own dimension overrides and input pins; available on `convert` and `validate-cached` |
@@ -103,7 +103,7 @@ dynamic shapes or further specialization.
 Shared `--backend` and `--debug` options must follow the mode name, for example
 `onnx2webnn convert --backend onnx --model model.onnx`. Options before the mode are rejected.
 
-`convert` accepts multiple `--model` paths. Backend and optimization apply to every model.
+`convert` accepts multiple `--model` paths. Backend and the constant-folding setting apply to every model.
 With multiple models, `--override-dim` and `--pin-input` are rejected; use
 `--override-dims-pininput-file` for model-specific settings. Batch commands continue after
 individual model failures, print a summary, and exit

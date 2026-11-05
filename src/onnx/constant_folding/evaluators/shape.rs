@@ -69,8 +69,9 @@ impl EvaluatorTrait for ShapeEvaluator {
             ))
         })?;
 
-        // Extract shape as int64 vector
-        let shape_values: Vec<i64> = input_tensor.shape.clone();
+        let (start, end) =
+            crate::onnx::shape_inference::shape_attr_range(node, input_tensor.shape.len());
+        let shape_values = input_tensor.shape[start..end].to_vec();
 
         // Create output tensor (1D int64 array)
         let output = ConstantTensor {
@@ -86,7 +87,7 @@ impl EvaluatorTrait for ShapeEvaluator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protos::onnx::TensorProto;
+    use crate::protos::onnx::{AttributeProto, TensorProto};
     use std::collections::HashMap;
 
     #[test]
@@ -111,7 +112,7 @@ mod tests {
         let evaluator = ShapeEvaluator;
 
         // Create a Shape node
-        let node = NodeProto {
+        let mut node = NodeProto {
             op_type: "Shape".to_string(),
             input: vec!["test_input".to_string()],
             output: vec!["test_output".to_string()],
@@ -134,5 +135,48 @@ mod tests {
         } else {
             panic!("Expected Int64 data");
         }
+
+        for (start, end, expected) in [
+            (Some(1), Some(2), vec![3]),
+            (Some(1), None, vec![3, 4]),
+            (None, Some(-1), vec![2, 3]),
+            (Some(-2), Some(-1), vec![3]),
+            (Some(-100), Some(100), vec![2, 3, 4]),
+            (Some(3), None, vec![]),
+            (Some(100), None, vec![]),
+            (Some(2), Some(1), vec![]),
+            (None, Some(-100), vec![]),
+            (Some(i64::MIN), Some(i64::MAX), vec![2, 3, 4]),
+        ] {
+            node.attribute = [("start", start), ("end", end)]
+                .into_iter()
+                .filter_map(|(name, value)| {
+                    value.map(|i| AttributeProto {
+                        name: name.into(),
+                        i,
+                        ..Default::default()
+                    })
+                })
+                .collect();
+            let result = evaluator.evaluate(&node, &ctx).unwrap();
+            assert_eq!(result[0].shape, vec![expected.len() as i64]);
+            assert_eq!(result[0].data_type, TensorProto_DataType::Int64 as i32);
+            let TensorData::Int64(values) = &result[0].data else {
+                panic!("Expected Int64 data");
+            };
+            assert_eq!(values, &expected, "start={start:?}, end={end:?}");
+        }
+
+        let scalar = TensorProto {
+            name: "test_input".into(),
+            data_type: TensorProto_DataType::Float as i32,
+            raw_data: vec![0; 4],
+            ..Default::default()
+        };
+        let scalar_map = HashMap::from([("test_input".into(), &scalar)]);
+        let scalar_ctx = ConstantFoldingContext::new(&scalar_map).unwrap();
+        let result = evaluator.evaluate(&node, &scalar_ctx).unwrap();
+        assert_eq!(result[0].shape, vec![0]);
+        assert!(matches!(&result[0].data, TensorData::Int64(values) if values.is_empty()));
     }
 }

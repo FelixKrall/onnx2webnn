@@ -51,6 +51,8 @@ pub struct RunOptions {
     pub jobs: usize,
     pub webnn_cache: PathBuf,
     pub backend: Backend,
+    /// Enable optional constant folding while converting manifest models.
+    pub optimize: bool,
 }
 
 impl RunOptions {
@@ -66,6 +68,7 @@ impl RunOptions {
             jobs: 1,
             webnn_cache: crate::cache::webnn_cache_dir()?,
             backend: Backend::Onnx,
+            optimize: true,
         })
     }
 }
@@ -251,7 +254,7 @@ impl Sweep {
             &onnx_path,
             ConvertOptions {
                 free_dim_overrides: entry.override_dims.clone(),
-                optimize: true,
+                optimize: self.options.optimize,
                 experimental_dynamic_inputs: false,
                 pinned_inputs: entry.pin_inputs.clone(),
                 zero_fill_missing_external_data: false,
@@ -321,6 +324,8 @@ mod tests {
     #[test]
     fn real_is_default() {
         assert_eq!(WeightMode::default(), WeightMode::Real);
+        let options = RunOptions::new(Selection::All, WeightMode::default()).unwrap();
+        assert!(options.optimize);
     }
 
     #[test]

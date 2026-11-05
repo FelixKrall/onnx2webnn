@@ -48,7 +48,7 @@ struct CommonArgs {
     #[arg(long, global = true)]
     debug: bool,
 
-    /// Execution backend for graph builds; required for validation
+    /// When passed, specifies the execution backend for graph builds, otherwise no backend build; required for validation
     #[arg(long, global = true)]
     backend: Option<Backend>,
 }
@@ -61,6 +61,14 @@ enum Command {
         common: CommonArgs,
     },
     /// Lower ONNX and either build or export the WebNN graph
+    #[command(after_help = r#"Examples:
+  onnx2webnn convert --model first.onnx --model second.onnx --output exported
+  onnx2webnn convert --model first.onnx --input first.safetensors \
+    --model second.onnx --input second.safetensors --backend onnx --validate
+
+Repeat --model and --input for multiple files; comma-separated lists are not split.
+Input files contain SafeTensors execution tensors, paired with models in argument order.
+Supply one --input per --model or omit all --input options. --input requires --validate."#)]
     Convert {
         #[command(flatten)]
         common: CommonArgs,
@@ -76,9 +84,8 @@ enum Command {
         #[arg(long = "allow-missing-external-data")]
         allow_missing_external_data: bool,
 
-        /// Enable constant folding (Shape/Gather/Concat/Reshape pipelines)
-        #[arg(long)]
-        optimize: bool,
+        #[command(flatten)]
+        folding: FoldingArgs,
 
         /// Preserve unresolved symbolic input dims as dynamic metadata (experimental)
         #[arg(long)]
@@ -93,6 +100,8 @@ enum Command {
     ValidateManifest {
         #[command(flatten)]
         common: CommonArgs,
+        #[command(flatten)]
+        folding: FoldingArgs,
         /// Manifest selection: all or match=<text>
         #[arg(long)]
         selection: String,
@@ -111,6 +120,15 @@ enum Command {
     },
 
     /// Validate existing WebNN graphs against ONNX models without conversion
+    #[command(after_help = r#"Examples:
+  onnx2webnn validate-cached --model first.onnx --model second.onnx --backend onnx
+  onnx2webnn validate-cached --model first.onnx --graph first.webnn --input first.safetensors \
+    --model second.onnx --graph second.webnn --input second.safetensors --backend onnx
+
+Repeat --model, --input and --graph for multiple files; comma-separated lists are not split.
+Input files contain SafeTensors execution tensors, paired with models in argument order.
+Supply one --input per --model or omit all --input options. The same rule applies to --graph;
+omitting all --graph options selects the cached graphs."#)]
     ValidateCached {
         #[command(flatten)]
         common: CommonArgs,
@@ -123,11 +141,18 @@ enum Command {
 }
 
 #[derive(Args)]
+struct FoldingArgs {
+    /// Disable optional constant-folding passes (enabled by default); required simplifications remain
+    #[arg(long)]
+    no_constant_fold: bool,
+}
+
+#[derive(Args)]
 struct ModelArgs {
-    /// ONNX model path (repeatable)
+    /// ONNX model path; repeat --model for each file (no comma-separated lists)
     #[arg(long = "model", required = true)]
     models: Vec<PathBuf>,
-    /// Complete SafeTensors execution inputs, paired by position with each --model
+    /// SafeTensors execution inputs; repeat --input for each model, paired by position
     #[arg(long = "input", short = 'i')]
     inputs: Vec<PathBuf>,
     /// Symbolic dimension binding for a single model, NAME=VALUE (repeatable)
@@ -448,7 +473,7 @@ fn main() -> anyhow::Result<()> {
                 },
             output,
             allow_missing_external_data,
-            optimize,
+            folding: FoldingArgs { no_constant_fold },
             experimental_dynamic_inputs,
             validate,
             ..
@@ -475,7 +500,7 @@ fn main() -> anyhow::Result<()> {
                     cache_onnx_model(model, onnx, allow_missing_external_data)?;
                     let options = ConvertOptions {
                         free_dim_overrides: effective.clone(),
-                        optimize,
+                        optimize: !no_constant_fold,
                         experimental_dynamic_inputs,
                         pinned_inputs: pins.clone(),
                         zero_fill_missing_external_data: allow_missing_external_data,
@@ -581,6 +606,7 @@ fn main() -> anyhow::Result<()> {
             finish_batch("Cached validation", models.len(), failed)?;
         }
         Command::ValidateManifest {
+            folding: FoldingArgs { no_constant_fold },
             selection,
             weights,
             manifest,
@@ -592,6 +618,7 @@ fn main() -> anyhow::Result<()> {
             let mut options = RunOptions::new(selection, weights).map_err(anyhow::Error::msg)?;
             options.jobs = jobs;
             options.backend = backend;
+            options.optimize = !no_constant_fold;
             if let Some(manifest) = manifest {
                 options.manifest = manifest;
             }
