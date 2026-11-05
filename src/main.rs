@@ -16,6 +16,7 @@
  * limitations under the License.
  */
 
+use anyhow::Context;
 use clap::{Parser, Subcommand};
 use rustnn::mlcontext::Backend;
 use sha2::{Digest, Sha256};
@@ -337,7 +338,7 @@ fn main() -> anyhow::Result<()> {
                 let value: u32 = parts[1]
                     .trim()
                     .parse()
-                    .map_err(|_| anyhow::anyhow!("Invalid dimension value: '{}'", parts[1]))?;
+                    .with_context(|| format!("Invalid dimension value: '{}'", parts[1]))?;
                 free_dim_overrides.insert(name, value);
             }
 
@@ -345,8 +346,7 @@ fn main() -> anyhow::Result<()> {
 
             let mut pinned_inputs = HashMap::new();
             for spec in pin_inputs {
-                let (name, value) = onnx2webnn::onnx::convert::parse_pinned_input(&spec)
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                let (name, value) = onnx2webnn::onnx::convert::parse_pinned_input(&spec)?;
                 pinned_inputs.insert(name, value);
             }
 
@@ -371,8 +371,7 @@ fn main() -> anyhow::Result<()> {
                         &validation_overrides,
                         &pinned_inputs,
                         backend,
-                    )
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    )?;
                     println!(
                         "✓ cached deterministic validation passed ({} inputs, {} outputs)",
                         summary.input_count, summary.output_count
@@ -386,8 +385,7 @@ fn main() -> anyhow::Result<()> {
                     .then(|| conversion_paths(input_path, output.as_deref()))
                     .transpose()?;
             if let Some((onnx_cache, _)) = &cache_paths {
-                cache_onnx_model(input_path, onnx_cache, allow_missing_external_data)
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                cache_onnx_model(input_path, onnx_cache, allow_missing_external_data)?;
             }
 
             let options = ConvertOptions {
@@ -401,14 +399,13 @@ fn main() -> anyhow::Result<()> {
 
             if let Some(backend) = backend {
                 println!("Building converted graph with {backend:?} backend");
-                let validated = convert_onnx_with_backend(input_path, options, backend)
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                let validated = convert_onnx_with_backend(input_path, options, backend)?;
                 println!(
                     "✓ {:?} graph build succeeded for {input}",
                     validated.context.rustnn_backend()
                 );
             } else {
-                export_onnx(input_path, options).map_err(|e| anyhow::anyhow!("{e}"))?;
+                export_onnx(input_path, options)?;
                 println!("✓ portable WebNN export succeeded for {input} (no backend build)");
             }
             if let Some((onnx_cache, webnn_cache)) = &cache_paths {
@@ -427,8 +424,7 @@ fn main() -> anyhow::Result<()> {
                         &validation_overrides,
                         &pinned_inputs,
                         backend,
-                    )
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    )?;
                     println!(
                         "✓ deterministic validation passed ({} inputs, {} outputs)",
                         summary.input_count, summary.output_count

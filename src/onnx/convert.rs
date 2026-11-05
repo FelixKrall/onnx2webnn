@@ -78,8 +78,17 @@ fn format_unsupported_ops_list(ops: &[UnsupportedOpEntry]) -> String {
 
 #[derive(Debug, Error)]
 pub enum OnnxError {
-    #[error("failed to read ONNX file: {0}")]
+    #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
+
+    #[error("Failed to resolve external tensor data: {source}")]
+    ExternalTensorDataError { source: Box<OnnxError> },
+
+    #[error("Failed to write cache file: {source}")]
+    CacheWriteError {
+        source: std::io::Error,
+        path: PathBuf,
+    },
 
     #[error("failed to parse ONNX protobuf: {0}")]
     ProtobufError(String),
@@ -1719,7 +1728,8 @@ fn load_model_from_path(
         &mut model,
         onnx_path_ref,
         options.zero_fill_missing_external_data,
-    )?;
+    )
+    .map_err(|err| OnnxError::ExternalTensorDataError { source: err.into() })?;
 
     // Merge overrides from sidecar dims file if provided implicitly and not already set
     if options.free_dim_overrides.is_empty() {
@@ -1767,7 +1777,10 @@ pub fn cache_onnx_model<P: AsRef<Path>, Q: AsRef<Path>>(
     if let Some(parent) = cache_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(cache_path, model.encode_to_vec())?;
+    fs::write(cache_path, model.encode_to_vec()).map_err(|err| OnnxError::CacheWriteError {
+        source: err,
+        path: cache_path.to_owned(),
+    })?;
     Ok(())
 }
 
