@@ -174,7 +174,7 @@ fn validate_with_inputs(
     let graph_info = load_graph_from_path(webnn_path)
         .map_err(|e| OnnxError::Validation(format!("failed to reload WebNN cache: {e}")))?;
     let mut context = MLContext::create(&backend_options)
-        .map_err(|e| OnnxError::Backend(format!("{backend_label} context creation failed: {e}")))?;
+        .map_err(|error| crate::onnx::convert::context_creation_error(&backend_label, error))?;
     let graph = context.rustnn_build_graph(graph_info).map_err(|e| {
         OnnxError::Backend(format!("{backend_label} cached graph build failed: {e}"))
     })?;

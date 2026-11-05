@@ -1,5 +1,5 @@
-> **Last edited:** `2026-11-05T12:45:31Z`<br>
-> **Checkout:** `feat/consolidate-cli` at `e6a02f3`
+> **Last edited:** `2026-11-05T13:40:49Z`<br>
+> **Checkout:** `feat/consolidate-cli` at `16cd3ae`
 >
 > **Freshness:** Use this document only when this provenance is recent relative to the relevant
 > code and commits; otherwise verify the implementation, tests, and Git history before relying
@@ -31,6 +31,9 @@ make -C ../rustnn onnxruntime-download
 
 Set `ORT_DYLIB_PATH` to the downloaded shared library before ORT use; see
 [CI setup](.github/workflows/ci.yml) for platform paths.
+A compiled backend still needs its native runtime and compatible devices. For ONNX context
+initialization failures, the diagnostic reports the `ORT_DYLIB_PATH` setting and points to
+the runtime library and its dependencies.
 
 ```powershell
 cargo build --locked
