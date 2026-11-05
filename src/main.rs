@@ -48,9 +48,19 @@ struct CommonArgs {
     #[arg(long, global = true)]
     debug: bool,
 
-    /// When passed, specifies the execution backend for graph builds, otherwise no backend build; required for validation
-    #[arg(long, global = true)]
+    #[arg(long, global = true, help = backend_help())]
     backend: Option<Backend>,
+}
+
+fn backend_help() -> String {
+    let names = Backend::compiled()
+        .iter()
+        .map(|backend| backend.as_ref().to_owned())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "Execution backend for graph builds; omit for export only; required for validation. Compiled backends: {names}. Runtime libraries and hardware must also be available."
+    )
 }
 
 #[derive(Subcommand)]
