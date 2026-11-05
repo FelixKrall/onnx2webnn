@@ -97,7 +97,8 @@ Supply one --input per --model or omit all --input options. --input requires --v
         #[command(flatten)]
         folding: FoldingArgs,
 
-        /// Preserve unresolved symbolic input dims as dynamic metadata (experimental)
+        /// Preserve unresolved symbolic input dims as dynamic metadata (experimental;
+        /// with --backend, requires a build with --features dynamic-inputs)
         #[arg(long)]
         experimental_dynamic_inputs: bool,
 
@@ -425,10 +426,6 @@ fn model_settings(
         .collect()
 }
 
-fn validation_backend(backend: Option<Backend>) -> anyhow::Result<Backend> {
-    backend.ok_or_else(|| anyhow::anyhow!("--backend is required for validation"))
-}
-
 fn validate_graph(
     model: &Path,
     graph: &Path,
@@ -467,6 +464,24 @@ fn main() -> anyhow::Result<()> {
         std::env::set_var("RUST_LOG", "debug");
     }
     pretty_env_logger::init();
+    let validation_backend = if !matches!(cli.cmd, Command::OperatorCatalog { .. }) {
+        let dynamic_inputs = matches!(
+            cli.cmd,
+            Command::Convert {
+                experimental_dynamic_inputs: true,
+                ..
+            }
+        );
+        let validation = matches!(
+            cli.cmd,
+            Command::Convert { validate: true, .. }
+                | Command::ValidateCached { .. }
+                | Command::ValidateManifest { .. }
+        );
+        onnx2webnn::capabilities::preflight(backend, dynamic_inputs, validation)?
+    } else {
+        None
+    };
     match cli.cmd {
         Command::OperatorCatalog { .. } => println!(
             "{}",
@@ -488,9 +503,6 @@ fn main() -> anyhow::Result<()> {
             validate,
             ..
         } => {
-            if validate {
-                validation_backend(backend)?;
-            }
             anyhow::ensure!(validate || inputs.is_empty(), "--input requires --validate");
             check_input_count(&models, &inputs)?;
             let settings =
@@ -532,15 +544,9 @@ fn main() -> anyhow::Result<()> {
                     }
                     println!("✓ cached ONNX at {}", onnx.display());
                     println!("✓ WebNN at {}", graph.display());
-                    if validate {
-                        let summary = validate_graph(
-                            onnx,
-                            graph,
-                            &effective,
-                            pins,
-                            supplied,
-                            validation_backend(backend)?,
-                        )?;
+                    if let Some(backend) = validation_backend {
+                        let summary =
+                            validate_graph(onnx, graph, &effective, pins, supplied, backend)?;
                         println!(
                             "✓ deterministic validation passed ({} inputs, {} outputs)",
                             summary.input_count, summary.output_count
@@ -570,7 +576,7 @@ fn main() -> anyhow::Result<()> {
             graphs,
             ..
         } => {
-            let backend = validation_backend(backend)?;
+            let backend = validation_backend.expect("validation backend established by preflight");
             check_input_count(&models, &inputs)?;
             anyhow::ensure!(
                 graphs.is_empty() || graphs.len() == models.len(),
@@ -623,7 +629,7 @@ fn main() -> anyhow::Result<()> {
             jobs,
             ..
         } => {
-            let backend = validation_backend(backend)?;
+            let backend = validation_backend.expect("validation backend established by preflight");
             let selection = Selection::parse(&selection).map_err(anyhow::Error::msg)?;
             let mut options = RunOptions::new(selection, weights).map_err(anyhow::Error::msg)?;
             options.jobs = jobs;

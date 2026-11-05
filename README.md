@@ -1,5 +1,5 @@
-> **Last edited:** `2026-11-05T13:40:49Z`<br>
-> **Checkout:** `feat/consolidate-cli` at `16cd3ae`
+> **Last edited:** `2026-11-05T15:11:40Z`<br>
+> **Checkout:** `feat/consolidate-cli` at `f301683`
 >
 > **Freshness:** Use this document only when this provenance is recent relative to the relevant
 > code and commits; otherwise verify the implementation, tests, and Git history before relying
@@ -32,8 +32,12 @@ make -C ../rustnn onnxruntime-download
 Set `ORT_DYLIB_PATH` to the downloaded shared library before ORT use; see
 [CI setup](.github/workflows/ci.yml) for platform paths.
 A compiled backend still needs its native runtime and compatible devices. For ONNX context
-initialization failures, the diagnostic reports the `ORT_DYLIB_PATH` setting and points to
-the runtime library and its dependencies.
+initialization failures, the diagnostic reports the `ORT_DYLIB_PATH` setting. TensorRT-RTX
+and LiteRT failures include runtime prerequisites; upstream initialization causes may be unavailable.
+One CLI preflight checks compiled backends, requested dynamic-input support, and runtime
+initialization before processing models, writing caches, or downloading manifest models.
+Validation also checks native ONNX Runtime. Export-only conversion and the operator catalog
+do not initialize runtimes. Graph-dependent checks remain at graph load/build time.
 
 ```powershell
 cargo build --locked
@@ -64,6 +68,13 @@ cargo run -- convert --model model.onnx `
   --override-dim batch_size=1 `
   --override-dim sequence_length=1
 ```
+
+Building or validating dynamic graphs requires `cargo build --release --features dynamic-inputs`.
+Export-only conversion does not require this feature. Requests combining `--backend` and
+`--experimental-dynamic-inputs` are rejected before processing models when the feature is absent;
+cached validation checks the graph before reference execution. Backend-specific restrictions still apply.
+Validation currently allocates tensors at maximum bounded sizes, so smaller concrete feeds can fail
+with a size mismatch.
 
 Without CLI overrides, `model.dims.json` can supply dimension bindings. WebNN exports default
 to the OS cache's `onnx2webnn/webnn` directory; source ONNX copies go to `onnx2webnn/onnx`.

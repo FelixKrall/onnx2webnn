@@ -2045,37 +2045,6 @@ fn convert_model_with_backend(
     convert_model_with_context_options(model, options, opts, backend.as_ref())
 }
 
-/// Distinguish missing compiled support from runtime or device initialization failures.
-pub(crate) fn context_creation_error(backend: &str, error: rustnn::error::Error) -> OnnxError {
-    if let rustnn::error::Error::NoBackendAvailableForBackendHint { backend_hint, .. } = &error {
-        let name = backend_hint.as_ref();
-        if !Backend::compiled().contains(backend_hint) {
-            return OnnxError::Backend(format!(
-                "{name} backend is not compiled into this build; enable the matching backend feature"
-            ));
-        }
-        let mut detail = format!(
-            "{name} backend is compiled in, but runtime initialization or device discovery failed"
-        );
-        if *backend_hint == Backend::Onnx {
-            let path = std::env::var_os("ORT_DYLIB_PATH").filter(|path| !path.is_empty());
-            let location = match path {
-                Some(path) => format!("ORT_DYLIB_PATH={}", PathBuf::from(path).display()),
-                None => format!(
-                    "ORT_DYLIB_PATH is unset; default library is {}onnxruntime{}",
-                    std::env::consts::DLL_PREFIX,
-                    std::env::consts::DLL_SUFFIX
-                ),
-            };
-            detail.push_str(&format!(
-                ". {location}. Check the ONNX Runtime shared library and its dependencies; set ORT_DYLIB_PATH to a compatible runtime library"
-            ));
-        }
-        return OnnxError::Backend(detail);
-    }
-    OnnxError::Backend(format!("{backend} context creation failed: {error}"))
-}
-
 fn convert_model_with_context_options(
     model: ModelProto,
     options: &ConvertOptions,
@@ -2084,7 +2053,7 @@ fn convert_model_with_context_options(
 ) -> Result<ValidatedGraph<'static>, OnnxError> {
     let mut converter = prepare_model(model, options)?;
     let mut context = MLContext::create(&context_options)
-        .map_err(|error| context_creation_error(backend, error))?;
+        .map_err(|error| crate::capabilities::context_creation_error(backend, error))?;
     let mut ml_builder = MLGraphBuilder::new(&mut context)
         .map_err(|e| OnnxError::Backend(format!("{backend} builder creation failed: {e}")))?;
     let outputs = record_and_save(&mut converter, options, &mut ml_builder)?;
