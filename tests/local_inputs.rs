@@ -289,14 +289,8 @@ fn accepted_input_dtypes_and_pins_are_checked() {
 }
 
 #[test]
-fn two_local_models_use_supplied_inputs() {
+fn local_models_use_supplied_inputs() {
     let dir = tempfile::tempdir().unwrap();
-    let mut args = vec![
-        "validate".to_string(),
-        "--backend".to_string(),
-        "onnx".to_string(),
-    ];
-    let mut settings = Vec::new();
     for index in 0..2 {
         let model_path = dir.path().join(format!("model{index}.onnx"));
         let feeds = dir.path().join(format!("feeds{index}.safetensors"));
@@ -337,7 +331,6 @@ fn two_local_models_use_supplied_inputs() {
             },
         )
         .unwrap();
-        args.extend(["--webnn".into(), webnn.display().to_string()]);
         inputs_file(
             &feeds,
             &[(
@@ -349,37 +342,33 @@ fn two_local_models_use_supplied_inputs() {
                     .collect(),
             )],
         );
-        settings.push(serde_json::json!({
-            "model": format!("model{index}.onnx"),
-            "override_dims": {"n": length},
-            "pin_inputs": {"flag": index == 1}
-        }));
-        args.extend([
-            "--onnx".into(),
-            model_path.display().to_string(),
-            "--input".into(),
-            feeds.display().to_string(),
-        ]);
+        let output = Command::new(env!("CARGO_BIN_EXE_onnx2webnn"))
+            .args([
+                "validate",
+                "--backend",
+                "onnx",
+                "--onnx",
+                model_path.to_str().unwrap(),
+                "--webnn",
+                webnn.to_str().unwrap(),
+                "--input",
+                feeds.to_str().unwrap(),
+                "--override-dim",
+                &format!("n={length}"),
+                "--pin-input",
+                &format!("flag={}", index == 1),
+            ])
+            .env("O2W_ONNX_CACHE", dir.path().join("onnx"))
+            .env("O2W_WEBNN_CACHE", dir.path().join("webnn"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("PASS"));
     }
-    settings.reverse();
-    let settings_path = dir.path().join("settings.json");
-    fs::write(&settings_path, serde_json::to_vec(&settings).unwrap()).unwrap();
-    args.extend([
-        "--override-dims-pininput-file".into(),
-        settings_path.display().to_string(),
-    ]);
-    let output = Command::new(env!("CARGO_BIN_EXE_onnx2webnn"))
-        .args(&args)
-        .env("O2W_ONNX_CACHE", dir.path().join("onnx"))
-        .env("O2W_WEBNN_CACHE", dir.path().join("webnn"))
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("2/2 passed"));
 }
 
 #[test]
@@ -431,5 +420,4 @@ fn numerical_disagreement_fails_local_command() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("mismatch"), "{stderr}");
-    assert!(String::from_utf8_lossy(&output.stdout).contains("0/1 passed"));
 }

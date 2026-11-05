@@ -1,5 +1,5 @@
-> **Last edited:** `2026-11-05T16:04:00Z`<br>
-> **Checkout:** `feat/consolidate-cli` at `348d435`
+> **Last edited:** `2026-11-05T16:14:05Z`<br>
+> **Checkout:** `feat/consolidate-cli` at `b596911`
 >
 > **Freshness:** Use this document only when this provenance is recent relative to the relevant
 > code and commits; otherwise verify the implementation, tests, and Git history before relying
@@ -100,77 +100,43 @@ dynamic shapes or further specialization.
 
 | Flag | Purpose |
 |------|---------|
-| `--model PATH` | On `convert`: ONNX model path (required, repeatable) |
-| `--onnx PATH` | On `validate`: reference ONNX model path (required, repeatable) |
-| `-i`, `--input PATH` | On `validate` only: complete SafeTensors execution inputs, paired with models in argument order; omit for deterministic feeds |
-| `-o`, `--output PATH` | Write to a `.webnn` file for one model, or an extensionless directory containing `<model-stem>.webnn`. Multiple models require a directory; colliding outputs are rejected before writes. Omit to use the cache. |
+| `--model PATH` | On `convert`: one ONNX model path (required) |
+| `--onnx PATH` | On `validate`: reference one ONNX model path (required) |
+| `-i`, `--input PATH` | On `validate` only: one complete SafeTensors execution input file; omit for deterministic feeds |
+| `-o`, `--output PATH` | Write to a `.webnn` file for one model, or an extensionless directory containing `<model-stem>.webnn`. Omit to use the cache. |
 | `--no-constant-fold` | Disable optional constant-folding passes on `convert` and `validate-manifest` (enabled by default); required simplifications remain |
-| `--override-dim NAME=VALUE` | Single-model only. On `convert`, specialize the exported graph; on `validate`, size execution feeds. Repeatable; unnamed zero dims use `<input>_dim<axis>` |
-| `--pin-input NAME=VALUE` | Single-model only. On `convert`, freeze an input to a boolean/integer; on `validate`, supply the same pin for the reference run (repeatable) |
-| `--override-dims-pininput-file PATH` | JSON array matching each selected model to its own dimension overrides and input pins; available on `convert` and `validate` |
+| `--override-dim NAME=VALUE` | On `convert`, specialize the exported graph; on `validate`, size execution feeds. Repeatable; unnamed zero dims use `<input>_dim<axis>` |
+| `--pin-input NAME=VALUE` | On `convert`, freeze an input to a boolean/integer; on `validate`, supply the same pin for the reference run (repeatable) |
 | `--allow-missing-external-data` | Zero-fill absent external tensors for structural conversion |
 | `--experimental-dynamic-inputs` | Preserve unresolved symbolic dims as dynamic metadata during conversion |
 | `--debug` | Verbose converter diagnostics (shared across modes); `RUST_LOG` controls environment logging |
 | `--backend NAME` | Optional graph-build backend; required for every numerical validation. Names: `onnx`, `coreml`, `trtx`, `litert`, `cann`, `burn-cpu`; the runtime must be compiled in and available |
-| `--webnn PATH` | On `validate`: existing WebNN graph, paired with each `--onnx`; omit for cache lookup |
+| `--webnn PATH` | On `validate`: one existing WebNN graph; omit for cache lookup |
 
 Shared `--backend` and `--debug` options must follow the mode name, for example
 `onnx2webnn convert --backend onnx --model model.onnx`. Options before the mode are rejected.
 
-`convert` accepts multiple `--model` paths. Backend and the constant-folding setting apply to every model.
-With multiple models, `--override-dim` and `--pin-input` are rejected; use
-`--override-dims-pininput-file` for model-specific settings. Batch commands continue after
-individual model failures, print a summary, and exit
-nonzero if any model fails. Conversion always exports; `--backend` additionally builds the graph.
+`convert` accepts one `--model`; `validate` accepts one `--onnx`, an optional `--webnn`, and
+an optional `--input`. Repeating these path options is rejected. Use separate invocations for
+multiple models; the JSON override option is removed. `--override-dim` and `--pin-input` remain
+repeatable for configuring dimensions and pins on the selected model. Conversion always exports;
+`--backend` additionally builds the graph.
 
-On `validate`, pair every model with a complete `--input` SafeTensors archive, or omit all input files for
-deterministic validation feeds. Input names, types, and shapes must match the feedable ONNX
-inputs. Supplied tensor shapes can resolve symbolic dimensions. External ONNX data stays beside
-the source model. Validation requires `--backend` before any model processing or output writes.
-
-```bash
-cargo run -- convert --model first.onnx --model second.onnx --output exported
-cargo run -- validate --onnx first.onnx --webnn exported/first.webnn --input first.safetensors \
-  --onnx second.onnx --webnn exported/second.webnn --input second.safetensors --backend onnx
-```
-
-### Per-model dimensions and input pins
-
-Pass `--override-dims-pininput-file settings.json` to configure models independently. The file
-contains an array with exactly one entry per selected model; entries are matched by model path,
-not array order. Relative `model` paths resolve from the JSON file's directory; absolute paths
-are also accepted. Duplicate, missing, and unmatched entries are rejected before processing.
-The file cannot be combined with `--override-dim` or `--pin-input`, even
-for a single model. Omitted `override_dims` and `pin_inputs` fields default to empty maps.
-Dimensions must be `u32` integers; pins accept booleans or signed `i64` integers.
-
-```json
-[
-  {
-    "model": "encoder.onnx",
-    "override_dims": {"batch_size": 1, "sequence_length": 128}
-  },
-  {
-    "model": "decoder.onnx",
-    "override_dims": {"batch_size": 1, "sequence_length": 1},
-    "pin_inputs": {"use_cache_branch": false}
-  }
-]
-```
-
-With `settings.json` and both models in the current directory:
+On `validate`, provide a complete `--input` SafeTensors archive or omit it for deterministic
+feeds. Input names, types, and shapes must match the feedable ONNX inputs. Supplied tensor
+shapes can resolve symbolic dimensions. External ONNX data stays beside the source model.
+Validation requires `--backend` before any model processing or output writes.
 
 ```bash
-cargo run -- convert --model encoder.onnx --model decoder.onnx \
-  --override-dims-pininput-file settings.json --output exported
+cargo run -- convert --model model.onnx --output model.webnn
+cargo run -- validate --onnx model.onnx --webnn model.webnn --input inputs.safetensors --backend onnx
 ```
 
 ### Validate existing artifacts
 
-`validate` never converts and errors if a graph is missing. Pass one `--webnn` per
-`--onnx` to select existing WebNN files; omit all `--webnn` options to use the same WebNN cache
-lookup as `convert`. The reference ONNX file is read directly from `--onnx`, so an explicit
-model/graph pair needs no ONNX cache copy. Relative and absolute paths are accepted. Reuse the
+`validate` never converts and errors if the graph is missing. Pass `--webnn` to select an
+existing WebNN file; omit it to use the same WebNN cache lookup as `convert`. The reference
+ONNX file is read directly from `--onnx`, so an explicit model/graph pair needs no ONNX cache copy. Relative and absolute paths are accepted. Reuse the
 conversion's pins and choose concrete execution dimensions through overrides or `--input`
 tensor shapes. These options never modify existing graphs; fixed graph dimensions must match
 the supplied feeds. Omit `--input` to use deterministic feeds.

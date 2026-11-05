@@ -16,11 +16,9 @@
  * limitations under the License.
  */
 
-use anyhow::Context;
 use clap::{Args, Parser, Subcommand};
 use rustnn::mlcontext::Backend;
-use serde::Deserialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use onnx2webnn::model_validation::manifest::Selection;
@@ -71,19 +69,17 @@ enum Command {
         common: CommonArgs,
     },
     /// Lower ONNX and either build or export the WebNN graph
-    #[command(after_help = r#"Examples:
-  onnx2webnn convert --model first.onnx --model second.onnx --output exported
-  onnx2webnn convert --model model.onnx --backend onnx
+    #[command(after_help = r#"Example:
+  onnx2webnn convert --model model.onnx --output model.webnn --backend onnx
 
-Repeat --model for multiple files; comma-separated lists are not split.
 Dimension overrides and input pins specialize the exported graph.
 Run validate separately to supply execution inputs without modifying the graph."#)]
     Convert {
         #[command(flatten)]
         common: CommonArgs,
-        /// ONNX model path; repeat --model for each file (no comma-separated lists)
+        /// ONNX model path
         #[arg(long = "model", required = true)]
-        models: Vec<PathBuf>,
+        model: PathBuf,
         #[command(flatten)]
         settings: ModelSettingsArgs,
 
@@ -129,31 +125,26 @@ Run validate separately to supply execution inputs without modifying the graph."
     },
 
     /// Validate existing WebNN graphs against ONNX models without conversion
-    #[command(after_help = r#"Examples:
-  onnx2webnn validate --onnx first.onnx --onnx second.onnx --backend onnx
-  onnx2webnn validate --onnx first.onnx --webnn first.webnn --input first.safetensors \
-    --onnx second.onnx --webnn second.webnn --input second.safetensors --backend onnx
+    #[command(after_help = r#"Example:
+  onnx2webnn validate --onnx model.onnx --webnn model.webnn --input inputs.safetensors --backend onnx
 
-Repeat --onnx, --input and --webnn for multiple files; comma-separated lists are not split.
-Input files contain SafeTensors execution tensors, paired with models in argument order.
-Supply one --input per --onnx or omit all --input options. The same rule applies to --webnn;
-omitting all --webnn options selects the cached graphs.
+Omit --webnn to select the cached graph; omit --input for deterministic feeds.
 Dimension overrides and input files size execution feeds; they never rewrite the graph.
 Pins must match the values used during conversion."#)]
     Validate {
         #[command(flatten)]
         common: CommonArgs,
-        /// Reference ONNX model path; repeat --onnx for each file (no comma-separated lists)
+        /// Reference ONNX model path
         #[arg(long, required = true)]
-        onnx: Vec<PathBuf>,
+        onnx: PathBuf,
         #[command(flatten)]
         settings: ModelSettingsArgs,
-        /// SafeTensors execution inputs; repeat --input for each model, paired by position
+        /// Complete SafeTensors execution inputs; omit for deterministic feeds
         #[arg(long = "input", short = 'i')]
-        inputs: Vec<PathBuf>,
-        /// Existing .webnn file, paired by position with each --onnx; omit for cache lookup
+        input: Option<PathBuf>,
+        /// Existing .webnn file; omit for cache lookup
         #[arg(long)]
-        webnn: Vec<PathBuf>,
+        webnn: Option<PathBuf>,
     },
 }
 
@@ -172,22 +163,8 @@ struct ModelSettingsArgs {
     /// Freeze a graph input for a single model, NAME=VALUE (repeatable)
     #[arg(long = "pin-input")]
     pin_inputs: Vec<String>,
-    /// JSON array of per-model dimension overrides and input pins
-    #[arg(long = "override-dims-pininput-file")]
-    settings_file: Option<PathBuf>,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ModelConfig {
-    model: PathBuf,
-    #[serde(default)]
-    override_dims: HashMap<String, u32>,
-    #[serde(default)]
-    pin_inputs: HashMap<String, serde_json::Value>,
-}
-
-#[derive(Clone, Default)]
 struct ModelSettings {
     overrides: HashMap<String, u32>,
     pins: HashMap<String, i64>,
@@ -282,148 +259,11 @@ fn conversion_paths(input: &Path, output: Option<&Path>) -> anyhow::Result<(Path
     Ok((onnx, webnn))
 }
 
-fn conversion_targets(
-    models: &[PathBuf],
-    output: Option<&Path>,
-) -> anyhow::Result<Vec<(PathBuf, PathBuf)>> {
-    if models.len() > 1 {
-        if let Some(output) = output {
-            anyhow::ensure!(
-                output.extension().is_none(),
-                "multiple models require an output directory"
-            );
-        }
-    }
-    let targets = models
-        .iter()
-        .map(|model| conversion_paths(model, output))
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    let mut seen = HashSet::new();
-    for (_, graph) in &targets {
-        anyhow::ensure!(
-            seen.insert(normalized_output(graph)?),
-            "models resolve to the same output: {}",
-            graph.display()
-        );
-    }
-    Ok(targets)
-}
-
-/// Resolve existing ancestors so symlinked directories cannot hide output collisions.
-fn normalized_output(path: &Path) -> anyhow::Result<PathBuf> {
-    let mut resolved = PathBuf::new();
-    for component in std::env::current_dir()?.join(path).components() {
-        match component {
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                resolved.pop();
-            }
-            _ => {
-                resolved.push(component.as_os_str());
-                if let Ok(canonical) = resolved.canonicalize() {
-                    resolved = canonical;
-                }
-            }
-        }
-    }
-    Ok(resolved)
-}
-
-fn check_input_count(models: &[PathBuf], inputs: &[PathBuf]) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        inputs.is_empty() || inputs.len() == models.len(),
-        "--input must be omitted or supplied once per --onnx ({} models, {} input files)",
-        models.len(),
-        inputs.len()
-    );
-    Ok(())
-}
-
-/// Match configuration entries by model path, independently of argument order.
-fn model_settings(
-    models: &[PathBuf],
-    override_dims: Vec<String>,
-    pin_inputs: Vec<String>,
-    settings_file: Option<&Path>,
-) -> anyhow::Result<Vec<ModelSettings>> {
-    let single_options = !override_dims.is_empty() || !pin_inputs.is_empty();
-    anyhow::ensure!(
-        models.len() == 1 || !single_options,
-        "--override-dim and --pin-input require a single model; use --override-dims-pininput-file for multiple models"
-    );
-    let Some(path) = settings_file else {
-        let settings = ModelSettings {
-            overrides: parse_overrides(override_dims)?,
-            pins: parse_pins(pin_inputs)?,
-        };
-        return Ok(vec![settings; models.len()]);
-    };
-    anyhow::ensure!(
-        !single_options,
-        "--override-dims-pininput-file cannot be combined with --override-dim or --pin-input"
-    );
-    let entries: Vec<ModelConfig> = serde_json::from_slice(&std::fs::read(path)?)
-        .with_context(|| format!("invalid model settings file: {}", path.display()))?;
-    let model_paths = models
-        .iter()
-        .map(|model| normalized_output(model))
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    let mut settings = HashMap::new();
-    for entry in entries {
-        let model = normalized_output(
-            &path
-                .parent()
-                .unwrap_or_else(|| Path::new(""))
-                .join(&entry.model),
-        )?;
-        anyhow::ensure!(
-            model_paths.contains(&model),
-            "settings model was not selected: {}",
-            model.display()
-        );
-        anyhow::ensure!(
-            !settings.contains_key(&model),
-            "duplicate settings for model: {}",
-            model.display()
-        );
-        anyhow::ensure!(
-            entry
-                .override_dims
-                .keys()
-                .all(|name| !name.trim().is_empty()),
-            "empty dimension name for model: {}",
-            model.display()
-        );
-        anyhow::ensure!(
-            entry.pin_inputs.keys().all(|name| !name.trim().is_empty()),
-            "empty input pin name for model: {}",
-            model.display()
-        );
-        let pins = parse_pins(
-            entry
-                .pin_inputs
-                .into_iter()
-                .map(|(name, value)| format!("{name}={value}"))
-                .collect(),
-        )
-        .with_context(|| format!("invalid input pins for model: {}", model.display()))?;
-        settings.insert(
-            model,
-            ModelSettings {
-                overrides: entry.override_dims,
-                pins,
-            },
-        );
-    }
-    model_paths
-        .iter()
-        .map(|model| {
-            settings
-                .get(model)
-                .cloned()
-                .ok_or_else(|| anyhow::anyhow!("missing settings for model: {}", model.display()))
-        })
-        .collect()
+fn model_settings(args: ModelSettingsArgs) -> anyhow::Result<ModelSettings> {
+    Ok(ModelSettings {
+        overrides: parse_overrides(args.override_dims)?,
+        pins: parse_pins(args.pin_inputs)?,
+    })
 }
 
 fn validate_graph(
@@ -440,12 +280,6 @@ fn validate_graph(
         validate_cached_model_with_options_on_backend(model, graph, overrides, pins, backend)
     }?;
     Ok(summary)
-}
-
-fn finish_batch(action: &str, total: usize, failed: usize) -> anyhow::Result<()> {
-    println!("{action}: {}/{} passed", total - failed, total);
-    anyhow::ensure!(failed == 0, "{failed} model(s) failed");
-    Ok(())
 }
 
 fn main() -> anyhow::Result<()> {
@@ -486,119 +320,75 @@ fn main() -> anyhow::Result<()> {
             serde_json::to_string_pretty(onnx2webnn::onnx::ops::catalog::OPERATOR_CAPABILITIES)?
         ),
         Command::Convert {
-            models,
-            settings:
-                ModelSettingsArgs {
-                    override_dims,
-                    pin_inputs,
-                    settings_file,
-                },
+            model,
+            settings,
             output,
             allow_missing_external_data,
             folding: FoldingArgs { no_constant_fold },
             experimental_dynamic_inputs,
             ..
         } => {
-            let settings =
-                model_settings(&models, override_dims, pin_inputs, settings_file.as_deref())?;
-            let targets = conversion_targets(&models, output.as_deref())?;
-            let mut failed = 0;
-            for (index, (model, (onnx, graph))) in models.iter().zip(&targets).enumerate() {
-                let ModelSettings { overrides, pins } = &settings[index];
-                let run = || -> anyhow::Result<()> {
-                    cache_onnx_model(model, onnx, allow_missing_external_data)?;
-                    let options = ConvertOptions {
-                        free_dim_overrides: overrides.clone(),
-                        optimize: !no_constant_fold,
-                        experimental_dynamic_inputs,
-                        pinned_inputs: pins.clone(),
-                        zero_fill_missing_external_data: allow_missing_external_data,
-                        output_path: Some(graph.clone()),
-                    };
-                    if let Some(backend) = backend {
-                        let built = convert_onnx_with_backend(model, options, backend)?;
-                        println!(
-                            "✓ {:?} graph build succeeded for {}",
-                            built.context.rustnn_backend(),
-                            model.display()
-                        );
-                    } else {
-                        export_onnx(model, options)?;
-                        println!(
-                            "✓ portable WebNN export succeeded for {} (no backend build)",
-                            model.display()
-                        );
-                    }
-                    println!("✓ cached ONNX at {}", onnx.display());
-                    println!("✓ WebNN at {}", graph.display());
-                    Ok(())
-                };
-                match run() {
-                    Ok(()) => println!("PASS {}", model.display()),
-                    Err(error) => {
-                        eprintln!("FAIL {}: {error:#}", model.display());
-                        failed += 1;
-                    }
-                }
+            let ModelSettings { overrides, pins } = model_settings(settings)?;
+            let (onnx, graph) = conversion_paths(&model, output.as_deref())?;
+            cache_onnx_model(&model, &onnx, allow_missing_external_data)?;
+            let options = ConvertOptions {
+                free_dim_overrides: overrides,
+                optimize: !no_constant_fold,
+                experimental_dynamic_inputs,
+                pinned_inputs: pins,
+                zero_fill_missing_external_data: allow_missing_external_data,
+                output_path: Some(graph.clone()),
+            };
+            if let Some(backend) = backend {
+                let built = convert_onnx_with_backend(&model, options, backend)?;
+                println!(
+                    "✓ {:?} graph build succeeded for {}",
+                    built.context.rustnn_backend(),
+                    model.display()
+                );
+            } else {
+                export_onnx(&model, options)?;
+                println!(
+                    "✓ portable WebNN export succeeded for {} (no backend build)",
+                    model.display()
+                );
             }
-            finish_batch("Conversion", models.len(), failed)?;
+            println!("✓ cached ONNX at {}", onnx.display());
+            println!("✓ WebNN at {}", graph.display());
+            println!("PASS {}", model.display());
         }
         Command::Validate {
-            onnx: models,
-            settings:
-                ModelSettingsArgs {
-                    override_dims,
-                    pin_inputs,
-                    settings_file,
-                },
-            inputs,
-            webnn: graphs,
+            onnx,
+            settings,
+            input,
+            webnn,
             ..
         } => {
             let backend = validation_backend.expect("validation backend established by preflight");
-            check_input_count(&models, &inputs)?;
+            let ModelSettings { overrides, pins } = model_settings(settings)?;
+            let graph = match webnn {
+                Some(graph) => graph,
+                None => cache_paths(&onnx)?.1,
+            };
             anyhow::ensure!(
-                graphs.is_empty() || graphs.len() == models.len(),
-                "--webnn must be omitted or supplied once per --onnx"
+                graph.is_file(),
+                "WebNN graph not found: {}; run convert first",
+                graph.display()
             );
-            let settings =
-                model_settings(&models, override_dims, pin_inputs, settings_file.as_deref())?;
-            let mut failed = 0;
-            for (index, model) in models.iter().enumerate() {
-                let ModelSettings { overrides, pins } = &settings[index];
-                let run = || -> anyhow::Result<onnx2webnn::ValidationSummary> {
-                    let graph = match graphs.get(index) {
-                        Some(graph) => graph.clone(),
-                        None => cache_paths(model)?.1,
-                    };
-                    anyhow::ensure!(
-                        graph.is_file(),
-                        "WebNN graph not found: {}; run convert first",
-                        graph.display()
-                    );
-                    let (effective, supplied) = if let Some(input) = inputs.get(index) {
-                        let (dims, tensors) =
-                            onnx2webnn::load_safetensors_inputs(model, input, overrides, pins)?;
-                        (dims, Some(tensors))
-                    } else {
-                        (overrides.clone(), None)
-                    };
-                    validate_graph(model, &graph, &effective, pins, supplied, backend)
-                };
-                match run() {
-                    Ok(summary) => println!(
-                        "PASS {} ({} inputs, {} outputs)",
-                        model.display(),
-                        summary.input_count,
-                        summary.output_count
-                    ),
-                    Err(error) => {
-                        eprintln!("FAIL {}: {error:#}", model.display());
-                        failed += 1;
-                    }
-                }
-            }
-            finish_batch("Validation", models.len(), failed)?;
+            let (effective, supplied) = if let Some(input) = input {
+                let (dims, tensors) =
+                    onnx2webnn::load_safetensors_inputs(&onnx, input, &overrides, &pins)?;
+                (dims, Some(tensors))
+            } else {
+                (overrides, None)
+            };
+            let summary = validate_graph(&onnx, &graph, &effective, &pins, supplied, backend)?;
+            println!(
+                "PASS {} ({} inputs, {} outputs)",
+                onnx.display(),
+                summary.input_count,
+                summary.output_count
+            );
         }
         Command::ValidateManifest {
             folding: FoldingArgs { no_constant_fold },
