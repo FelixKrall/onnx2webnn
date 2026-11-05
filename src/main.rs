@@ -81,8 +81,11 @@ Run validate separately to supply execution inputs without modifying the graph."
     Convert {
         #[command(flatten)]
         common: CommonArgs,
+        /// ONNX model path; repeat --model for each file (no comma-separated lists)
+        #[arg(long = "model", required = true)]
+        models: Vec<PathBuf>,
         #[command(flatten)]
-        models: ModelArgs,
+        settings: ModelSettingsArgs,
 
         /// Output .webnn file or extensionless directory (created as needed)
         #[arg(long, short)]
@@ -127,27 +130,30 @@ Run validate separately to supply execution inputs without modifying the graph."
 
     /// Validate existing WebNN graphs against ONNX models without conversion
     #[command(after_help = r#"Examples:
-  onnx2webnn validate --model first.onnx --model second.onnx --backend onnx
-  onnx2webnn validate --model first.onnx --graph first.webnn --input first.safetensors \
-    --model second.onnx --graph second.webnn --input second.safetensors --backend onnx
+  onnx2webnn validate --onnx first.onnx --onnx second.onnx --backend onnx
+  onnx2webnn validate --onnx first.onnx --webnn first.webnn --input first.safetensors \
+    --onnx second.onnx --webnn second.webnn --input second.safetensors --backend onnx
 
-Repeat --model, --input and --graph for multiple files; comma-separated lists are not split.
+Repeat --onnx, --input and --webnn for multiple files; comma-separated lists are not split.
 Input files contain SafeTensors execution tensors, paired with models in argument order.
-Supply one --input per --model or omit all --input options. The same rule applies to --graph;
-omitting all --graph options selects the cached graphs.
+Supply one --input per --onnx or omit all --input options. The same rule applies to --webnn;
+omitting all --webnn options selects the cached graphs.
 Dimension overrides and input files size execution feeds; they never rewrite the graph.
 Pins must match the values used during conversion."#)]
     Validate {
         #[command(flatten)]
         common: CommonArgs,
+        /// Reference ONNX model path; repeat --onnx for each file (no comma-separated lists)
+        #[arg(long, required = true)]
+        onnx: Vec<PathBuf>,
         #[command(flatten)]
-        models: ModelArgs,
+        settings: ModelSettingsArgs,
         /// SafeTensors execution inputs; repeat --input for each model, paired by position
         #[arg(long = "input", short = 'i')]
         inputs: Vec<PathBuf>,
-        /// Existing .webnn file, paired by position with each --model; omit for cache lookup
-        #[arg(long = "graph")]
-        graphs: Vec<PathBuf>,
+        /// Existing .webnn file, paired by position with each --onnx; omit for cache lookup
+        #[arg(long)]
+        webnn: Vec<PathBuf>,
     },
 }
 
@@ -159,10 +165,7 @@ struct FoldingArgs {
 }
 
 #[derive(Args)]
-struct ModelArgs {
-    /// ONNX model path; repeat --model for each file (no comma-separated lists)
-    #[arg(long = "model", required = true)]
-    models: Vec<PathBuf>,
+struct ModelSettingsArgs {
     /// Symbolic dimension binding for a single model, NAME=VALUE (repeatable)
     #[arg(long = "override-dim")]
     override_dims: Vec<String>,
@@ -329,7 +332,7 @@ fn normalized_output(path: &Path) -> anyhow::Result<PathBuf> {
 fn check_input_count(models: &[PathBuf], inputs: &[PathBuf]) -> anyhow::Result<()> {
     anyhow::ensure!(
         inputs.is_empty() || inputs.len() == models.len(),
-        "--input must be omitted or supplied once per --model ({} models, {} input files)",
+        "--input must be omitted or supplied once per --onnx ({} models, {} input files)",
         models.len(),
         inputs.len()
     );
@@ -346,7 +349,7 @@ fn model_settings(
     let single_options = !override_dims.is_empty() || !pin_inputs.is_empty();
     anyhow::ensure!(
         models.len() == 1 || !single_options,
-        "--override-dim and --pin-input require one --model; use --override-dims-pininput-file for multiple models"
+        "--override-dim and --pin-input require a single model; use --override-dims-pininput-file for multiple models"
     );
     let Some(path) = settings_file else {
         let settings = ModelSettings {
@@ -375,7 +378,7 @@ fn model_settings(
         )?;
         anyhow::ensure!(
             model_paths.contains(&model),
-            "settings model was not supplied through --model: {}",
+            "settings model was not selected: {}",
             model.display()
         );
         anyhow::ensure!(
@@ -483,9 +486,9 @@ fn main() -> anyhow::Result<()> {
             serde_json::to_string_pretty(onnx2webnn::onnx::ops::catalog::OPERATOR_CAPABILITIES)?
         ),
         Command::Convert {
-            models:
-                ModelArgs {
-                    models,
+            models,
+            settings:
+                ModelSettingsArgs {
                     override_dims,
                     pin_inputs,
                     settings_file,
@@ -541,22 +544,22 @@ fn main() -> anyhow::Result<()> {
             finish_batch("Conversion", models.len(), failed)?;
         }
         Command::Validate {
-            models:
-                ModelArgs {
-                    models,
+            onnx: models,
+            settings:
+                ModelSettingsArgs {
                     override_dims,
                     pin_inputs,
                     settings_file,
                 },
             inputs,
-            graphs,
+            webnn: graphs,
             ..
         } => {
             let backend = validation_backend.expect("validation backend established by preflight");
             check_input_count(&models, &inputs)?;
             anyhow::ensure!(
                 graphs.is_empty() || graphs.len() == models.len(),
-                "--graph must be omitted or supplied once per --model"
+                "--webnn must be omitted or supplied once per --onnx"
             );
             let settings =
                 model_settings(&models, override_dims, pin_inputs, settings_file.as_deref())?;

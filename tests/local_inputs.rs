@@ -337,7 +337,7 @@ fn two_local_models_use_supplied_inputs() {
             },
         )
         .unwrap();
-        args.extend(["--graph".into(), webnn.display().to_string()]);
+        args.extend(["--webnn".into(), webnn.display().to_string()]);
         inputs_file(
             &feeds,
             &[(
@@ -355,7 +355,7 @@ fn two_local_models_use_supplied_inputs() {
             "pin_inputs": {"flag": index == 1}
         }));
         args.extend([
-            "--model".into(),
+            "--onnx".into(),
             model_path.display().to_string(),
             "--input".into(),
             feeds.display().to_string(),
@@ -415,11 +415,11 @@ fn numerical_disagreement_fails_local_command() {
     let output = Command::new(env!("CARGO_BIN_EXE_onnx2webnn"))
         .args([
             "validate",
-            "--graph",
+            "--webnn",
             webnn.to_str().unwrap(),
             "--backend",
             "onnx",
-            "--model",
+            "--onnx",
             model_path.to_str().unwrap(),
             "--input",
             feeds.to_str().unwrap(),

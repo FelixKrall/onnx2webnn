@@ -152,9 +152,9 @@ fn constant_node_quantization_parameters_validate_after_reload() {
     )
     .unwrap();
     let result = Command::new(env!("CARGO_BIN_EXE_onnx2webnn"))
-        .args(["validate", "--backend", "onnx", "--model"])
+        .args(["validate", "--backend", "onnx", "--onnx"])
         .arg(&source)
-        .arg("--graph")
+        .arg("--webnn")
         .arg(&webnn)
         .env("O2W_ONNX_CACHE", dir.path().join("onnx"))
         .env("O2W_WEBNN_CACHE", dir.path().join("webnn"))
@@ -198,9 +198,9 @@ fn ambiguous_quantized_feed_falls_back_with_a_warning() {
     )
     .unwrap();
     let result = Command::new(env!("CARGO_BIN_EXE_onnx2webnn"))
-        .args(["validate", "--backend", "onnx", "--model"])
+        .args(["validate", "--backend", "onnx", "--onnx"])
         .arg(&source)
-        .arg("--graph")
+        .arg("--webnn")
         .arg(&webnn)
         .env("O2W_ONNX_CACHE", dir.path().join("onnx"))
         .env("O2W_WEBNN_CACHE", dir.path().join("webnn"))
