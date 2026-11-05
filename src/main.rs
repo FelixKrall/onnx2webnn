@@ -68,7 +68,7 @@ enum Command {
         #[command(flatten)]
         common: CommonArgs,
     },
-    /// Lower ONNX and either build or export the WebNN graph
+    /// Lower ONNX and export to .webnn. Optionally build a backend-specific graph.
     #[command(after_help = r#"Example:
   onnx2webnn convert --model model.onnx --output model.webnn --backend onnx
 

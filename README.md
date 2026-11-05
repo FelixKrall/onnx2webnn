@@ -1,5 +1,5 @@
-> **Last edited:** `2026-11-05T16:14:05Z`<br>
-> **Checkout:** `feat/consolidate-cli` at `b596911`
+> **Last edited:** `2026-11-05T16:36:24Z`<br>
+> **Checkout:** `feat/consolidate-cli` at `0d81ce0`
 >
 > **Freshness:** Use this document only when this provenance is recent relative to the relevant
 > code and commits; otherwise verify the implementation, tests, and Git history before relying
@@ -121,6 +121,9 @@ an optional `--input`. Repeating these path options is rejected. Use separate in
 multiple models; the JSON override option is removed. `--override-dim` and `--pin-input` remain
 repeatable for configuring dimensions and pins on the selected model. Conversion always exports;
 `--backend` additionally builds the graph.
+Optional folding preserves Squeeze axes inputs, normalizes Unsqueeze axes against the output
+rank, and gathers complete axis-0 slices with the indices tensor's rank. Regression tests compare
+folded and unfolded exports against native ORT, including downstream broadcasting.
 
 On `validate`, provide a complete `--input` SafeTensors archive or omit it for deterministic
 feeds. Input names, types, and shapes must match the feedable ONNX inputs. Supplied tensor

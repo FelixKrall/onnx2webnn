@@ -989,3 +989,93 @@ fn positive_step_slice_round_trips_with_extent_semantics() {
     assert!(serialized.contains("strides=[2]"));
     validate_cached_model(&source, &cached_webnn).expect("validate strided-slice fixture");
 }
+
+// Compare folded and unfolded exports independently against the source ONNX graph.
+fn validate_folding_regression(fixture: onnx2webnn::protos::onnx::ModelProto) {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.onnx");
+    fs::write(&source, fixture.encode_to_vec()).unwrap();
+    for optimize in [false, true] {
+        let webnn = dir.path().join(format!("folding-{optimize}.webnn"));
+        export_onnx(
+            &source,
+            ConvertOptions {
+                optimize,
+                output_path: Some(webnn.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        validate_cached_model(&source, &webnn)
+            .unwrap_or_else(|error| panic!("folding={optimize}: {error}"));
+    }
+}
+
+#[test]
+fn squeeze_folding_preserves_axes_input_and_broadcast_shape() {
+    validate_folding_regression(model(
+        13,
+        graph(
+            "squeeze_axes",
+            vec![f32_input("x", &[2])],
+            vec![f32_output("y", &[2, 2])],
+            vec![
+                node("Squeeze", "squeeze", &["data", "axes"], &["squeezed"], &[]),
+                node("Add", "add", &["x", "squeezed"], &["y"], &[]),
+            ],
+            vec![
+                f32_init("data", &[1, 2, 1], &[1., 2.]),
+                i64_init("axes", &[1], &[0]),
+            ],
+        ),
+    ));
+}
+
+#[test]
+fn gather_folding_preserves_complete_rows() {
+    validate_folding_regression(model(
+        13,
+        graph(
+            "gather_rows",
+            vec![f32_input("x", &[1, 2])],
+            vec![f32_output("y", &[1, 2])],
+            vec![
+                node("Gather", "gather", &["data", "indices"], &["gathered"], &[]),
+                node("Add", "add", &["x", "gathered"], &["y"], &[]),
+            ],
+            vec![
+                f32_init("data", &[2, 2], &[1., 2., 3., 4.]),
+                i64_init("indices", &[1], &[1]),
+            ],
+        ),
+    ));
+}
+
+#[test]
+fn unsqueeze_folding_normalizes_axes_against_output_rank() {
+    for opset in [11, 13] {
+        let (inputs, attrs, mut initializers) = if opset < 13 {
+            (vec!["data"], vec![attr_ints("axes", &[-2, -1])], vec![])
+        } else {
+            (
+                vec!["data", "axes"],
+                vec![],
+                vec![i64_init("axes", &[2], &[-2, -1])],
+            )
+        };
+        initializers.push(f32_init("data", &[2], &[1., 2.]));
+        validate_folding_regression(model(
+            opset,
+            graph(
+                "unsqueeze_axes",
+                vec![f32_input("x", &[2, 1])],
+                vec![f32_output("y", &[2, 2, 1])],
+                vec![
+                    node("Unsqueeze", "unsqueeze", &inputs, &["expanded"], &attrs),
+                    node("Add", "add", &["x", "expanded"], &["y"], &[]),
+                ],
+                initializers,
+            ),
+        ));
+    }
+}
