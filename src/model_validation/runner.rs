@@ -68,7 +68,7 @@ impl RunOptions {
             jobs: 1,
             webnn_cache: crate::cache::webnn_cache_dir()?,
             backend: Backend::Onnx,
-            optimize: true,
+            optimize: false,
         })
     }
 }
@@ -325,7 +325,7 @@ mod tests {
     fn real_is_default() {
         assert_eq!(WeightMode::default(), WeightMode::Real);
         let options = RunOptions::new(Selection::All, WeightMode::default()).unwrap();
-        assert!(options.optimize);
+        assert!(!options.optimize);
     }
 
     #[test]

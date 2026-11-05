@@ -150,9 +150,9 @@ Pins must match the values used during conversion."#)]
 
 #[derive(Args)]
 struct FoldingArgs {
-    /// Disable optional constant-folding passes (enabled by default); required simplifications remain
+    /// Enable optional constant-folding passes (disabled by default); required simplifications always run
     #[arg(long)]
-    no_constant_fold: bool,
+    constant_folding: bool,
 }
 
 #[derive(Args)]
@@ -324,7 +324,7 @@ fn main() -> anyhow::Result<()> {
             settings,
             output,
             allow_missing_external_data,
-            folding: FoldingArgs { no_constant_fold },
+            folding: FoldingArgs { constant_folding },
             experimental_dynamic_inputs,
             ..
         } => {
@@ -333,7 +333,7 @@ fn main() -> anyhow::Result<()> {
             cache_onnx_model(&model, &onnx, allow_missing_external_data)?;
             let options = ConvertOptions {
                 free_dim_overrides: overrides,
-                optimize: !no_constant_fold,
+                optimize: constant_folding,
                 experimental_dynamic_inputs,
                 pinned_inputs: pins,
                 zero_fill_missing_external_data: allow_missing_external_data,
@@ -391,7 +391,7 @@ fn main() -> anyhow::Result<()> {
             );
         }
         Command::ValidateManifest {
-            folding: FoldingArgs { no_constant_fold },
+            folding: FoldingArgs { constant_folding },
             selection,
             weights,
             manifest,
@@ -403,7 +403,7 @@ fn main() -> anyhow::Result<()> {
             let mut options = RunOptions::new(selection, weights).map_err(anyhow::Error::msg)?;
             options.jobs = jobs;
             options.backend = backend;
-            options.optimize = !no_constant_fold;
+            options.optimize = constant_folding;
             if let Some(manifest) = manifest {
                 options.manifest = manifest;
             }

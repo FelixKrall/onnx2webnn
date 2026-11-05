@@ -1,5 +1,5 @@
-> **Last edited:** `2026-11-05T16:36:24Z`<br>
-> **Checkout:** `feat/consolidate-cli` at `0d81ce0`
+> **Last edited:** `2026-11-05T18:30:12Z`<br>
+> **Checkout:** `feat/consolidate-cli` at `33947e6`
 >
 > **Freshness:** Use this document only when this provenance is recent relative to the relevant
 > code and commits; otherwise verify the implementation, tests, and Git history before relying
@@ -104,7 +104,7 @@ dynamic shapes or further specialization.
 | `--onnx PATH` | On `validate`: reference one ONNX model path (required) |
 | `-i`, `--input PATH` | On `validate` only: one complete SafeTensors execution input file; omit for deterministic feeds |
 | `-o`, `--output PATH` | Write to a `.webnn` file for one model, or an extensionless directory containing `<model-stem>.webnn`. Omit to use the cache. |
-| `--no-constant-fold` | Disable optional constant-folding passes on `convert` and `validate-manifest` (enabled by default); required simplifications remain |
+| `--constant-folding` | Enable optional constant folding on `convert` and `validate-manifest` (disabled by default); required simplifications always run |
 | `--override-dim NAME=VALUE` | On `convert`, specialize the exported graph; on `validate`, size execution feeds. Repeatable; unnamed zero dims use `<input>_dim<axis>` |
 | `--pin-input NAME=VALUE` | On `convert`, freeze an input to a boolean/integer; on `validate`, supply the same pin for the reference run (repeatable) |
 | `--allow-missing-external-data` | Zero-fill absent external tensors for structural conversion |
@@ -121,7 +121,8 @@ an optional `--input`. Repeating these path options is rejected. Use separate in
 multiple models; the JSON override option is removed. `--override-dim` and `--pin-input` remain
 repeatable for configuring dimensions and pins on the selected model. Conversion always exports;
 `--backend` additionally builds the graph.
-Optional folding preserves Squeeze axes inputs, normalizes Unsqueeze axes against the output
+Optional constant folding is disabled by default; enable it with `--constant-folding`.
+When enabled, folding preserves Squeeze axes inputs, normalizes Unsqueeze axes against the output
 rank, and gathers complete axis-0 slices with the indices tensor's rank. Regression tests compare
 folded and unfolded exports against native ORT, including downstream broadcasting.
 
@@ -152,7 +153,7 @@ cargo run -- validate --onnx first.onnx --webnn exported/first.webnn \
 `validate` uses `--onnx` and `--webnn` instead of `--model` and `--graph`.
 `validate-cached` is renamed `validate`; `convert --validate` is removed. Conversion no longer
 accepts `--input`. Use `convert` followed by `validate` for the two steps. `validate` accepts no
-conversion options such as `--output`, `--no-constant-fold`, or `--experimental-dynamic-inputs`.
+conversion options such as `--output`, `--constant-folding`, or `--experimental-dynamic-inputs`.
 `validate-manifest` continues to convert and validate manifest models.
 
 Operator statistics are code-backed; “fully supported” is a lowering classification, not measured
