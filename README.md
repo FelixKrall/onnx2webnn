@@ -1,5 +1,5 @@
-> **Last edited:** `2026-11-05T15:11:40Z`<br>
-> **Checkout:** `feat/consolidate-cli` at `f301683`
+> **Last edited:** `2026-11-05T15:37:06Z`<br>
+> **Checkout:** `feat/consolidate-cli` at `66419d9`
 >
 > **Freshness:** Use this document only when this provenance is recent relative to the relevant
 > code and commits; otherwise verify the implementation, tests, and Git history before relying
@@ -9,10 +9,9 @@
 
 onnx2webnn lowers ONNX opsets **1–26** through [RustNN](https://github.com/rustnn/rustnn)'s WebNN builder.
 `convert` exports reloadable `.webnn`/Safetensors artifacts. Add `--backend onnx` to build with
-CPU ONNX Runtime, or select another available RustNN backend. Add `--validate` to reload the
-artifacts and numerically compare execution against native CPU ORT.
-`validate-cached` validates existing graphs without conversion; `validate-manifest` converts
-and validates models selected from a manifest. See [operator coverage](docs/operator-conversion-status.md)
+CPU ONNX Runtime, or select another available RustNN backend.
+`validate` loads existing graphs and numerically compares execution against native CPU ORT.
+`validate-manifest` converts and validates models selected from a manifest. See [operator coverage](docs/operator-conversion-status.md)
 and [model results](docs/model-validation-status-triage.md).
 
 ## Build
@@ -102,17 +101,17 @@ dynamic shapes or further specialization.
 | Flag | Purpose |
 |------|---------|
 | `--model PATH` | ONNX model path (required, repeatable) |
-| `-i`, `--input PATH` | Optional complete SafeTensors execution inputs, paired with models in argument order; requires `--validate` on `convert` |
+| `-i`, `--input PATH` | On `validate` only: complete SafeTensors execution inputs, paired with models in argument order; omit for deterministic feeds |
 | `-o`, `--output PATH` | Write to a `.webnn` file for one model, or an extensionless directory containing `<model-stem>.webnn`. Multiple models require a directory; colliding outputs are rejected before writes. Omit to use the cache. |
 | `--no-constant-fold` | Disable optional constant-folding passes on `convert` and `validate-manifest` (enabled by default); required simplifications remain |
-| `--override-dim NAME=VALUE` | Single-model only. Bind a symbolic dim (repeatable); unnamed zero dims are addressed as `<input>_dim<axis>` |
-| `--pin-input NAME=VALUE` | Single-model only. Freeze a graph input to `true`/`false`/an integer (repeatable) |
-| `--override-dims-pininput-file PATH` | JSON array matching each `--model` to its own dimension overrides and input pins; available on `convert` and `validate-cached` |
+| `--override-dim NAME=VALUE` | Single-model only. On `convert`, specialize the exported graph; on `validate`, size execution feeds. Repeatable; unnamed zero dims use `<input>_dim<axis>` |
+| `--pin-input NAME=VALUE` | Single-model only. On `convert`, freeze an input to a boolean/integer; on `validate`, supply the same pin for the reference run (repeatable) |
+| `--override-dims-pininput-file PATH` | JSON array matching each `--model` to its own dimension overrides and input pins; available on `convert` and `validate` |
 | `--allow-missing-external-data` | Zero-fill absent external tensors for structural conversion |
 | `--experimental-dynamic-inputs` | Preserve unresolved symbolic dims as dynamic metadata during conversion |
 | `--debug` | Verbose converter diagnostics (shared across modes); `RUST_LOG` controls environment logging |
 | `--backend NAME` | Optional graph-build backend; required for every numerical validation. Names: `onnx`, `coreml`, `trtx`, `litert`, `cann`, `burn-cpu`; the runtime must be compiled in and available |
-| `--validate` | On `convert`, export, build, reload, and numerically compare against native CPU ORT |
+| `--graph PATH` | On `validate` only: existing WebNN graph, once per model; omit for cache lookup |
 
 Shared `--backend` and `--debug` options must follow the mode name, for example
 `onnx2webnn convert --backend onnx --model model.onnx`. Options before the mode are rejected.
@@ -123,15 +122,15 @@ With multiple models, `--override-dim` and `--pin-input` are rejected; use
 individual model failures, print a summary, and exit
 nonzero if any model fails. Conversion always exports; `--backend` additionally builds the graph.
 
-Pair every model with a complete `--input` SafeTensors archive, or omit all input files for
+On `validate`, pair every model with a complete `--input` SafeTensors archive, or omit all input files for
 deterministic validation feeds. Input names, types, and shapes must match the feedable ONNX
 inputs. Supplied tensor shapes can resolve symbolic dimensions. External ONNX data stays beside
 the source model. Validation requires `--backend` before any model processing or output writes.
 
 ```bash
-cargo run -- convert --model first.onnx --input first.safetensors \
-  --model second.onnx --input second.safetensors \
-  --output exported --backend onnx --validate
+cargo run -- convert --model first.onnx --model second.onnx --output exported
+cargo run -- validate --model first.onnx --graph exported/first.webnn --input first.safetensors \
+  --model second.onnx --graph exported/second.webnn --input second.safetensors --backend onnx
 ```
 
 ### Per-model dimensions and input pins
@@ -167,22 +166,23 @@ cargo run -- convert --model encoder.onnx --model decoder.onnx \
 
 ### Validate existing artifacts
 
-`validate-cached` never converts and errors if a graph is missing. Pass one `--graph` per
+`validate` never converts and errors if a graph is missing. Pass one `--graph` per
 `--model` to select existing WebNN files; omit all `--graph` options to use the same WebNN cache
 lookup as `convert`. The reference ONNX file is read directly from `--model`, so an explicit
 model/graph pair needs no ONNX cache copy. Relative and absolute paths are accepted. Reuse the
-conversion's dimension overrides and pins. Like `convert --validate`, this command accepts
-optional `--input` tensor files, otherwise it uses deterministic feeds.
+conversion's pins and choose concrete execution dimensions through overrides or `--input`
+tensor shapes. These options never modify existing graphs; fixed graph dimensions must match
+the supplied feeds. Omit `--input` to use deterministic feeds.
 
 ```bash
-cargo run -- validate-cached --model first.onnx --graph exported/first.webnn \
+cargo run -- validate --model first.onnx --graph exported/first.webnn \
   --input first.safetensors --backend onnx
 ```
 
-The previous `validate-files` mode is now `convert --validate`; `validate-models` is renamed
-`validate-manifest`. Model paths use `--model`; tensor files use singular `--input` instead of
-`--inputs`. The `convert --validate-cached` and `--build-and-export` flags are removed; use the
-`validate-cached` subcommand and `convert --backend NAME`, respectively.
+`validate-cached` is renamed `validate`; `convert --validate` is removed. Conversion no longer
+accepts `--input`. Use `convert` followed by `validate` for the two steps. `validate` accepts no
+conversion options such as `--output`, `--no-constant-fold`, or `--experimental-dynamic-inputs`.
+`validate-manifest` continues to convert and validate manifest models.
 
 Operator statistics are code-backed; “fully supported” is a lowering classification, not measured
 hardware parity. Performance-limited paths remain functional. Cargo features make CoreML/TensorRT

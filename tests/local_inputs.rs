@@ -292,8 +292,7 @@ fn accepted_input_dtypes_and_pins_are_checked() {
 fn two_local_models_use_supplied_inputs() {
     let dir = tempfile::tempdir().unwrap();
     let mut args = vec![
-        "convert".to_string(),
-        "--validate".to_string(),
+        "validate".to_string(),
         "--backend".to_string(),
         "onnx".to_string(),
     ];
@@ -327,6 +326,18 @@ fn two_local_models_use_supplied_inputs() {
         }
         fs::write(&model_path, fixture.encode_to_vec()).unwrap();
         let length = index + 1;
+        let webnn = dir.path().join(format!("model{index}.webnn"));
+        onnx2webnn::export_onnx(
+            &model_path,
+            onnx2webnn::ConvertOptions {
+                output_path: Some(webnn.clone()),
+                free_dim_overrides: HashMap::from([("n".into(), length as u32)]),
+                pinned_inputs: HashMap::from([("flag".into(), i64::from(index == 1))]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        args.extend(["--graph".into(), webnn.display().to_string()]);
         inputs_file(
             &feeds,
             &[(
@@ -392,10 +403,20 @@ fn numerical_disagreement_fails_local_command() {
         .flat_map(f32::to_le_bytes)
         .collect();
     inputs_file(&feeds, &[("x", Dtype::F32, vec![2], bytes)]);
+    let webnn = dir.path().join("cumprod.webnn");
+    onnx2webnn::export_onnx(
+        &model_path,
+        onnx2webnn::ConvertOptions {
+            output_path: Some(webnn.clone()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_onnx2webnn"))
         .args([
-            "convert",
-            "--validate",
+            "validate",
+            "--graph",
+            webnn.to_str().unwrap(),
             "--backend",
             "onnx",
             "--model",

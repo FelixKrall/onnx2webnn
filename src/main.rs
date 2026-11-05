@@ -73,12 +73,11 @@ enum Command {
     /// Lower ONNX and either build or export the WebNN graph
     #[command(after_help = r#"Examples:
   onnx2webnn convert --model first.onnx --model second.onnx --output exported
-  onnx2webnn convert --model first.onnx --input first.safetensors \
-    --model second.onnx --input second.safetensors --backend onnx --validate
+  onnx2webnn convert --model model.onnx --backend onnx
 
-Repeat --model and --input for multiple files; comma-separated lists are not split.
-Input files contain SafeTensors execution tensors, paired with models in argument order.
-Supply one --input per --model or omit all --input options. --input requires --validate."#)]
+Repeat --model for multiple files; comma-separated lists are not split.
+Dimension overrides and input pins specialize the exported graph.
+Run validate separately to supply execution inputs without modifying the graph."#)]
     Convert {
         #[command(flatten)]
         common: CommonArgs,
@@ -101,10 +100,6 @@ Supply one --input per --model or omit all --input options. --input requires --v
         /// with --backend, requires a build with --features dynamic-inputs)
         #[arg(long)]
         experimental_dynamic_inputs: bool,
-
-        /// Reload exported graphs and numerically compare against native CPU ORT
-        #[arg(long)]
-        validate: bool,
     },
 
     /// Numerically validate manifest models against reloaded WebNN artifacts
@@ -132,19 +127,24 @@ Supply one --input per --model or omit all --input options. --input requires --v
 
     /// Validate existing WebNN graphs against ONNX models without conversion
     #[command(after_help = r#"Examples:
-  onnx2webnn validate-cached --model first.onnx --model second.onnx --backend onnx
-  onnx2webnn validate-cached --model first.onnx --graph first.webnn --input first.safetensors \
+  onnx2webnn validate --model first.onnx --model second.onnx --backend onnx
+  onnx2webnn validate --model first.onnx --graph first.webnn --input first.safetensors \
     --model second.onnx --graph second.webnn --input second.safetensors --backend onnx
 
 Repeat --model, --input and --graph for multiple files; comma-separated lists are not split.
 Input files contain SafeTensors execution tensors, paired with models in argument order.
 Supply one --input per --model or omit all --input options. The same rule applies to --graph;
-omitting all --graph options selects the cached graphs."#)]
-    ValidateCached {
+omitting all --graph options selects the cached graphs.
+Dimension overrides and input files size execution feeds; they never rewrite the graph.
+Pins must match the values used during conversion."#)]
+    Validate {
         #[command(flatten)]
         common: CommonArgs,
         #[command(flatten)]
         models: ModelArgs,
+        /// SafeTensors execution inputs; repeat --input for each model, paired by position
+        #[arg(long = "input", short = 'i')]
+        inputs: Vec<PathBuf>,
         /// Existing .webnn file, paired by position with each --model; omit for cache lookup
         #[arg(long = "graph")]
         graphs: Vec<PathBuf>,
@@ -163,9 +163,6 @@ struct ModelArgs {
     /// ONNX model path; repeat --model for each file (no comma-separated lists)
     #[arg(long = "model", required = true)]
     models: Vec<PathBuf>,
-    /// SafeTensors execution inputs; repeat --input for each model, paired by position
-    #[arg(long = "input", short = 'i')]
-    inputs: Vec<PathBuf>,
     /// Symbolic dimension binding for a single model, NAME=VALUE (repeatable)
     #[arg(long = "override-dim")]
     override_dims: Vec<String>,
@@ -453,7 +450,7 @@ fn main() -> anyhow::Result<()> {
     let common = match &cli.cmd {
         Command::OperatorCatalog { common }
         | Command::Convert { common, .. }
-        | Command::ValidateCached { common, .. }
+        | Command::Validate { common, .. }
         | Command::ValidateManifest { common, .. } => common,
     };
     let backend = common.backend;
@@ -474,9 +471,7 @@ fn main() -> anyhow::Result<()> {
         );
         let validation = matches!(
             cli.cmd,
-            Command::Convert { validate: true, .. }
-                | Command::ValidateCached { .. }
-                | Command::ValidateManifest { .. }
+            Command::Validate { .. } | Command::ValidateManifest { .. }
         );
         onnx2webnn::capabilities::preflight(backend, dynamic_inputs, validation)?
     } else {
@@ -491,7 +486,6 @@ fn main() -> anyhow::Result<()> {
             models:
                 ModelArgs {
                     models,
-                    inputs,
                     override_dims,
                     pin_inputs,
                     settings_file,
@@ -500,11 +494,8 @@ fn main() -> anyhow::Result<()> {
             allow_missing_external_data,
             folding: FoldingArgs { no_constant_fold },
             experimental_dynamic_inputs,
-            validate,
             ..
         } => {
-            anyhow::ensure!(validate || inputs.is_empty(), "--input requires --validate");
-            check_input_count(&models, &inputs)?;
             let settings =
                 model_settings(&models, override_dims, pin_inputs, settings_file.as_deref())?;
             let targets = conversion_targets(&models, output.as_deref())?;
@@ -512,16 +503,9 @@ fn main() -> anyhow::Result<()> {
             for (index, (model, (onnx, graph))) in models.iter().zip(&targets).enumerate() {
                 let ModelSettings { overrides, pins } = &settings[index];
                 let run = || -> anyhow::Result<()> {
-                    let (effective, supplied) = if let Some(input) = inputs.get(index) {
-                        let (dims, tensors) =
-                            onnx2webnn::load_safetensors_inputs(model, input, overrides, pins)?;
-                        (dims, Some(tensors))
-                    } else {
-                        (overrides.clone(), None)
-                    };
                     cache_onnx_model(model, onnx, allow_missing_external_data)?;
                     let options = ConvertOptions {
-                        free_dim_overrides: effective.clone(),
+                        free_dim_overrides: overrides.clone(),
                         optimize: !no_constant_fold,
                         experimental_dynamic_inputs,
                         pinned_inputs: pins.clone(),
@@ -544,14 +528,6 @@ fn main() -> anyhow::Result<()> {
                     }
                     println!("✓ cached ONNX at {}", onnx.display());
                     println!("✓ WebNN at {}", graph.display());
-                    if let Some(backend) = validation_backend {
-                        let summary =
-                            validate_graph(onnx, graph, &effective, pins, supplied, backend)?;
-                        println!(
-                            "✓ deterministic validation passed ({} inputs, {} outputs)",
-                            summary.input_count, summary.output_count
-                        );
-                    }
                     Ok(())
                 };
                 match run() {
@@ -564,15 +540,15 @@ fn main() -> anyhow::Result<()> {
             }
             finish_batch("Conversion", models.len(), failed)?;
         }
-        Command::ValidateCached {
+        Command::Validate {
             models:
                 ModelArgs {
                     models,
-                    inputs,
                     override_dims,
                     pin_inputs,
                     settings_file,
                 },
+            inputs,
             graphs,
             ..
         } => {
@@ -619,7 +595,7 @@ fn main() -> anyhow::Result<()> {
                     }
                 }
             }
-            finish_batch("Cached validation", models.len(), failed)?;
+            finish_batch("Validation", models.len(), failed)?;
         }
         Command::ValidateManifest {
             folding: FoldingArgs { no_constant_fold },
