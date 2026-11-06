@@ -109,7 +109,7 @@ dynamic shapes or further specialization.
 | `--pin-input NAME=VALUE` | On `convert`, freeze an input to a boolean/integer; on `validate`, supply the same pin for the reference run (repeatable) |
 | `--allow-missing-external-data` | Zero-fill absent external tensors for structural conversion |
 | `--experimental-dynamic-inputs` | Preserve unresolved symbolic dims as dynamic metadata during conversion |
-| `--debug` | Verbose converter diagnostics (shared across modes); `RUST_LOG` controls environment logging |
+| `--debug` | Verbose diagnostics across modes; sets `RUST_LOG=debug`, overriding any existing filter. Without it, use `RUST_LOG` to control logging (e.g. `info` or `onnx2webnn=debug`). |
 | `--backend NAME` | Optional graph-build backend; required for every numerical validation. Names: `onnx`, `coreml`, `trtx`, `litert`, `cann`, `burn-cpu`; the runtime must be compiled in and available |
 | `--webnn PATH` | On `validate`: one existing WebNN graph; omit for cache lookup |
 
