@@ -33,7 +33,8 @@ use onnx2webnn::{
 #[command(name = "onnx2webnn")]
 #[command(
     about = "Convert ONNX models to WebNN via MLGraphBuilder",
-    long_about = None
+    long_about = None,
+    after_help = "Set the log level with RUST_LOG (e.g. RUST_LOG=debug or RUST_LOG=onnx2webnn=trace)."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -42,10 +43,6 @@ struct Cli {
 
 #[derive(Args)]
 struct CommonArgs {
-    /// Enable debug output
-    #[arg(long, global = true)]
-    debug: bool,
-
     #[arg(long, global = true, help = backend_help())]
     backend: Option<Backend>,
 }
@@ -293,9 +290,6 @@ fn main() -> anyhow::Result<()> {
     let backend = common.backend;
     if !matches!(cli.cmd, Command::OperatorCatalog { .. }) {
         std::env::set_var("O2W_OPERATOR_REPORT", "1");
-    }
-    if common.debug {
-        std::env::set_var("RUST_LOG", "debug");
     }
     pretty_env_logger::init();
     let validation_backend = if !matches!(cli.cmd, Command::OperatorCatalog { .. }) {
