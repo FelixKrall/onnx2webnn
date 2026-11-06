@@ -498,7 +498,7 @@ pub fn report_eliminated_source_nodes(
     if !verbose {
         for ((domain, op), (count, example)) in groups {
             println!(
-                "  {domain}::{op}: {count} eliminated (e.g. [{example}]); use --debug for names"
+                "  {domain}::{op}: {count} eliminated (e.g. [{example}]); set RUST_LOG=debug for names"
             );
         }
     }
