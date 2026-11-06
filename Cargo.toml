@@ -21,6 +21,8 @@ default = ["env_logging"]
 coreml = ["rustnn/coreml-runtime"]
 # Make rustnn's TensorRT-RTX backend available for --backend trtx (NVIDIA GPU).
 trtx = ["rustnn/trtx-runtime"]
+# Allow execution backends to build graphs with dynamic dimensions.
+dynamic-inputs = ["rustnn/dynamic-inputs"]
 # Enable logging on RUST_LOG (could be replaced by tracing-subscriber) 
 env_logging = ["dep:pretty_env_logger"]
 

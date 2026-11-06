@@ -289,45 +289,86 @@ fn accepted_input_dtypes_and_pins_are_checked() {
 }
 
 #[test]
-fn two_local_models_use_supplied_inputs() {
+fn local_models_use_supplied_inputs() {
     let dir = tempfile::tempdir().unwrap();
-    let mut args = vec![
-        "validate-files".to_string(),
-        "--backend".to_string(),
-        "onnx".to_string(),
-    ];
     for index in 0..2 {
         let model_path = dir.path().join(format!("model{index}.onnx"));
         let feeds = dir.path().join(format!("feeds{index}.safetensors"));
-        identity_model(&model_path, TensorProto_DataType::Float as i32, &[1]);
+        let mut fixture = model(
+            17,
+            graph(
+                "configured",
+                vec![f32_input("x", &[1]), i64_input("flag", &[1])],
+                vec![f32_output("y", &[1])],
+                vec![
+                    node("Cast", "cast", &["flag"], &["f"], &[attr_int("to", 1)]),
+                    node("Add", "add", &["x", "f"], &["y"], &[]),
+                ],
+                vec![],
+            ),
+        );
+        let graph = fixture.graph.as_mut().unwrap();
+        for value in graph.input.iter_mut().chain(graph.output.iter_mut()) {
+            if value.name == "flag" {
+                continue;
+            }
+            if let Some(onnx2webnn::protos::onnx::type_proto::Value::TensorType(tensor)) =
+                &mut value.r#type.as_mut().unwrap().value
+            {
+                tensor.shape.as_mut().unwrap().dim[0].value = Some(Value::DimParam("n".into()));
+            }
+        }
+        fs::write(&model_path, fixture.encode_to_vec()).unwrap();
+        let length = index + 1;
+        let webnn = dir.path().join(format!("model{index}.webnn"));
+        onnx2webnn::export_onnx(
+            &model_path,
+            onnx2webnn::ConvertOptions {
+                output_path: Some(webnn.clone()),
+                free_dim_overrides: HashMap::from([("n".into(), length as u32)]),
+                pinned_inputs: HashMap::from([("flag".into(), i64::from(index == 1))]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         inputs_file(
             &feeds,
             &[(
                 "x",
                 Dtype::F32,
-                vec![1],
-                (index as f32 + 0.25).to_le_bytes().to_vec(),
+                vec![length],
+                (0..length)
+                    .flat_map(|_| (index as f32 + 0.25).to_le_bytes())
+                    .collect(),
             )],
         );
-        args.extend([
-            "--model".into(),
-            model_path.display().to_string(),
-            "--inputs".into(),
-            feeds.display().to_string(),
-        ]);
+        let output = Command::new(env!("CARGO_BIN_EXE_onnx2webnn"))
+            .args([
+                "validate",
+                "--backend",
+                "onnx",
+                "--onnx",
+                model_path.to_str().unwrap(),
+                "--webnn",
+                webnn.to_str().unwrap(),
+                "--input",
+                feeds.to_str().unwrap(),
+                "--override-dim",
+                &format!("n={length}"),
+                "--pin-input",
+                &format!("flag={}", index == 1),
+            ])
+            .env("O2W_ONNX_CACHE", dir.path().join("onnx"))
+            .env("O2W_WEBNN_CACHE", dir.path().join("webnn"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("PASS"));
     }
-    let output = Command::new(env!("CARGO_BIN_EXE_onnx2webnn"))
-        .args(&args)
-        .env("O2W_ONNX_CACHE", dir.path().join("onnx"))
-        .env("O2W_WEBNN_CACHE", dir.path().join("webnn"))
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("2/2 passed"));
 }
 
 #[test]
@@ -351,14 +392,25 @@ fn numerical_disagreement_fails_local_command() {
         .flat_map(f32::to_le_bytes)
         .collect();
     inputs_file(&feeds, &[("x", Dtype::F32, vec![2], bytes)]);
+    let webnn = dir.path().join("cumprod.webnn");
+    onnx2webnn::export_onnx(
+        &model_path,
+        onnx2webnn::ConvertOptions {
+            output_path: Some(webnn.clone()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_onnx2webnn"))
         .args([
-            "validate-files",
+            "validate",
+            "--webnn",
+            webnn.to_str().unwrap(),
             "--backend",
             "onnx",
-            "--model",
+            "--onnx",
             model_path.to_str().unwrap(),
-            "--inputs",
+            "--input",
             feeds.to_str().unwrap(),
         ])
         .env("O2W_ONNX_CACHE", dir.path().join("onnx"))
@@ -368,5 +420,4 @@ fn numerical_disagreement_fails_local_command() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("mismatch"), "{stderr}");
-    assert!(String::from_utf8_lossy(&output.stdout).contains("0/1 passed"));
 }

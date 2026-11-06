@@ -28,152 +28,89 @@ use crate::protos::onnx::NodeProto;
 pub struct GatherEvaluator;
 
 impl GatherEvaluator {
-    /// Gather elements from data along specified axis using indices
+    /// Gather complete axis-0 slices, preserving the indices tensor's rank.
     fn gather_data(
         data: &TensorData,
         data_shape: &[i64],
         indices: &[i64],
+        indices_shape: &[i64],
         axis: i64,
     ) -> Result<(TensorData, Vec<i64>), OnnxError> {
-        // Normalize axis
         let normalized_axis = if axis < 0 {
-            (data_shape.len() as i64 + axis) as usize
+            data_shape.len() as i64 + axis
         } else {
-            axis as usize
+            axis
         };
-
-        if normalized_axis >= data_shape.len() {
+        if normalized_axis < 0 || normalized_axis >= data_shape.len() as i64 {
             return Err(OnnxError::InvalidShape(format!(
-                "Gather axis {} out of bounds for shape {:?}",
-                axis, data_shape
+                "Gather axis {axis} out of bounds for shape {data_shape:?}"
             )));
         }
-
-        // For now, only support axis=0 which is the most common case for shape operations
         if normalized_axis != 0 {
             return Err(OnnxError::unsupported_op(
                 "Gather",
-                format!("axis={} (only axis=0 is currently supported)", axis),
+                "constant folding supports only axis=0",
             ));
         }
-
-        // For axis=0, we're selecting entire slices along the first dimension
-        // This is commonly used for extracting specific shape dimensions
-        match data {
+        let element_count = |shape: &[i64]| -> Result<usize, OnnxError> {
+            shape.iter().try_fold(1usize, |size, &dim| {
+                usize::try_from(dim)
+                    .ok()
+                    .and_then(|dim| size.checked_mul(dim))
+                    .ok_or_else(|| {
+                        OnnxError::InvalidShape(format!("invalid Gather shape {shape:?}"))
+                    })
+            })
+        };
+        if element_count(data_shape)? != data.len()
+            || element_count(indices_shape)? != indices.len()
+        {
+            return Err(OnnxError::InvalidShape(
+                "Gather tensor shape does not match its data length".into(),
+            ));
+        }
+        let slice_size = element_count(&data_shape[1..])?;
+        let axis_size = data_shape[0];
+        let starts = indices
+            .iter()
+            .map(|&index| {
+                let normalized = if index < 0 { index + axis_size } else { index };
+                if normalized < 0 || normalized >= axis_size {
+                    return Err(OnnxError::InvalidShape(format!(
+                        "Gather index {index} out of bounds for axis size {axis_size}"
+                    )));
+                }
+                Ok(normalized as usize * slice_size)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let output_data = match data {
             TensorData::Int64(values) => {
-                let mut gathered = Vec::new();
-                for &idx in indices {
-                    let i = if idx < 0 {
-                        (values.len() as i64 + idx) as usize
-                    } else {
-                        idx as usize
-                    };
-                    if i >= values.len() {
-                        return Err(OnnxError::InvalidShape(format!(
-                            "Gather index {} out of bounds for data length {}",
-                            idx,
-                            values.len()
-                        )));
-                    }
-                    gathered.push(values[i]);
-                }
-
-                // Output shape: replace axis dimension with indices shape
-                let mut output_shape = Vec::new();
-                for (i, &dim) in data_shape.iter().enumerate() {
-                    if i == normalized_axis {
-                        // Replace with indices dimensions
-                        if indices.len() > 1 {
-                            output_shape.push(indices.len() as i64);
-                        }
-                        // If indices is scalar (len=1), we effectively squeeze this dim
-                    } else {
-                        output_shape.push(dim);
-                    }
-                }
-
-                // If indices is scalar and data is 1D, output is scalar (empty shape)
-                if indices.len() == 1 && data_shape.len() == 1 {
-                    output_shape.clear();
-                }
-
-                Ok((TensorData::Int64(gathered), output_shape))
+                TensorData::Int64(Self::gather_slices(values, &starts, slice_size))
             }
             TensorData::Int32(values) => {
-                let mut gathered = Vec::new();
-                for &idx in indices {
-                    let i = if idx < 0 {
-                        (values.len() as i64 + idx) as usize
-                    } else {
-                        idx as usize
-                    };
-                    if i >= values.len() {
-                        return Err(OnnxError::InvalidShape(format!(
-                            "Gather index {} out of bounds for data length {}",
-                            idx,
-                            values.len()
-                        )));
-                    }
-                    gathered.push(values[i]);
-                }
-
-                let mut output_shape = Vec::new();
-                for (i, &dim) in data_shape.iter().enumerate() {
-                    if i == normalized_axis {
-                        if indices.len() > 1 {
-                            output_shape.push(indices.len() as i64);
-                        }
-                    } else {
-                        output_shape.push(dim);
-                    }
-                }
-
-                if indices.len() == 1 && data_shape.len() == 1 {
-                    output_shape.clear();
-                }
-
-                Ok((TensorData::Int32(gathered), output_shape))
+                TensorData::Int32(Self::gather_slices(values, &starts, slice_size))
             }
             TensorData::Float32(values) => {
-                let mut gathered = Vec::new();
-                for &idx in indices {
-                    let i = if idx < 0 {
-                        (values.len() as i64 + idx) as usize
-                    } else {
-                        idx as usize
-                    };
-                    if i >= values.len() {
-                        return Err(OnnxError::InvalidShape(format!(
-                            "Gather index {} out of bounds for data length {}",
-                            idx,
-                            values.len()
-                        )));
-                    }
-                    gathered.push(values[i]);
-                }
-
-                let mut output_shape = Vec::new();
-                for (i, &dim) in data_shape.iter().enumerate() {
-                    if i == normalized_axis {
-                        if indices.len() > 1 {
-                            output_shape.push(indices.len() as i64);
-                        }
-                    } else {
-                        output_shape.push(dim);
-                    }
-                }
-
-                if indices.len() == 1 && data_shape.len() == 1 {
-                    output_shape.clear();
-                }
-
-                Ok((TensorData::Float32(gathered), output_shape))
+                TensorData::Float32(Self::gather_slices(values, &starts, slice_size))
             }
-            _ => Err(OnnxError::unsupported_op(
-                "Gather",
-                format!("data type {:?} not supported", data.data_type()),
-            )),
+            _ => {
+                return Err(OnnxError::unsupported_op(
+                    "Gather",
+                    format!("data type {:?} not supported", data.data_type()),
+                ))
+            }
+        };
+        let mut output_shape = indices_shape.to_vec();
+        output_shape.extend_from_slice(&data_shape[1..]);
+        Ok((output_data, output_shape))
+    }
+
+    fn gather_slices<T: Copy>(values: &[T], starts: &[usize], slice_size: usize) -> Vec<T> {
+        let mut output = Vec::new();
+        for &start in starts {
+            output.extend_from_slice(&values[start..start + slice_size]);
         }
+        output
     }
 
     /// Get indices as int64 vector
@@ -264,13 +201,18 @@ impl EvaluatorTrait for GatherEvaluator {
         let indices = Self::get_indices(indices_tensor)?;
 
         // Perform gather
-        let (output_data, output_shape) =
-            Self::gather_data(&data_tensor.data, &data_tensor.shape, &indices, axis)?;
+        let (output_data, output_shape) = Self::gather_data(
+            &data_tensor.data,
+            &data_tensor.shape,
+            &indices,
+            &indices_tensor.shape,
+            axis,
+        )?;
 
         let output = ConstantTensor {
-            data: output_data.clone(),
-            shape: output_shape,
             data_type: output_data.data_type().into(),
+            data: output_data,
+            shape: output_shape,
         };
 
         Ok(vec![output])
@@ -389,5 +331,53 @@ mod tests {
         }
 
         assert_eq!(output.shape, Vec::<i64>::new()); // Scalar output
+    }
+    #[test]
+    fn gather_preserves_slices_and_indices_rank_for_supported_types() {
+        for data in [
+            TensorData::Int64(vec![10, 11, 20, 21]),
+            TensorData::Int32(vec![10, 11, 20, 21]),
+            TensorData::Float32(vec![10., 11., 20., 21.]),
+        ] {
+            for (indices, indices_shape, shape, expected) in [
+                (vec![1], vec![1], vec![1, 2], vec![20., 21.]),
+                (vec![-1], vec![], vec![2], vec![20., 21.]),
+                (
+                    vec![1, 0],
+                    vec![1, 2],
+                    vec![1, 2, 2],
+                    vec![20., 21., 10., 11.],
+                ),
+                (
+                    vec![0, -2, 0],
+                    vec![3],
+                    vec![3, 2],
+                    vec![10., 11., 10., 11., 10., 11.],
+                ),
+                (vec![], vec![0], vec![0, 2], vec![]),
+            ] {
+                let (values, output_shape) =
+                    GatherEvaluator::gather_data(&data, &[2, 2], &indices, &indices_shape, -2)
+                        .unwrap();
+                assert_eq!(output_shape, shape);
+                let actual = match values {
+                    TensorData::Int64(v) => v.into_iter().map(|v| v as f32).collect::<Vec<_>>(),
+                    TensorData::Int32(v) => v.into_iter().map(|v| v as f32).collect::<Vec<_>>(),
+                    TensorData::Float32(v) => v,
+                    _ => unreachable!(),
+                };
+                assert_eq!(actual, expected);
+            }
+            for index in [2, -3] {
+                assert!(GatherEvaluator::gather_data(&data, &[2, 2], &[index], &[], 0).is_err());
+            }
+        }
+        let empty = TensorData::Int64(vec![]);
+        let (values, shape) = GatherEvaluator::gather_data(&empty, &[2, 0], &[1], &[1], 0).unwrap();
+        assert!(values.is_empty());
+        assert_eq!(shape, [1, 0]);
+        assert!(GatherEvaluator::gather_data(&empty, &[0, 2], &[0], &[1], 0).is_err());
+        assert!(GatherEvaluator::gather_data(&empty, &[0, 2], &[], &[1], 0).is_err());
+        assert!(GatherEvaluator::gather_data(&empty, &[], &[], &[0], 0).is_err());
     }
 }

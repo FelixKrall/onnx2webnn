@@ -25,6 +25,55 @@ use crate::onnx::constant_folding::{
 use crate::onnx::convert::OnnxError;
 use crate::protos::onnx::{NodeProto, TensorProto_DataType};
 
+/// Read the axes input for newer opsets, or the legacy attribute.
+fn constant_axes(
+    node: &NodeProto,
+    ctx: &ConstantFoldingContext,
+) -> Result<Option<Vec<i64>>, OnnxError> {
+    if let Some(name) = node.input.get(1).filter(|name| !name.is_empty()) {
+        let tensor = ctx.get_constant(name).ok_or_else(|| {
+            OnnxError::ShapeInference(format!("Axes tensor '{name}' is not constant"))
+        })?;
+        if tensor.shape.len() != 1 {
+            return Err(OnnxError::InvalidShape(
+                "axes input must be a 1D int64 tensor".into(),
+            ));
+        }
+        return match &tensor.data {
+            TensorData::Int64(values) => Ok(Some(values.clone())),
+            _ => Err(OnnxError::InvalidShape(
+                "axes input must be a 1D int64 tensor".into(),
+            )),
+        };
+    }
+    Ok(node
+        .attribute
+        .iter()
+        .find(|attr| attr.name == "axes")
+        .map(|attr| attr.ints.clone()))
+}
+
+/// Normalize all axes against one rank before changing the shape.
+fn normalized_axes(axes: &[i64], rank: usize) -> Result<Vec<usize>, OnnxError> {
+    let mut normalized = axes
+        .iter()
+        .map(|&axis| {
+            let axis = if axis < 0 { axis + rank as i64 } else { axis };
+            if axis < 0 || axis >= rank as i64 {
+                return Err(OnnxError::InvalidShape(format!(
+                    "axis {axis} out of bounds for rank {rank}"
+                )));
+            }
+            Ok(axis as usize)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    normalized.sort_unstable();
+    if normalized.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(OnnxError::InvalidShape("duplicate axes".into()));
+    }
+    Ok(normalized)
+}
+
 /// Unsqueeze operation: add dimensions of size 1
 pub struct UnsqueezeEvaluator;
 
@@ -38,12 +87,12 @@ impl EvaluatorTrait for UnsqueezeEvaluator {
             return false;
         }
 
-        // Input must be constant
-        if let Some(input) = node.input.first() {
-            return ctx.is_constant(input.as_str());
-        }
-
-        false
+        !node.input.is_empty()
+            && node
+                .input
+                .iter()
+                .filter(|name| !name.is_empty())
+                .all(|name| ctx.is_constant(name))
     }
 
     fn evaluate(
@@ -63,35 +112,15 @@ impl EvaluatorTrait for UnsqueezeEvaluator {
             OnnxError::ShapeInference(format!("Input tensor '{}' not found", input_name))
         })?;
 
-        // Get axes attribute
-        let mut axes: Vec<i64> = node
-            .attribute
-            .iter()
-            .find(|a| a.name.as_str() == "axes")
-            .map(|a| a.ints.clone())
-            .unwrap_or_default();
-
-        if axes.is_empty() {
-            return Err(OnnxError::MissingAttribute {
-                attr: "axes".to_string(),
-                op: "Unsqueeze".to_string(),
-            });
-        }
-
-        // Compute output shape
+        let axes = constant_axes(node, ctx)?.ok_or_else(|| OnnxError::MissingAttribute {
+            attr: "axes".into(),
+            op: "Unsqueeze".into(),
+        })?;
+        let output_rank = input_tensor.shape.len() + axes.len();
+        let axes = normalized_axes(&axes, output_rank)?;
         let mut output_shape = input_tensor.shape.clone();
-        axes.sort();
-
-        for &axis in &axes {
-            let idx = if axis < 0 {
-                (output_shape.len() as i64 + axis + 1) as usize
-            } else {
-                axis as usize
-            };
-
-            if idx <= output_shape.len() {
-                output_shape.insert(idx, 1);
-            }
+        for axis in axes {
+            output_shape.insert(axis, 1);
         }
 
         // Data remains the same, only shape changes
@@ -118,12 +147,12 @@ impl EvaluatorTrait for SqueezeEvaluator {
             return false;
         }
 
-        // Input must be constant
-        if let Some(input) = node.input.first() {
-            return ctx.is_constant(input.as_str());
-        }
-
-        false
+        !node.input.is_empty()
+            && node
+                .input
+                .iter()
+                .filter(|name| !name.is_empty())
+                .all(|name| ctx.is_constant(name))
     }
 
     fn evaluate(
@@ -143,40 +172,26 @@ impl EvaluatorTrait for SqueezeEvaluator {
             OnnxError::ShapeInference(format!("Input tensor '{}' not found", input_name))
         })?;
 
-        // Get axes attribute (if not specified, squeeze all dimensions of size 1)
-        let axes: Vec<i64> = node
-            .attribute
-            .iter()
-            .find(|a| a.name.as_str() == "axes")
-            .map(|a| a.ints.clone())
-            .unwrap_or_default();
-
-        // Compute output shape
-        let output_shape: Vec<i64> = if axes.is_empty() {
-            // Squeeze all dimensions of size 1
+        let axes = constant_axes(node, ctx)?.unwrap_or_default();
+        let output_shape = if axes.is_empty() {
             input_tensor
                 .shape
                 .iter()
-                .filter(|&&d| d != 1)
                 .copied()
+                .filter(|&dim| dim != 1)
                 .collect()
         } else {
-            // Squeeze only specified axes
-            let axes_set: std::collections::HashSet<i64> = axes.iter().copied().collect();
-
-            // Normalize negative axes
-            let rank = input_tensor.shape.len() as i64;
-            let normalized_axes: std::collections::HashSet<i64> = axes_set
-                .iter()
-                .map(|&ax| if ax < 0 { rank + ax } else { ax })
-                .collect();
-
+            let axes = normalized_axes(&axes, input_tensor.shape.len())?;
+            if axes.iter().any(|&axis| input_tensor.shape[axis] != 1) {
+                return Err(OnnxError::InvalidShape(
+                    "Squeeze axes must select dimensions of size 1".into(),
+                ));
+            }
             input_tensor
                 .shape
                 .iter()
                 .enumerate()
-                .filter(|(i, &d)| !(d == 1 && normalized_axes.contains(&(*i as i64))))
-                .map(|(_, &d)| d)
+                .filter_map(|(axis, &dim)| axes.binary_search(&axis).is_err().then_some(dim))
                 .collect()
         };
 
@@ -472,6 +487,121 @@ mod tests {
             assert_eq!(values, &vec![2, 128, 384]);
         } else {
             panic!("Expected Int32 data");
+        }
+    }
+    fn reshape_case(
+        op: &str,
+        shape: &[i64],
+        axes: Option<&[i64]>,
+        input_axes: bool,
+    ) -> Result<ConstantTensor, OnnxError> {
+        let initializers = HashMap::new();
+        let mut ctx = ConstantFoldingContext::new(&initializers)?;
+        ctx.add_constant(
+            "data".into(),
+            ConstantTensor {
+                data: TensorData::Int64(vec![10, 20]),
+                shape: shape.to_vec(),
+                data_type: TensorProto_DataType::Int64 as i32,
+            },
+        );
+        let mut node = NodeProto {
+            op_type: op.into(),
+            input: vec!["data".into()],
+            output: vec!["y".into()],
+            ..Default::default()
+        };
+        if let Some(axes) = axes {
+            if input_axes {
+                node.input.push("axes".into());
+                ctx.add_constant(
+                    "axes".into(),
+                    ConstantTensor {
+                        data: TensorData::Int64(axes.to_vec()),
+                        shape: vec![axes.len() as i64],
+                        data_type: TensorProto_DataType::Int64 as i32,
+                    },
+                );
+            } else {
+                node.attribute.push(AttributeProto {
+                    name: "axes".into(),
+                    ints: axes.to_vec(),
+                    ..Default::default()
+                });
+            }
+        }
+        let outputs = if op == "Squeeze" {
+            SqueezeEvaluator.evaluate(&node, &ctx)?
+        } else {
+            UnsqueezeEvaluator.evaluate(&node, &ctx)?
+        };
+        Ok(outputs.into_iter().next().unwrap())
+    }
+
+    #[test]
+    fn squeeze_axes_select_only_requested_unit_dimensions() {
+        for input_axes in [false, true] {
+            for (axes, expected) in [
+                (Some(vec![0]), vec![2, 1]),
+                (Some(vec![-1]), vec![1, 2]),
+                (Some(vec![-3, 2]), vec![2]),
+                (None, vec![2]),
+            ] {
+                let output =
+                    reshape_case("Squeeze", &[1, 2, 1], axes.as_deref(), input_axes).unwrap();
+                assert_eq!(output.shape, expected);
+                assert!(matches!(&output.data, TensorData::Int64(values) if values == &[10, 20]));
+            }
+            for axes in [vec![1], vec![3], vec![-4], vec![0, 0], vec![0, -3]] {
+                assert!(reshape_case("Squeeze", &[1, 2, 1], Some(&axes), input_axes).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn unsqueeze_axes_are_order_independent_and_relative_to_final_rank() {
+        for input_axes in [false, true] {
+            for (axes, expected) in [
+                (vec![-2, -1], vec![2, 1, 1]),
+                (vec![2, 1], vec![2, 1, 1]),
+                (vec![-1, 1], vec![2, 1, 1]),
+                (vec![2, 0], vec![1, 2, 1]),
+            ] {
+                let output = reshape_case("Unsqueeze", &[2], Some(&axes), input_axes).unwrap();
+                assert_eq!(output.shape, expected);
+                assert!(matches!(&output.data, TensorData::Int64(values) if values == &[10, 20]));
+            }
+            for axes in [vec![-3], vec![2], vec![0, 0], vec![0, -3]] {
+                assert!(reshape_case("Unsqueeze", &[2], Some(&axes), input_axes).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn runtime_axes_prevent_reshape_folding() {
+        let initializers = HashMap::new();
+        let mut ctx = ConstantFoldingContext::new(&initializers).unwrap();
+        ctx.add_constant(
+            "data".into(),
+            ConstantTensor {
+                data: TensorData::Int64(vec![10, 20]),
+                shape: vec![1, 2, 1],
+                data_type: TensorProto_DataType::Int64 as i32,
+            },
+        );
+        for op in ["Squeeze", "Unsqueeze"] {
+            let node = NodeProto {
+                op_type: op.into(),
+                input: vec!["data".into(), "runtime_axes".into()],
+                ..Default::default()
+            };
+            let evaluator: &dyn EvaluatorTrait = if op == "Squeeze" {
+                &SqueezeEvaluator
+            } else {
+                &UnsqueezeEvaluator
+            };
+            assert!(!evaluator.can_evaluate(&node, &ctx));
+            assert!(evaluator.evaluate(&node, &ctx).is_err());
         }
     }
 }

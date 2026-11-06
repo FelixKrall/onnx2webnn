@@ -169,12 +169,13 @@ fn validate_with_inputs(
         || "default".to_owned(),
         |backend| backend.as_ref().to_string(),
     );
-    let reference = run_onnx_path_with_inputs(onnx_path, clone_inputs(&inputs))
-        .map_err(|e| OnnxError::Validation(format!("native ORT run failed: {e}")))?;
     let graph_info = load_graph_from_path(webnn_path)
         .map_err(|e| OnnxError::Validation(format!("failed to reload WebNN cache: {e}")))?;
+    crate::capabilities::check_dynamic_inputs(graph_info.has_dynamic_dimensions())?;
+    let reference = run_onnx_path_with_inputs(onnx_path, clone_inputs(&inputs))
+        .map_err(|e| OnnxError::Validation(format!("native ORT run failed: {e}")))?;
     let mut context = MLContext::create(&backend_options)
-        .map_err(|e| OnnxError::Backend(format!("{backend_label} context creation failed: {e}")))?;
+        .map_err(|error| crate::capabilities::context_creation_error(&backend_label, error))?;
     let graph = context.rustnn_build_graph(graph_info).map_err(|e| {
         OnnxError::Backend(format!("{backend_label} cached graph build failed: {e}"))
     })?;

@@ -16,10 +16,8 @@
  * limitations under the License.
  */
 
-use anyhow::Context;
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use rustnn::mlcontext::Backend;
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -38,73 +36,77 @@ use onnx2webnn::{
     long_about = None
 )]
 struct Cli {
+    #[command(subcommand)]
+    cmd: Command,
+}
+
+#[derive(Args)]
+struct CommonArgs {
     /// Enable debug output
     #[arg(long, global = true)]
     debug: bool,
 
-    /// Execution backend for graph builds and validation
-    #[arg(long, global = true)]
+    #[arg(long, global = true, help = backend_help())]
     backend: Option<Backend>,
+}
 
-    #[command(subcommand)]
-    cmd: Command,
+fn backend_help() -> String {
+    let names = Backend::compiled()
+        .iter()
+        .map(|backend| backend.as_ref().to_owned())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "Execution backend for graph builds; omit for export only; required for validation. Compiled backends: {names}. Runtime libraries and hardware must also be available."
+    )
 }
 
 #[derive(Subcommand)]
 enum Command {
     /// Print the code-backed operator catalog as JSON
-    OperatorCatalog,
-    /// Lower ONNX and either build or export the WebNN graph
+    OperatorCatalog {
+        #[command(flatten)]
+        common: CommonArgs,
+    },
+    /// Lower ONNX and export to .webnn. Optionally build a backend-specific graph.
+    #[command(after_help = r#"Example:
+  onnx2webnn convert --model model.onnx --output model.webnn --backend onnx
+
+Dimension overrides and input pins specialize the exported graph.
+Run validate separately to supply execution inputs without modifying the graph."#)]
     Convert {
-        /// Input ONNX model path
-        #[arg(long, short)]
-        input: String,
+        #[command(flatten)]
+        common: CommonArgs,
+        /// ONNX model path
+        #[arg(long = "model", required = true)]
+        model: PathBuf,
+        #[command(flatten)]
+        settings: ModelSettingsArgs,
 
         /// Output .webnn file or extensionless directory (created as needed)
         #[arg(long, short)]
         output: Option<PathBuf>,
-
-        /// Override a symbolic dimension, e.g. batch_size=1 (repeatable)
-        #[arg(long = "override-dim")]
-        override_dims: Vec<String>,
-
-        /// JSON file with dimension overrides (freeDimensionOverrides object)
-        #[arg(long = "override-dims-file")]
-        override_dims_file: Option<String>,
-
-        /// Freeze a graph input to a constant, e.g. use_cache_branch=false
-        /// (repeatable). Constant `If` gates are then inlined.
-        #[arg(long = "pin-input")]
-        pin_inputs: Vec<String>,
 
         /// Zero-fill external tensors whose data file is missing (weight-stripped
         /// skeleton models; graph structure only)
         #[arg(long = "allow-missing-external-data")]
         allow_missing_external_data: bool,
 
-        /// Enable constant folding (Shape/Gather/Concat/Reshape pipelines)
-        #[arg(long)]
-        optimize: bool,
+        #[command(flatten)]
+        folding: FoldingArgs,
 
-        /// Preserve unresolved symbolic input dims as dynamic metadata (experimental)
+        /// Preserve unresolved symbolic input dims as dynamic metadata (experimental;
+        /// with --backend, requires a build with --features dynamic-inputs)
         #[arg(long)]
         experimental_dynamic_inputs: bool,
-
-        /// Export cache artifacts and build the selected backend graph without validation
-        #[arg(long, conflicts_with_all = ["validate", "validate_cached"])]
-        build_and_export: bool,
-
-        /// Export, reload, dispatch deterministic inputs, and compare with native ORT
-        #[arg(long)]
-        validate: bool,
-
-        /// Validate existing cache artifacts only; does not read or convert the source ONNX.
-        #[arg(long, conflicts_with_all = ["validate", "build_and_export"])]
-        validate_cached: bool,
     },
 
     /// Numerically validate manifest models against reloaded WebNN artifacts
-    ValidateModels {
+    ValidateManifest {
+        #[command(flatten)]
+        common: CommonArgs,
+        #[command(flatten)]
+        folding: FoldingArgs,
         /// Manifest selection: all or match=<text>
         #[arg(long)]
         selection: String,
@@ -122,21 +124,50 @@ enum Command {
         jobs: usize,
     },
 
-    /// Validate one or more local ONNX files against freshly exported WebNN artifacts
-    ValidateFiles {
-        /// Local ONNX file; repeat for each case
-        #[arg(long = "model", required = true)]
-        models: Vec<PathBuf>,
-        /// Complete SafeTensors input file, paired by position with each --model
-        #[arg(long, short)]
-        inputs: Vec<PathBuf>,
-        /// Symbolic dimension binding shared by every model, NAME=VALUE
-        #[arg(long = "override-dim")]
-        override_dims: Vec<String>,
-        /// Pin a graph input in every model, NAME=VALUE
-        #[arg(long = "pin-input")]
-        pin_inputs: Vec<String>,
+    /// Validate existing WebNN graphs against ONNX models without conversion
+    #[command(after_help = r#"Example:
+  onnx2webnn validate --onnx model.onnx --webnn model.webnn --input inputs.safetensors --backend onnx
+
+Omit --webnn to select the cached graph; omit --input for deterministic feeds.
+Dimension overrides and input files size execution feeds; they never rewrite the graph.
+Pins must match the values used during conversion."#)]
+    Validate {
+        #[command(flatten)]
+        common: CommonArgs,
+        /// Reference ONNX model path
+        #[arg(long, required = true)]
+        onnx: PathBuf,
+        #[command(flatten)]
+        settings: ModelSettingsArgs,
+        /// Complete SafeTensors execution inputs; omit for deterministic feeds
+        #[arg(long = "input", short = 'i')]
+        input: Option<PathBuf>,
+        /// Existing .webnn file; omit for cache lookup
+        #[arg(long)]
+        webnn: Option<PathBuf>,
     },
+}
+
+#[derive(Args)]
+struct FoldingArgs {
+    /// Enable optional constant-folding passes (disabled by default); required simplifications always run
+    #[arg(long)]
+    constant_folding: bool,
+}
+
+#[derive(Args)]
+struct ModelSettingsArgs {
+    /// Symbolic dimension binding for a single model, NAME=VALUE (repeatable)
+    #[arg(long = "override-dim")]
+    override_dims: Vec<String>,
+    /// Freeze a graph input for a single model, NAME=VALUE (repeatable)
+    #[arg(long = "pin-input")]
+    pin_inputs: Vec<String>,
+}
+
+struct ModelSettings {
+    overrides: HashMap<String, u32>,
+    pins: HashMap<String, i64>,
 }
 
 fn parse_overrides(specs: Vec<String>) -> anyhow::Result<HashMap<String, u32>> {
@@ -165,39 +196,6 @@ fn parse_pins(specs: Vec<String>) -> anyhow::Result<HashMap<String, i64>> {
         }
     }
     Ok(values)
-}
-
-fn local_webnn_path(
-    model: &Path,
-    overrides: &HashMap<String, u32>,
-    pins: &HashMap<String, i64>,
-) -> anyhow::Result<PathBuf> {
-    let mut hasher = Sha256::new();
-    let mut field = |bytes: &[u8]| {
-        hasher.update((bytes.len() as u64).to_le_bytes());
-        hasher.update(bytes);
-    };
-    field(b"onnx2webnn-local-v2");
-    field(model.canonicalize()?.to_string_lossy().as_bytes());
-    let mut dims: Vec<_> = overrides.iter().collect();
-    dims.sort_unstable_by_key(|(key, _)| *key);
-    for (key, value) in dims {
-        field(b"dimension");
-        field(key.as_bytes());
-        field(&value.to_le_bytes());
-    }
-    let mut pinned: Vec<_> = pins.iter().collect();
-    pinned.sort_unstable_by_key(|(key, _)| *key);
-    for (key, value) in pinned {
-        field(b"pin");
-        field(key.as_bytes());
-        field(&value.to_le_bytes());
-    }
-    drop(field);
-    let key = format!("{:x}", hasher.finalize());
-    Ok(onnx2webnn::cache::webnn_cache_dir()
-        .map_err(anyhow::Error::msg)?
-        .join(format!("local-{}.webnn", &key[..24])))
 }
 
 fn cache_paths(input: &Path) -> anyhow::Result<(PathBuf, PathBuf)> {
@@ -261,283 +259,164 @@ fn conversion_paths(input: &Path, output: Option<&Path>) -> anyhow::Result<(Path
     Ok((onnx, webnn))
 }
 
+fn model_settings(args: ModelSettingsArgs) -> anyhow::Result<ModelSettings> {
+    Ok(ModelSettings {
+        overrides: parse_overrides(args.override_dims)?,
+        pins: parse_pins(args.pin_inputs)?,
+    })
+}
+
+fn validate_graph(
+    model: &Path,
+    graph: &Path,
+    overrides: &HashMap<String, u32>,
+    pins: &HashMap<String, i64>,
+    inputs: Option<Vec<rustnn::OnnxInput>>,
+    backend: Backend,
+) -> anyhow::Result<onnx2webnn::ValidationSummary> {
+    let summary = if let Some(inputs) = inputs {
+        validate_cached_model_with_inputs_on_backend(model, graph, inputs, pins, backend)
+    } else {
+        validate_cached_model_with_options_on_backend(model, graph, overrides, pins, backend)
+    }?;
+    Ok(summary)
+}
+
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let backend = cli.backend;
-    if !matches!(cli.cmd, Command::OperatorCatalog) {
+    let common = match &cli.cmd {
+        Command::OperatorCatalog { common }
+        | Command::Convert { common, .. }
+        | Command::Validate { common, .. }
+        | Command::ValidateManifest { common, .. } => common,
+    };
+    let backend = common.backend;
+    if !matches!(cli.cmd, Command::OperatorCatalog { .. }) {
         std::env::set_var("O2W_OPERATOR_REPORT", "1");
     }
-    if cli.debug {
+    if common.debug {
         std::env::set_var("RUST_LOG", "debug");
     }
     pretty_env_logger::init();
-
+    let validation_backend = if !matches!(cli.cmd, Command::OperatorCatalog { .. }) {
+        let dynamic_inputs = matches!(
+            cli.cmd,
+            Command::Convert {
+                experimental_dynamic_inputs: true,
+                ..
+            }
+        );
+        let validation = matches!(
+            cli.cmd,
+            Command::Validate { .. } | Command::ValidateManifest { .. }
+        );
+        onnx2webnn::capabilities::preflight(backend, dynamic_inputs, validation)?
+    } else {
+        None
+    };
     match cli.cmd {
-        Command::OperatorCatalog => {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(
-                    onnx2webnn::onnx::ops::catalog::OPERATOR_CAPABILITIES
-                )?
-            );
-        }
+        Command::OperatorCatalog { .. } => println!(
+            "{}",
+            serde_json::to_string_pretty(onnx2webnn::onnx::ops::catalog::OPERATOR_CAPABILITIES)?
+        ),
         Command::Convert {
-            input,
+            model,
+            settings,
             output,
-            override_dims,
-            override_dims_file,
-            pin_inputs,
             allow_missing_external_data,
-            optimize,
+            folding: FoldingArgs { constant_folding },
             experimental_dynamic_inputs,
-            build_and_export,
-            validate,
-            validate_cached,
+            ..
         } => {
-            if validate || validate_cached {
-                std::env::set_var("O2W_OPERATOR_REPORT", "1");
-            }
-            let mut free_dim_overrides = if let Some(path) = override_dims_file {
-                let content = std::fs::read_to_string(&path)?;
-                let json: serde_json::Value = serde_json::from_str(&content)?;
-                let overrides = json
-                    .get("freeDimensionOverrides")
-                    .unwrap_or(&json)
-                    .as_object()
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "override-dims-file must be a JSON object (optionally nested under freeDimensionOverrides)"
-                        )
-                    })?;
-
-                let mut map = HashMap::new();
-                for (name, value) in overrides {
-                    let parsed = value.as_u64().ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "override value for '{}' must be an integer, got {}",
-                            name,
-                            value
-                        )
-                    })?;
-                    map.insert(name.to_string(), parsed as u32);
-                }
-                map
-            } else {
-                HashMap::new()
-            };
-
-            for override_dim in override_dims {
-                let parts: Vec<&str> = override_dim.split('=').collect();
-                if parts.len() != 2 {
-                    return Err(anyhow::anyhow!(
-                        "Invalid override-dim format: '{}'. Expected NAME=VALUE",
-                        override_dim
-                    ));
-                }
-                let name = parts[0].trim().to_string();
-                let value: u32 = parts[1]
-                    .trim()
-                    .parse()
-                    .with_context(|| format!("Invalid dimension value: '{}'", parts[1]))?;
-                free_dim_overrides.insert(name, value);
-            }
-
-            let input_path = Path::new(&input);
-
-            let mut pinned_inputs = HashMap::new();
-            for spec in pin_inputs {
-                let (name, value) = onnx2webnn::onnx::convert::parse_pinned_input(&spec)?;
-                pinned_inputs.insert(name, value);
-            }
-
-            let validation_overrides = free_dim_overrides.clone();
-            if validate_cached {
-                let (onnx_cache, webnn_cache) = conversion_paths(input_path, output.as_deref())?;
-                if !onnx_cache.exists() || !webnn_cache.exists() {
-                    return Err(anyhow::anyhow!(
-                        "cached validation requires {} and {}; run with --no-backend-graph-build or --validate first",
-                        onnx_cache.display(),
-                        webnn_cache.display()
-                    ));
-                }
-
-                if let Some(backend) = backend {
-                    println!(
-                        "Validating cached graph with {backend:?} backend against native CPU ORT"
-                    );
-                    let summary = validate_cached_model_with_options_on_backend(
-                        &onnx_cache,
-                        &webnn_cache,
-                        &validation_overrides,
-                        &pinned_inputs,
-                        backend,
-                    )?;
-                    println!(
-                        "✓ cached deterministic validation passed ({} inputs, {} outputs)",
-                        summary.input_count, summary.output_count
-                    );
-                }
-                return Ok(());
-            }
-
-            let cache_paths =
-                (backend.is_none() || build_and_export || validate || output.is_some())
-                    .then(|| conversion_paths(input_path, output.as_deref()))
-                    .transpose()?;
-            if let Some((onnx_cache, _)) = &cache_paths {
-                cache_onnx_model(input_path, onnx_cache, allow_missing_external_data)?;
-            }
-
+            let ModelSettings { overrides, pins } = model_settings(settings)?;
+            let (onnx, graph) = conversion_paths(&model, output.as_deref())?;
+            cache_onnx_model(&model, &onnx, allow_missing_external_data)?;
             let options = ConvertOptions {
-                free_dim_overrides,
-                optimize,
+                free_dim_overrides: overrides,
+                optimize: constant_folding,
                 experimental_dynamic_inputs,
-                pinned_inputs: pinned_inputs.clone(),
+                pinned_inputs: pins,
                 zero_fill_missing_external_data: allow_missing_external_data,
-                output_path: cache_paths.as_ref().map(|(_, webnn)| webnn.clone()),
+                output_path: Some(graph.clone()),
             };
-
             if let Some(backend) = backend {
-                println!("Building converted graph with {backend:?} backend");
-                let validated = convert_onnx_with_backend(input_path, options, backend)?;
+                let built = convert_onnx_with_backend(&model, options, backend)?;
                 println!(
-                    "✓ {:?} graph build succeeded for {input}",
-                    validated.context.rustnn_backend()
+                    "✓ {:?} graph build succeeded for {}",
+                    built.context.rustnn_backend(),
+                    model.display()
                 );
             } else {
-                export_onnx(input_path, options)?;
-                println!("✓ portable WebNN export succeeded for {input} (no backend build)");
+                export_onnx(&model, options)?;
+                println!(
+                    "✓ portable WebNN export succeeded for {} (no backend build)",
+                    model.display()
+                );
             }
-            if let Some((onnx_cache, webnn_cache)) = &cache_paths {
-                println!("✓ cached ONNX at {}", onnx_cache.display());
-                println!("✓ WebNN at {}", webnn_cache.display());
-                if validate {
-                    let backend = backend.ok_or_else(|| {
-                        anyhow::anyhow!("validate models requires setting a backend")
-                    })?;
-                    println!(
-                        "Validating reloaded graph with {backend:?} backend against native CPU ORT"
-                    );
-                    let summary = validate_cached_model_with_options_on_backend(
-                        onnx_cache,
-                        webnn_cache,
-                        &validation_overrides,
-                        &pinned_inputs,
-                        backend,
-                    )?;
-                    println!(
-                        "✓ deterministic validation passed ({} inputs, {} outputs)",
-                        summary.input_count, summary.output_count
-                    );
-                }
-            }
+            println!("✓ cached ONNX at {}", onnx.display());
+            println!("✓ WebNN at {}", graph.display());
+            println!("PASS {}", model.display());
         }
-        Command::ValidateModels {
+        Command::Validate {
+            onnx,
+            settings,
+            input,
+            webnn,
+            ..
+        } => {
+            let backend = validation_backend.expect("validation backend established by preflight");
+            let ModelSettings { overrides, pins } = model_settings(settings)?;
+            let graph = match webnn {
+                Some(graph) => graph,
+                None => cache_paths(&onnx)?.1,
+            };
+            anyhow::ensure!(
+                graph.is_file(),
+                "WebNN graph not found: {}; run convert first",
+                graph.display()
+            );
+            let (effective, supplied) = if let Some(input) = input {
+                let (dims, tensors) =
+                    onnx2webnn::load_safetensors_inputs(&onnx, input, &overrides, &pins)?;
+                (dims, Some(tensors))
+            } else {
+                (overrides, None)
+            };
+            let summary = validate_graph(&onnx, &graph, &effective, &pins, supplied, backend)?;
+            println!(
+                "PASS {} ({} inputs, {} outputs)",
+                onnx.display(),
+                summary.input_count,
+                summary.output_count
+            );
+        }
+        Command::ValidateManifest {
+            folding: FoldingArgs { constant_folding },
             selection,
             weights,
             manifest,
             jobs,
+            ..
         } => {
-            let backend = backend
-                .ok_or_else(|| anyhow::anyhow!("validate models requires setting a backend"))?;
-            std::env::set_var("O2W_OPERATOR_REPORT", "1");
+            let backend = validation_backend.expect("validation backend established by preflight");
             let selection = Selection::parse(&selection).map_err(anyhow::Error::msg)?;
             let mut options = RunOptions::new(selection, weights).map_err(anyhow::Error::msg)?;
             options.jobs = jobs;
             options.backend = backend;
-            println!("Validating reloaded graphs with {backend:?} backend against native CPU ORT");
+            options.optimize = constant_folding;
             if let Some(manifest) = manifest {
                 options.manifest = manifest;
             }
+            println!("Validating reloaded graphs with {backend:?} backend against native CPU ORT");
             let summary = run_manifest_validation(options).map_err(anyhow::Error::msg)?;
             println!("{summary}");
-            if summary.has_failures() {
-                return Err(anyhow::anyhow!(
-                    "{} of {} model validations failed",
-                    summary.failed.len(),
-                    summary.selected
-                ));
-            }
-        }
-        Command::ValidateFiles {
-            models,
-            inputs,
-            override_dims,
-            pin_inputs,
-        } => {
-            std::env::set_var("O2W_OPERATOR_REPORT", "1");
-            if !inputs.is_empty() && inputs.len() != models.len() {
-                anyhow::bail!("--inputs must be omitted or supplied once per --model ({} models, {} input files)",
-                    models.len(), inputs.len());
-            }
-            let overrides = parse_overrides(override_dims)?;
-            let pins = parse_pins(pin_inputs)?;
-            println!("Validating reloaded graphs with {backend:?} backend against native CPU ORT");
-            let mut failed = Vec::new();
-            let total = models.len();
-            for (index, model) in models.iter().enumerate() {
-                let run = || -> anyhow::Result<onnx2webnn::ValidationSummary> {
-                    let (effective, supplied) = if inputs.is_empty() {
-                        (overrides.clone(), None)
-                    } else {
-                        let (dims, tensors) = onnx2webnn::load_safetensors_inputs(
-                            model,
-                            &inputs[index],
-                            &overrides,
-                            &pins,
-                        )?;
-                        (dims, Some(tensors))
-                    };
-
-                    let backend = backend.expect("Validation requires setting a `--backend`");
-                    let webnn = local_webnn_path(model, &effective, &pins)?;
-                    convert_onnx_with_backend(
-                        model,
-                        ConvertOptions {
-                            free_dim_overrides: effective.clone(),
-                            optimize: true,
-                            experimental_dynamic_inputs: false,
-                            pinned_inputs: pins.clone(),
-                            zero_fill_missing_external_data: false,
-                            output_path: Some(webnn.clone()),
-                        },
-                        backend,
-                    )?;
-                    let result = if let Some(tensors) = supplied {
-                        validate_cached_model_with_inputs_on_backend(
-                            model, &webnn, tensors, &pins, backend,
-                        )?
-                    } else {
-                        validate_cached_model_with_options_on_backend(
-                            model, &webnn, &effective, &pins, backend,
-                        )?
-                    };
-                    Ok(result)
-                };
-                match run() {
-                    Ok(summary) => println!(
-                        "PASS {} ({} inputs, {} outputs)",
-                        model.display(),
-                        summary.input_count,
-                        summary.output_count
-                    ),
-                    Err(error) => {
-                        eprintln!("FAIL {}: {error:#}", model.display());
-                        failed.push(model.display().to_string());
-                    }
-                }
-            }
-            println!(
-                "Local validation: {}/{} passed ({:.1}%)",
-                total - failed.len(),
-                total,
-                (total - failed.len()) as f64 * 100.0 / total as f64
+            anyhow::ensure!(
+                !summary.has_failures(),
+                "{} of {} model validations failed",
+                summary.failed.len(),
+                summary.selected
             );
-            if !failed.is_empty() {
-                anyhow::bail!("{} local model(s) failed", failed.len());
-            }
         }
     }
-
     Ok(())
 }

@@ -5,6 +5,7 @@
  */
 
 pub mod cache;
+pub mod capabilities;
 pub mod model_validation;
 pub mod protos;
 pub mod validation;

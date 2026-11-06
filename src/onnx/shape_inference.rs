@@ -3746,13 +3746,16 @@ fn split_to_sequence_element_shapes(
 /// e.g. `Shape(x, start=0, end=1)` for the batch dim).
 pub(crate) fn shape_attr_range(node: &NodeProto, rank: usize) -> (usize, usize) {
     let rank_i = rank as i64;
-    let norm = |v: i64| -> usize { v.clamp(-rank_i, rank_i).rem_euclid(rank_i.max(1)) as usize };
+    let norm = |v: i64| -> usize {
+        let v = if v < 0 { v + rank_i } else { v };
+        v.clamp(0, rank_i) as usize
+    };
     let mut start = 0usize;
     let mut end = rank;
     for attr in node.attribute.as_slice() {
         match attr.name.as_str() {
             "start" => start = norm(attr.i),
-            "end" => end = if attr.i >= rank_i { rank } else { norm(attr.i) },
+            "end" => end = norm(attr.i),
             _ => {}
         }
     }
@@ -4416,6 +4419,23 @@ mod tests {
         node.attribute[0].i = -2;
         node.attribute[1].i = 100;
         assert_eq!(shape_attr_range(&node, 4), (2, 4));
+
+        for (start, end, expected) in [
+            (4, 100, (4, 4)),
+            (100, 100, (4, 4)),
+            (-100, 100, (0, 4)),
+            (3, 1, (3, 3)),
+            (-2, -1, (2, 3)),
+            (0, -100, (0, 0)),
+            (i64::MIN, i64::MAX, (0, 4)),
+        ] {
+            node.attribute[0].i = start;
+            node.attribute[1].i = end;
+            assert_eq!(shape_attr_range(&node, 4), expected);
+            assert_eq!(shape_attr_range(&node, 0), (0, 0));
+        }
+        node.attribute[0].i = -2;
+        node.attribute[1].i = 100;
 
         // Folded Shape output honours the range.
         let graph = GraphProto {

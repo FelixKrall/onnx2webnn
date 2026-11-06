@@ -2053,7 +2053,7 @@ fn convert_model_with_context_options(
 ) -> Result<ValidatedGraph<'static>, OnnxError> {
     let mut converter = prepare_model(model, options)?;
     let mut context = MLContext::create(&context_options)
-        .map_err(|e| OnnxError::Backend(format!("{backend} context creation failed: {e}")))?;
+        .map_err(|error| crate::capabilities::context_creation_error(backend, error))?;
     let mut ml_builder = MLGraphBuilder::new(&mut context)
         .map_err(|e| OnnxError::Backend(format!("{backend} builder creation failed: {e}")))?;
     let outputs = record_and_save(&mut converter, options, &mut ml_builder)?;
