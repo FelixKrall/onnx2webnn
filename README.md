@@ -76,8 +76,8 @@ Validation currently allocates tensors at maximum bounded sizes, so smaller conc
 with a size mismatch.
 
 Without CLI overrides, `model.dims.json` can supply dimension bindings. WebNN exports default
-to the OS cache's `onnx2webnn/webnn` directory; source ONNX copies go to `onnx2webnn/onnx`.
-Set `O2W_CACHE_DIR`, `O2W_ONNX_CACHE`, or `O2W_WEBNN_CACHE` to override locations.
+to the OS cache's `onnx2webnn/webnn` directory; set `O2W_WEBNN_CACHE` to override it.
+Source ONNX files are read in place.
 
 WebNN lacks fused `MatMulNBits`; conversion dequantizes packed q4/q8 weights before floating-point
 matmul. ORT `accuracy_level=4` can instead use Int8 activations, so numerical parity is not assured.
@@ -178,8 +178,8 @@ PR CI numerically validates the curated
 experimental; Windows does not run this check. Each entry pins a Hugging Face commit and ONNX
 SHA-256, verified on download and reuse. To add one, test both backends and record its file,
 revision, digest, dimensions, and pinned inputs in the curated file—not the generated manifest.
-Downloads use the standard Hugging Face cache unless `O2W_ONNX_CACHE` or `O2W_CACHE_DIR` overrides
-it.
+Downloads use the standard Hugging Face cache (`HF_HUB_CACHE`, `HUGGINGFACE_HUB_CACHE`,
+or `HF_HOME`). Use `validate-manifest --refresh-model-cache` to force fresh downloads.
 
 ```bash
 target/release/onnx2webnn validate-manifest --backend onnx \

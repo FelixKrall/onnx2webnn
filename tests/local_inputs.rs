@@ -358,7 +358,6 @@ fn local_models_use_supplied_inputs() {
                 "--pin-input",
                 &format!("flag={}", index == 1),
             ])
-            .env("O2W_ONNX_CACHE", dir.path().join("onnx"))
             .env("O2W_WEBNN_CACHE", dir.path().join("webnn"))
             .output()
             .unwrap();
@@ -413,7 +412,6 @@ fn numerical_disagreement_fails_local_command() {
             "--input",
             feeds.to_str().unwrap(),
         ])
-        .env("O2W_ONNX_CACHE", dir.path().join("onnx"))
         .env("O2W_WEBNN_CACHE", dir.path().join("webnn"))
         .output()
         .unwrap();

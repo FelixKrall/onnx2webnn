@@ -9,8 +9,8 @@ use std::process::Command;
 
 use onnx2webnn::onnx::test_models::prelude::*;
 use onnx2webnn::{
-    cache_onnx_model, convert_onnx, export_onnx, validate_cached_model,
-    validate_cached_model_with_options, ConvertOptions,
+    convert_onnx, export_onnx, validate_cached_model, validate_cached_model_with_options,
+    ConvertOptions,
 };
 use prost::Message;
 
@@ -18,7 +18,6 @@ use prost::Message;
 fn saved_add_graph_reloads_and_matches_native_ort() {
     let dir = tempfile::tempdir().expect("temporary cache");
     let source = dir.path().join("source.onnx");
-    let cached_onnx = dir.path().join("cached.onnx");
     let cached_webnn = dir.path().join("cached.webnn");
     let model = model(
         17,
@@ -31,9 +30,8 @@ fn saved_add_graph_reloads_and_matches_native_ort() {
         ),
     );
     fs::write(&source, model.encode_to_vec()).expect("write source model");
-    cache_onnx_model(&source, &cached_onnx, false).expect("cache ONNX");
     convert_onnx(
-        &cached_onnx,
+        &source,
         ConvertOptions {
             output_path: Some(cached_webnn.clone()),
             ..ConvertOptions::default()
@@ -42,7 +40,7 @@ fn saved_add_graph_reloads_and_matches_native_ort() {
     .expect("convert and export");
     assert!(cached_webnn.with_extension("safetensors").exists());
     assert_eq!(
-        validate_cached_model(&cached_onnx, &cached_webnn)
+        validate_cached_model(&source, &cached_webnn)
             .expect("validate")
             .output_count,
         1
@@ -156,7 +154,6 @@ fn constant_node_quantization_parameters_validate_after_reload() {
         .arg(&source)
         .arg("--webnn")
         .arg(&webnn)
-        .env("O2W_ONNX_CACHE", dir.path().join("onnx"))
         .env("O2W_WEBNN_CACHE", dir.path().join("webnn"))
         .output()
         .expect("run converter");
@@ -202,7 +199,6 @@ fn ambiguous_quantized_feed_falls_back_with_a_warning() {
         .arg(&source)
         .arg("--webnn")
         .arg(&webnn)
-        .env("O2W_ONNX_CACHE", dir.path().join("onnx"))
         .env("O2W_WEBNN_CACHE", dir.path().join("webnn"))
         .output()
         .expect("run converter");

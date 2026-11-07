@@ -53,6 +53,8 @@ pub struct RunOptions {
     pub backend: Backend,
     /// Enable optional constant folding while converting manifest models.
     pub optimize: bool,
+    /// Force fresh Hugging Face downloads instead of reusing cached model files.
+    pub refresh_model_cache: bool,
 }
 
 impl RunOptions {
@@ -69,6 +71,7 @@ impl RunOptions {
             webnn_cache: crate::cache::webnn_cache_dir()?,
             backend: Backend::Onnx,
             optimize: false,
+            refresh_model_cache: false,
         })
     }
 }
@@ -207,7 +210,8 @@ impl Sweep {
     fn model(&self, entry: &Entry) -> Result<PathBuf, String> {
         let key = format!("{}:{}", self.options.weights, entry.source_key());
         let cell = self.models.lock().unwrap().entry(key).or_default().clone();
-        cell.get_or_init(|| cache_full_model(entry)).clone()
+        cell.get_or_init(|| cache_full_model(entry, self.options.refresh_model_cache))
+            .clone()
     }
 
     fn validate(&self, index: usize, entry: &Entry) {
@@ -326,6 +330,7 @@ mod tests {
         assert_eq!(WeightMode::default(), WeightMode::Real);
         let options = RunOptions::new(Selection::All, WeightMode::default()).unwrap();
         assert!(!options.optimize);
+        assert!(!options.refresh_model_cache);
     }
 
     #[test]

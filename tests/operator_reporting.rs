@@ -23,7 +23,6 @@ fn unsupported_node_reports_identity_and_complete_assessment() {
     fs::write(&path, fixture.encode_to_vec()).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_onnx2webnn"))
         .args(["convert", "--model", path.to_str().unwrap()])
-        .env("O2W_ONNX_CACHE", dir.path().join("onnx"))
         .env("O2W_WEBNN_CACHE", dir.path().join("webnn"))
         .output()
         .unwrap();
@@ -51,7 +50,6 @@ fn supported_direct_node_reports_full_coverage() {
     fs::write(&path, fixture.encode_to_vec()).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_onnx2webnn"))
         .args(["convert", "--model", path.to_str().unwrap()])
-        .env("O2W_ONNX_CACHE", dir.path().join("onnx"))
         .env("O2W_WEBNN_CACHE", dir.path().join("webnn"))
         .output()
         .unwrap();
@@ -90,7 +88,6 @@ fn conditional_cast_path_reports_decomposition() {
     fs::write(&path, fixture.encode_to_vec()).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_onnx2webnn"))
         .args(["convert", "--model", path.to_str().unwrap()])
-        .env("O2W_ONNX_CACHE", dir.path().join("onnx"))
         .env("O2W_WEBNN_CACHE", dir.path().join("webnn"))
         .output()
         .unwrap();
@@ -123,7 +120,6 @@ fn performance_limited_reports_total_and_partial_node_percentages() {
     fs::write(&path, fixture.encode_to_vec()).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_onnx2webnn"))
         .args(["convert", "--model", path.to_str().unwrap()])
-        .env("O2W_ONNX_CACHE", dir.path().join("onnx"))
         .env("O2W_WEBNN_CACHE", dir.path().join("webnn"))
         .output()
         .unwrap();
@@ -171,7 +167,6 @@ fn unsupported_form_reports_node_and_rejection_reason() {
     fs::write(&path, fixture.encode_to_vec()).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_onnx2webnn"))
         .args(["convert", "--model", path.to_str().unwrap()])
-        .env("O2W_ONNX_CACHE", dir.path().join("onnx"))
         .env("O2W_WEBNN_CACHE", dir.path().join("webnn"))
         .output()
         .unwrap();

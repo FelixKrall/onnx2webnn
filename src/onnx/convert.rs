@@ -84,12 +84,6 @@ pub enum OnnxError {
     #[error("Failed to resolve external tensor data: {source}")]
     ExternalTensorDataError { source: Box<OnnxError> },
 
-    #[error("Failed to write cache file: {source}")]
-    CacheWriteError {
-        source: std::io::Error,
-        path: PathBuf,
-    },
-
     #[error("failed to parse ONNX protobuf: {0}")]
     ProtobufError(String),
 
@@ -1747,31 +1741,6 @@ fn load_model_from_path(
     }
 
     Ok((model, options))
-}
-
-/// Cache an ONNX model with all external tensor data embedded in the protobuf.
-///
-/// Keeping the cache self-contained means native ORT validation can reopen the
-/// cached `.onnx` without relying on a source-side `.onnx.data` file.
-pub fn cache_onnx_model<P: AsRef<Path>, Q: AsRef<Path>>(
-    source_path: P,
-    cache_path: Q,
-    zero_fill_missing_external_data: bool,
-) -> Result<(), OnnxError> {
-    let source_path = source_path.as_ref();
-    let bytes = fs::read(source_path)?;
-    let mut model = ModelProto::decode(bytes.as_slice())
-        .map_err(|e| OnnxError::ProtobufError(e.to_string()))?;
-    load_external_tensor_data(&mut model, source_path, zero_fill_missing_external_data)?;
-    let cache_path = cache_path.as_ref();
-    if let Some(parent) = cache_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(cache_path, model.encode_to_vec()).map_err(|err| OnnxError::CacheWriteError {
-        source: err,
-        path: cache_path.to_owned(),
-    })?;
-    Ok(())
 }
 
 /// Inline `If` nodes whose condition folds to a constant (e.g. pyannote's

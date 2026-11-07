@@ -80,7 +80,7 @@ jobs:
         id: validation
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          O2W_ONNX_CACHE: /var/cache/onnx2webnn
+          HF_HUB_CACHE: /var/cache/onnx2webnn
           O2W_WEBNN_CACHE: ${{ runner.temp }}/onnx2webnn-webnn
         run: |
           set +e
