@@ -26,7 +26,7 @@ pub struct ValidationSummary {
 }
 
 /// Reload saved WebNN artifacts, dispatch deterministic fixed-shape inputs,
-/// and compare results with native ONNX Runtime on the cached ONNX model.
+/// and compare results with native ONNX Runtime on the provided onnx file.
 pub fn validate_cached_model(
     onnx_path: impl AsRef<Path>,
     webnn_path: impl AsRef<Path>,
