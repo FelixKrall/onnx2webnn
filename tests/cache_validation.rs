@@ -984,6 +984,48 @@ fn validate_folding_regression(fixture: onnx2webnn::protos::onnx::ModelProto) {
 }
 
 #[test]
+fn sequence_slice_shape_propagates_without_optional_folding() {
+    validate_folding_regression(model(
+        17,
+        graph(
+            "sequence_slice",
+            vec![f32_input("x", &[2, 4])],
+            vec![f32_output("y", &[1, 2])],
+            vec![
+                node(
+                    "SplitToSequence",
+                    "split",
+                    &["x", "split_size"],
+                    &["pieces"],
+                    &[attr_int("axis", 0)],
+                ),
+                node(
+                    "SequenceAt",
+                    "select",
+                    &["pieces", "index"],
+                    &["piece"],
+                    &[],
+                ),
+                node(
+                    "Slice",
+                    "slice",
+                    &["piece", "starts", "ends", "axes"],
+                    &["y"],
+                    &[],
+                ),
+            ],
+            vec![
+                i64_init("split_size", &[], &[1]),
+                i64_init("index", &[], &[0]),
+                i64_init("starts", &[1], &[1]),
+                i64_init("ends", &[1], &[3]),
+                i64_init("axes", &[1], &[1]),
+            ],
+        ),
+    ));
+}
+
+#[test]
 fn squeeze_folding_preserves_axes_input_and_broadcast_shape() {
     validate_folding_regression(model(
         13,
