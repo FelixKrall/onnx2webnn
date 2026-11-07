@@ -3993,23 +3993,6 @@ pub fn propagate_shapes_and_fold_constants(
                         initializers,
                         const_values,
                     );
-                    if std::env::var("O2W_TRACE").is_ok()
-                        && onnx_node
-                            .output
-                            .first()
-                            .is_some_and(|o| o.contains("layers.0/self_attn/Reshape_output_0"))
-                    {
-                        eprintln!(
-                            "[opt-loop] {} stored={:?} inferred={:?} in0={:?}",
-                            onnx_node.output[0],
-                            value_shapes.get(onnx_node.output[0].as_str()),
-                            inferred_opt,
-                            onnx_node
-                                .input
-                                .first()
-                                .map(|i| value_shapes.get(i.as_str()))
-                        );
-                    }
                     if let Some(inferred) = inferred_opt {
                         if let Some(output_name) = onnx_node.output.first() {
                             // Force the correct shape - shape inference computes exact output shape
