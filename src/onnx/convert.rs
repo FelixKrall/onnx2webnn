@@ -1216,29 +1216,17 @@ Provide --override-dim {}=<value> or enable --experimental-dynamic-inputs.",
             },
         );
 
-        // DEBUG: Check value before node conversion
-        if let Some(val) = const_values.get("/model/rotary_emb/Where_output_0") {
-            log::debug!("[NODE CONV] /model/rotary_emb/Where_output_0 = {:?}", val);
-        }
-        // O2W_PROBE=<substr>: dump post-propagation shape/const state for
-        // matching node outputs (diagnostics only).
-        if let Ok(probe) = std::env::var("O2W_PROBE") {
-            for onnx_node in onnx_graph.node.as_slice() {
-                for out in onnx_node.output.as_slice() {
-                    if out.contains(&probe) {
-                        eprintln!(
-                            "[probe] {} ({}) shape={:?} type={:?} const={:?}",
-                            out,
-                            onnx_node.op_type,
-                            value_shapes.get(out.as_str()),
-                            value_types.get(out.as_str()),
-                            const_values.get(out.as_str()).map(|v| v
-                                .iter()
-                                .take(8)
-                                .copied()
-                                .collect::<Vec<_>>()),
-                        );
-                    }
+        if log::log_enabled!(log::Level::Trace) {
+            for onnx_node in &onnx_graph.node {
+                for out in &onnx_node.output {
+                    log::trace!(
+                        "Post-propagation output {} ({}) shape={:?} type={:?} const={:?}",
+                        out,
+                        onnx_node.op_type,
+                        value_shapes.get(out.as_str()),
+                        value_types.get(out.as_str()),
+                        const_values.get(out.as_str()).map(|v| &v[..v.len().min(8)]),
+                    );
                 }
             }
         }
