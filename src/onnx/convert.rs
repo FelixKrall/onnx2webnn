@@ -1938,17 +1938,14 @@ fn inline_constant_ifs(model: &mut ModelProto, options: &ConvertOptions) {
     }
 }
 
-/// Use the same build-default backend selection as the original conversion path.
+/// Use the build-default backend selection and allow ONNX packed 4-bit weights.
 pub(crate) fn default_backend_context_options() -> MLContextOptions {
     #[cfg(feature = "trtx")]
-    {
-        MLContextOptions::new(MLPowerPreference::Default, true)
-            .with_rustnn_backend_hint(rustnn::mlcontext::Backend::Trtx)
-    }
+    let options = MLContextOptions::new(MLPowerPreference::Default, true)
+        .with_rustnn_backend_hint(rustnn::mlcontext::Backend::Trtx);
     #[cfg(not(feature = "trtx"))]
-    {
-        MLContextOptions::new(MLPowerPreference::Default, false)
-    }
+    let options = MLContextOptions::new(MLPowerPreference::Default, false);
+    options.with_rustnn_allow_int4_uint4(true)
 }
 
 /// Select an explicitly requested compiled-in backend.
@@ -1978,7 +1975,8 @@ pub fn export_model_proto(model: ModelProto, options: &ConvertOptions) -> Result
         return Err(OnnxError::Export("export requires an output path".into()));
     }
     let mut converter = prepare_model(model, options)?;
-    let mut builder = MLGraphBuilder::new_uncompiled();
+    let mut builder =
+        MLGraphBuilder::new_uncompiled_with_options(&default_backend_context_options());
     record_and_save(&mut converter, options, &mut builder)?;
     Ok(())
 }

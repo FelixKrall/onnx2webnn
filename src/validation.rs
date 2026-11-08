@@ -10,8 +10,9 @@ use crate::protos::onnx::{
 use half::f16;
 use prost::Message;
 use rustnn::graph::OperandDescriptor;
+use rustnn::loader::load_graph_from_path_with_options;
 use rustnn::mlcontext::{Backend, MLContext, MLTensor, MLTensorDescriptor};
-use rustnn::{load_graph_from_path, run_onnx_path_with_inputs, OnnxInput, TensorData};
+use rustnn::{run_onnx_path_with_inputs, OnnxInput, TensorData};
 use safetensors::{tensor::Dtype, SafeTensors};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
@@ -168,7 +169,7 @@ fn validate_with_inputs(
         || "default".to_owned(),
         |backend| backend.as_ref().to_string(),
     );
-    let graph_info = load_graph_from_path(webnn_path)
+    let graph_info = load_graph_from_path_with_options(webnn_path, &backend_options)
         .map_err(|e| OnnxError::Validation(format!("failed to reload WebNN cache: {e}")))?;
     crate::capabilities::check_dynamic_inputs(graph_info.has_dynamic_dimensions())?;
     let reference = run_onnx_path_with_inputs(onnx_path, clone_inputs(&inputs))
