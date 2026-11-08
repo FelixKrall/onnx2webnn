@@ -4,6 +4,34 @@ use crate::onnx::convert::{backend_context_options, OnnxError};
 use rustnn::mlcontext::{Backend, MLContext};
 use std::path::PathBuf;
 
+/// Describe compile-time support without loading native runtimes.
+pub fn backend_summary() -> String {
+    let names = |backends: &[Backend]| {
+        backends
+            .iter()
+            .map(Backend::as_ref)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    format!(
+        "enabled backends: [{}], all backends: [{}]",
+        names(&Backend::compiled()),
+        names(Backend::compilable())
+    )
+}
+
+/// Parse a known, compiled-in backend without probing its runtime.
+pub fn parse_backend(name: &str) -> Result<Backend, OnnxError> {
+    let backend = name.parse::<Backend>().map_err(|_| {
+        OnnxError::Backend(format!(
+            "could not use {name:?} because it is not a known backend; {}",
+            backend_summary()
+        ))
+    })?;
+    check_backend_build(backend)?;
+    Ok(backend)
+}
+
 /// Check CLI capabilities before processing models and return the validation backend, if needed.
 pub fn preflight(
     backend: Option<Backend>,
@@ -34,8 +62,9 @@ pub fn preflight(
 fn check_backend_build(backend: Backend) -> Result<(), OnnxError> {
     if !Backend::compiled().contains(&backend) {
         return Err(OnnxError::Backend(format!(
-            "{} backend is not compiled into this build or is unsupported on this target; enable the matching backend feature on a supported target",
-            backend.as_ref()
+            "could not use {:?} because it is compile-time disabled on this target; {}",
+            backend.as_ref(),
+            backend_summary()
         )));
     }
     Ok(())
@@ -88,7 +117,7 @@ pub(crate) fn context_creation_error(backend: &str, error: rustnn::error::Error)
             Backend::Litert => detail.push_str(
                 ". LiteRT reported no usable runtime environment; check the LiteRT runtime installation. RustNN does not expose the initialization cause",
             ),
-            Backend::Coreml | Backend::Cann | Backend::BurnCpu => {}
+            _ => {}
         }
         return OnnxError::Backend(detail);
     }

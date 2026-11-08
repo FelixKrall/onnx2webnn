@@ -42,18 +42,14 @@ struct Cli {
 
 #[derive(Args)]
 struct CommonArgs {
-    #[arg(long, global = true, help = backend_help())]
+    #[arg(long, global = true, help = backend_help(), value_parser = onnx2webnn::capabilities::parse_backend)]
     backend: Option<Backend>,
 }
 
 fn backend_help() -> String {
-    let names = Backend::compiled()
-        .iter()
-        .map(|backend| backend.as_ref().to_owned())
-        .collect::<Vec<_>>()
-        .join(", ");
+    let backends = onnx2webnn::capabilities::backend_summary();
     format!(
-        "Execution backend for graph builds; omit for export only; required for validation. Compiled backends: {names}. Runtime libraries and hardware must also be available."
+        "Execution backend for graph builds; omit for export only; required for validation. {backends}. Runtime libraries and hardware must also be available."
     )
 }
 
