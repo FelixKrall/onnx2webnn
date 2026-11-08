@@ -1,5 +1,5 @@
-> **Last edited:** `2026-11-07T16:42:33Z`<br>
-> **Checkout:** `backend-reporting` at `9147571`
+> **Last edited:** `2026-11-08T18:11:41Z`<br>
+> **Checkout:** `backend-reporting` at `b519633`
 >
 > **Freshness:** Use this document only when this provenance is recent relative to the relevant
 > code and commits; otherwise verify the implementation, tests, and Git history before relying
@@ -173,9 +173,10 @@ feed, while malformed quantization parameters still fail validation.
 ## Model sweep
 
 [`manifest.json`](tests/models/manifest.json) is a generated Transformers.js selection, not a
-pinned CI gate. The skeleton sweep fetches graph structure and small constants with HTTP ranges,
-zero-fills missing large weights, and builds each graph in ORT or CI-selected CoreML. It checks
-construction, not numerical correctness.
+pinned CI gate. Both sweeps exclude the invalid Chronos encoder/decoder source graphs; see
+[model exclusions](docs/transformersjs_excluded_models.md). The skeleton sweep fetches graph
+structure and small constants with HTTP ranges, zero-fills missing large weights, and builds each
+graph in ORT or CI-selected CoreML. It checks construction, not numerical correctness.
 
 ### Numerical-validation CI
 
