@@ -185,7 +185,7 @@ pub(crate) fn map_onnx_data_type(onnx_type: i32) -> Result<DataType, OnnxError> 
 pub struct ConvertOptions {
     /// Override dynamic dimension values (e.g., batch_size=1, sequence_length=128)
     pub free_dim_overrides: HashMap<String, u32>,
-    /// Enable constant folding and shape propagation optimizations
+    /// Enable optional constant folding; required shape propagation always runs.
     pub optimize: bool,
     /// Experimental: preserve unresolved dynamic input dimensions in graph metadata
     pub experimental_dynamic_inputs: bool,
@@ -1211,7 +1211,6 @@ Provide --override-dim {}=<value> or enable --experimental-dynamic-inputs.",
             &mut const_values,
             &mut value_shape_dims,
             &crate::onnx::shape_inference::PropagateOptions {
-                optimize: options.optimize,
                 experimental_dynamic_inputs: options.experimental_dynamic_inputs,
             },
         );
@@ -1816,7 +1815,6 @@ fn inline_constant_ifs(model: &mut ModelProto, options: &ConvertOptions) {
             &mut const_values,
             &mut value_shape_dims,
             &crate::onnx::shape_inference::PropagateOptions {
-                optimize: true,
                 experimental_dynamic_inputs: false,
             },
         );
@@ -2473,6 +2471,46 @@ mod tests {
         let options = ConvertOptions::default();
         assert!(!options.optimize);
         assert!(options.free_dim_overrides.is_empty());
+    }
+
+    #[test]
+    fn optional_tensor_folding_stays_opt_in() {
+        use crate::onnx::test_models::prelude::*;
+
+        let fixture = model(
+            17,
+            graph(
+                "constant_concat",
+                vec![],
+                vec![f32_output("y", &[4])],
+                vec![node(
+                    "Concat",
+                    "concat",
+                    &["a", "b"],
+                    &["y"],
+                    &[attr_int("axis", 0)],
+                )],
+                vec![
+                    f32_init("a", &[2], &[1., 2.]),
+                    f32_init("b", &[2], &[3., 4.]),
+                ],
+            ),
+        );
+        for optimize in [false, true] {
+            let converter = prepare_model(
+                fixture.clone(),
+                &ConvertOptions {
+                    optimize,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let graph = converter.model.graph.unwrap();
+            assert_eq!(
+                graph.node.iter().any(|node| node.op_type == "Concat"),
+                !optimize
+            );
+        }
     }
 
     #[test]

@@ -3824,10 +3824,9 @@ pub(crate) fn read_int_tensor(tensor: &TensorProto) -> Vec<i64> {
     }
 }
 
-/// Options for extended shape propagation during ONNX lowering.
+/// Options for required shape propagation during ONNX lowering.
 #[derive(Debug, Clone, Copy)]
 pub struct PropagateOptions {
-    pub optimize: bool,
     pub experimental_dynamic_inputs: bool,
 }
 
@@ -3844,189 +3843,180 @@ pub fn propagate_shapes_and_fold_constants(
     // Propagate shapes and fold constant shape expressions in a few passes
     for _ in 0..24 {
         let mut shapes_changed = false;
-        if options.optimize {
-            let max_iterations = 10;
-            for iteration in 0..max_iterations {
-                let initial_count = value_shapes.len();
+        let max_iterations = 10;
+        for iteration in 0..max_iterations {
+            let initial_count = value_shapes.len();
 
-                for onnx_node in graph.node.as_slice() {
-                    let all_outputs_known = onnx_node
-                        .output
-                        .iter()
-                        .all(|out| value_shapes.contains_key(out.as_str()));
-                    // Shapes recorded from partial information (e.g. the
-                    // binary-broadcast single-input guess) go stale once more
-                    // inputs resolve. Every inference arm is exact given
-                    // resolved inputs and returns None otherwise, so always
-                    // recomputing is idempotent; multi-output special cases
-                    // above keep their or_insert semantics.
-                    let _ = all_outputs_known;
+            for onnx_node in graph.node.as_slice() {
+                let all_outputs_known = onnx_node
+                    .output
+                    .iter()
+                    .all(|out| value_shapes.contains_key(out.as_str()));
+                // Shapes recorded from partial information (e.g. the
+                // binary-broadcast single-input guess) go stale once more
+                // inputs resolve. Every inference arm is exact given
+                // resolved inputs and returns None otherwise, so always
+                // recomputing is idempotent; multi-output special cases
+                // above keep their or_insert semantics.
+                let _ = all_outputs_known;
 
-                    if onnx_node.op_type.as_str() == "DynamicQuantizeLinear" {
-                        if let Some(input_name) = onnx_node.input.first() {
-                            if let Some(input_shape) = value_shapes.get(input_name).cloned() {
-                                if let [y, scale, zero_point] = onnx_node.output.as_slice() {
-                                    value_shapes.insert(y.clone(), input_shape);
-                                    value_shapes.insert(scale.clone(), Vec::new());
-                                    value_shapes.insert(zero_point.clone(), Vec::new());
-                                    value_types.insert(y.clone(), DataType::Uint8);
-                                    value_types.insert(scale.clone(), DataType::Float32);
-                                    value_types.insert(zero_point.clone(), DataType::Uint8);
-                                    continue;
-                                }
+                if onnx_node.op_type.as_str() == "DynamicQuantizeLinear" {
+                    if let Some(input_name) = onnx_node.input.first() {
+                        if let Some(input_shape) = value_shapes.get(input_name).cloned() {
+                            if let [y, scale, zero_point] = onnx_node.output.as_slice() {
+                                value_shapes.insert(y.clone(), input_shape);
+                                value_shapes.insert(scale.clone(), Vec::new());
+                                value_shapes.insert(zero_point.clone(), Vec::new());
+                                value_types.insert(y.clone(), DataType::Uint8);
+                                value_types.insert(scale.clone(), DataType::Float32);
+                                value_types.insert(zero_point.clone(), DataType::Uint8);
+                                continue;
                             }
                         }
                     }
+                }
 
-                    if onnx_node.op_type.as_str() == "GroupQueryAttention" {
-                        if let Some(shapes) =
-                            crate::onnx::ops::attention::gqa_output_shapes(onnx_node, value_shapes)
-                        {
-                            for (output, shape) in onnx_node.output.iter().zip(shapes) {
-                                if !output.is_empty() {
-                                    value_shapes.insert(output.to_string(), shape);
-                                }
-                            }
-                            continue;
-                        }
-                    }
-
-                    // Sequences: track per-element shapes under `{name}__seq{i}`
-                    // so SequenceAt consumers resolve (mirrors the conversion).
-                    if onnx_node.op_type.as_str() == "SplitToSequence" {
-                        if let Some(elems) = split_to_sequence_element_shapes(
-                            onnx_node,
-                            value_shapes,
-                            initializers,
-                            const_values,
-                        ) {
-                            if let Some(seq_name) = onnx_node.output.first() {
-                                let dtype = onnx_node
-                                    .input
-                                    .first()
-                                    .and_then(|n| value_types.get(n.as_str()).copied());
-                                for (i, shape) in elems.iter().enumerate() {
-                                    let key = format!("{}__seq{i}", sanitize_identifier(seq_name));
-                                    value_shapes.insert(key.clone(), shape.clone());
-                                    if let Some(dtype) = dtype {
-                                        value_types.insert(key, dtype);
-                                    }
-                                }
-                                value_shapes.insert(
-                                    format!("{}__seqlen", sanitize_identifier(seq_name)),
-                                    vec![elems.len() as i64],
-                                );
-                            }
-                        }
-                        continue;
-                    }
-                    if onnx_node.op_type.as_str() == "SequenceAt" {
-                        let resolved = (|| {
-                            let ins = onnx_node.input.as_slice();
-                            let seq = sanitize_identifier(ins.first()?);
-                            let count = value_shapes
-                                .get(&format!("{seq}__seqlen"))?
-                                .first()
-                                .copied()?;
-                            let mut idx = const_values
-                                .get(ins.get(1)?.as_str())
-                                .and_then(|v| v.first().copied())
-                                .or_else(|| {
-                                    initializers
-                                        .get(ins.get(1)?.as_str())
-                                        .and_then(|t| read_int_tensor(t).first().copied())
-                                })?;
-                            if idx < 0 {
-                                idx += count;
-                            }
-                            value_shapes.get(&format!("{seq}__seq{idx}")).cloned()
-                        })();
-                        if let (Some(shape), Some(out)) = (resolved, onnx_node.output.first()) {
-                            value_shapes.insert(out.to_string(), shape);
-                            if let Some(dtype) = onnx_node
-                                .input
-                                .first()
-                                .map(|n| format!("{}__seq0", sanitize_identifier(n)))
-                                .and_then(|k| value_types.get(&k).copied())
-                            {
-                                value_types.insert(out.to_string(), dtype);
-                            }
-                        }
-                        continue;
-                    }
-
-                    if matches!(onnx_node.op_type.as_str(), "LSTM" | "GRU" | "RNN") {
-                        if let Some(shapes) = rnn_output_shapes(onnx_node, value_shapes) {
-                            let dtype = onnx_node
-                                .input
-                                .first()
-                                .and_then(|n| value_types.get(n.as_str()).copied());
-                            for (output, shape) in onnx_node.output.iter().zip(shapes) {
-                                if !output.is_empty() {
-                                    value_shapes.insert(output.to_string(), shape);
-                                    if let Some(dtype) = dtype {
-                                        value_types.insert(output.to_string(), dtype);
-                                    }
-                                }
-                            }
-                            continue;
-                        }
-                    }
-
-                    if onnx_node.op_type.as_str() == "Split" {
-                        if let Some(shapes) = infer_split_output_shapes(
-                            onnx_node,
-                            value_shapes,
-                            initializers,
-                            const_values,
-                        ) {
-                            for (output, shape) in onnx_node.output.iter().zip(shapes) {
+                if onnx_node.op_type.as_str() == "GroupQueryAttention" {
+                    if let Some(shapes) =
+                        crate::onnx::ops::attention::gqa_output_shapes(onnx_node, value_shapes)
+                    {
+                        for (output, shape) in onnx_node.output.iter().zip(shapes) {
+                            if !output.is_empty() {
                                 value_shapes.insert(output.to_string(), shape);
                             }
-                            continue;
                         }
+                        continue;
                     }
+                }
 
-                    let inferred_opt = infer_node_output_shape(
+                // Sequences: track per-element shapes under `{name}__seq{i}`
+                // so SequenceAt consumers resolve (mirrors the conversion).
+                if onnx_node.op_type.as_str() == "SplitToSequence" {
+                    if let Some(elems) = split_to_sequence_element_shapes(
                         onnx_node,
                         value_shapes,
                         initializers,
                         const_values,
-                    );
-                    if let Some(inferred) = inferred_opt {
-                        if let Some(output_name) = onnx_node.output.first() {
-                            // Force the correct shape - shape inference computes exact output shape
-                            if value_shapes.get(output_name.as_str()) != Some(&inferred) {
-                                shapes_changed = true;
-                            }
-                            value_shapes.insert(output_name.to_string(), inferred);
-                            if matches!(onnx_node.op_type.as_str(), "ConvInteger" | "MatMulInteger")
-                            {
-                                value_types.insert(output_name.to_string(), DataType::Int32);
-                            } else if onnx_node.op_type.as_str() == "GatherBlockQuantized" {
-                                if let Some(dtype) = gather_block_quantized_dtype(
-                                    onnx_node,
-                                    value_types,
-                                    initializers,
-                                ) {
-                                    value_types.insert(output_name.to_string(), dtype);
+                    ) {
+                        if let Some(seq_name) = onnx_node.output.first() {
+                            let dtype = onnx_node
+                                .input
+                                .first()
+                                .and_then(|n| value_types.get(n.as_str()).copied());
+                            for (i, shape) in elems.iter().enumerate() {
+                                let key = format!("{}__seq{i}", sanitize_identifier(seq_name));
+                                value_shapes.insert(key.clone(), shape.clone());
+                                if let Some(dtype) = dtype {
+                                    value_types.insert(key, dtype);
                                 }
+                            }
+                            value_shapes.insert(
+                                format!("{}__seqlen", sanitize_identifier(seq_name)),
+                                vec![elems.len() as i64],
+                            );
+                        }
+                    }
+                    continue;
+                }
+                if onnx_node.op_type.as_str() == "SequenceAt" {
+                    let resolved = (|| {
+                        let ins = onnx_node.input.as_slice();
+                        let seq = sanitize_identifier(ins.first()?);
+                        let count = value_shapes
+                            .get(&format!("{seq}__seqlen"))?
+                            .first()
+                            .copied()?;
+                        let mut idx = const_values
+                            .get(ins.get(1)?.as_str())
+                            .and_then(|v| v.first().copied())
+                            .or_else(|| {
+                                initializers
+                                    .get(ins.get(1)?.as_str())
+                                    .and_then(|t| read_int_tensor(t).first().copied())
+                            })?;
+                        if idx < 0 {
+                            idx += count;
+                        }
+                        value_shapes.get(&format!("{seq}__seq{idx}")).cloned()
+                    })();
+                    if let (Some(shape), Some(out)) = (resolved, onnx_node.output.first()) {
+                        value_shapes.insert(out.to_string(), shape);
+                        if let Some(dtype) = onnx_node
+                            .input
+                            .first()
+                            .map(|n| format!("{}__seq0", sanitize_identifier(n)))
+                            .and_then(|k| value_types.get(&k).copied())
+                        {
+                            value_types.insert(out.to_string(), dtype);
+                        }
+                    }
+                    continue;
+                }
+
+                if matches!(onnx_node.op_type.as_str(), "LSTM" | "GRU" | "RNN") {
+                    if let Some(shapes) = rnn_output_shapes(onnx_node, value_shapes) {
+                        let dtype = onnx_node
+                            .input
+                            .first()
+                            .and_then(|n| value_types.get(n.as_str()).copied());
+                        for (output, shape) in onnx_node.output.iter().zip(shapes) {
+                            if !output.is_empty() {
+                                value_shapes.insert(output.to_string(), shape);
+                                if let Some(dtype) = dtype {
+                                    value_types.insert(output.to_string(), dtype);
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                }
+
+                if onnx_node.op_type.as_str() == "Split" {
+                    if let Some(shapes) = infer_split_output_shapes(
+                        onnx_node,
+                        value_shapes,
+                        initializers,
+                        const_values,
+                    ) {
+                        for (output, shape) in onnx_node.output.iter().zip(shapes) {
+                            value_shapes.insert(output.to_string(), shape);
+                        }
+                        continue;
+                    }
+                }
+
+                let inferred_opt =
+                    infer_node_output_shape(onnx_node, value_shapes, initializers, const_values);
+                if let Some(inferred) = inferred_opt {
+                    if let Some(output_name) = onnx_node.output.first() {
+                        // Force the correct shape - shape inference computes exact output shape
+                        if value_shapes.get(output_name.as_str()) != Some(&inferred) {
+                            shapes_changed = true;
+                        }
+                        value_shapes.insert(output_name.to_string(), inferred);
+                        if matches!(onnx_node.op_type.as_str(), "ConvInteger" | "MatMulInteger") {
+                            value_types.insert(output_name.to_string(), DataType::Int32);
+                        } else if onnx_node.op_type.as_str() == "GatherBlockQuantized" {
+                            if let Some(dtype) =
+                                gather_block_quantized_dtype(onnx_node, value_types, initializers)
+                            {
+                                value_types.insert(output_name.to_string(), dtype);
                             }
                         }
                     }
                 }
+            }
 
-                if value_shapes.len() == initial_count {
-                    break;
-                }
+            if value_shapes.len() == initial_count {
+                break;
+            }
 
-                if iteration == max_iterations - 1 {
-                    log::debug!(
-                        "Warning: Shape propagation reached max iterations ({}/{})",
-                        value_shapes.len(),
-                        graph.node.len()
-                    );
-                }
+            if iteration == max_iterations - 1 {
+                log::debug!(
+                    "Warning: Shape propagation reached max iterations ({}/{})",
+                    value_shapes.len(),
+                    graph.node.len()
+                );
             }
         }
 
@@ -4250,7 +4240,6 @@ mod tests {
             &mut const_values,
             &mut value_shape_dims,
             &PropagateOptions {
-                optimize: true,
                 experimental_dynamic_inputs: false,
             },
         );
@@ -4437,7 +4426,6 @@ mod tests {
             &mut const_values,
             &mut value_shape_dims,
             &PropagateOptions {
-                optimize: true,
                 experimental_dynamic_inputs: false,
             },
         );
@@ -4551,7 +4539,6 @@ mod tests {
             &mut const_values,
             &mut value_shape_dims,
             &PropagateOptions {
-                optimize: true,
                 experimental_dynamic_inputs: false,
             },
         );
@@ -4626,7 +4613,6 @@ mod tests {
             &mut const_values,
             &mut value_shape_dims,
             &PropagateOptions {
-                optimize: true,
                 experimental_dynamic_inputs: false,
             },
         );
@@ -4687,7 +4673,6 @@ mod tests {
             &mut const_values,
             &mut value_shape_dims,
             &PropagateOptions {
-                optimize: true,
                 experimental_dynamic_inputs: false,
             },
         );
@@ -4755,7 +4740,6 @@ mod tests {
             &mut const_values,
             &mut value_shape_dims,
             &PropagateOptions {
-                optimize: true,
                 experimental_dynamic_inputs: false,
             },
         );
