@@ -84,12 +84,6 @@ pub enum OnnxError {
     #[error("Failed to resolve external tensor data: {source}")]
     ExternalTensorDataError { source: Box<OnnxError> },
 
-    #[error("Failed to write cache file: {source}")]
-    CacheWriteError {
-        source: std::io::Error,
-        path: PathBuf,
-    },
-
     #[error("failed to parse ONNX protobuf: {0}")]
     ProtobufError(String),
 
@@ -1222,29 +1216,17 @@ Provide --override-dim {}=<value> or enable --experimental-dynamic-inputs.",
             },
         );
 
-        // DEBUG: Check value before node conversion
-        if let Some(val) = const_values.get("/model/rotary_emb/Where_output_0") {
-            log::debug!("[NODE CONV] /model/rotary_emb/Where_output_0 = {:?}", val);
-        }
-        // O2W_PROBE=<substr>: dump post-propagation shape/const state for
-        // matching node outputs (diagnostics only).
-        if let Ok(probe) = std::env::var("O2W_PROBE") {
-            for onnx_node in onnx_graph.node.as_slice() {
-                for out in onnx_node.output.as_slice() {
-                    if out.contains(&probe) {
-                        eprintln!(
-                            "[probe] {} ({}) shape={:?} type={:?} const={:?}",
-                            out,
-                            onnx_node.op_type,
-                            value_shapes.get(out.as_str()),
-                            value_types.get(out.as_str()),
-                            const_values.get(out.as_str()).map(|v| v
-                                .iter()
-                                .take(8)
-                                .copied()
-                                .collect::<Vec<_>>()),
-                        );
-                    }
+        if log::log_enabled!(log::Level::Trace) {
+            for onnx_node in &onnx_graph.node {
+                for out in &onnx_node.output {
+                    log::trace!(
+                        "Post-propagation output {} ({}) shape={:?} type={:?} const={:?}",
+                        out,
+                        onnx_node.op_type,
+                        value_shapes.get(out.as_str()),
+                        value_types.get(out.as_str()),
+                        const_values.get(out.as_str()).map(|v| &v[..v.len().min(8)]),
+                    );
                 }
             }
         }
@@ -1747,31 +1729,6 @@ fn load_model_from_path(
     }
 
     Ok((model, options))
-}
-
-/// Cache an ONNX model with all external tensor data embedded in the protobuf.
-///
-/// Keeping the cache self-contained means native ORT validation can reopen the
-/// cached `.onnx` without relying on a source-side `.onnx.data` file.
-pub fn cache_onnx_model<P: AsRef<Path>, Q: AsRef<Path>>(
-    source_path: P,
-    cache_path: Q,
-    zero_fill_missing_external_data: bool,
-) -> Result<(), OnnxError> {
-    let source_path = source_path.as_ref();
-    let bytes = fs::read(source_path)?;
-    let mut model = ModelProto::decode(bytes.as_slice())
-        .map_err(|e| OnnxError::ProtobufError(e.to_string()))?;
-    load_external_tensor_data(&mut model, source_path, zero_fill_missing_external_data)?;
-    let cache_path = cache_path.as_ref();
-    if let Some(parent) = cache_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(cache_path, model.encode_to_vec()).map_err(|err| OnnxError::CacheWriteError {
-        source: err,
-        path: cache_path.to_owned(),
-    })?;
-    Ok(())
 }
 
 /// Inline `If` nodes whose condition folds to a constant (e.g. pyannote's

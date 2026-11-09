@@ -24,16 +24,16 @@ use std::path::{Path, PathBuf};
 use onnx2webnn::model_validation::manifest::Selection;
 use onnx2webnn::model_validation::{run_manifest_validation, RunOptions, WeightMode};
 use onnx2webnn::{
-    cache_onnx_model, convert_onnx_with_backend, export_onnx,
-    validate_cached_model_with_inputs_on_backend, validate_cached_model_with_options_on_backend,
-    ConvertOptions,
+    convert_onnx_with_backend, export_onnx, validate_cached_model_with_inputs_on_backend,
+    validate_cached_model_with_options_on_backend, ConvertOptions,
 };
 
 #[derive(Parser)]
 #[command(name = "onnx2webnn")]
 #[command(
     about = "Convert ONNX models to WebNN via MLGraphBuilder",
-    long_about = None
+    long_about = None,
+    after_help = "Set the log level with RUST_LOG (e.g. RUST_LOG=debug or RUST_LOG=onnx2webnn=trace)."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -42,10 +42,6 @@ struct Cli {
 
 #[derive(Args)]
 struct CommonArgs {
-    /// Enable debug output
-    #[arg(long, global = true)]
-    debug: bool,
-
     #[arg(long, global = true, help = backend_help())]
     backend: Option<Backend>,
 }
@@ -122,6 +118,10 @@ Run validate separately to supply execution inputs without modifying the graph."
         /// Number of parallel light-model workers; heavy models remain sequential
         #[arg(long, default_value_t = 1)]
         jobs: usize,
+
+        /// Redownload manifest models and external weights from Hugging Face
+        #[arg(long)]
+        refresh_model_cache: bool,
     },
 
     /// Validate existing WebNN graphs against ONNX models without conversion
@@ -198,7 +198,7 @@ fn parse_pins(specs: Vec<String>) -> anyhow::Result<HashMap<String, i64>> {
     Ok(values)
 }
 
-fn cache_paths(input: &Path) -> anyhow::Result<(PathBuf, PathBuf)> {
+fn cached_webnn_path(input: &Path) -> anyhow::Result<PathBuf> {
     let canonical = input.canonicalize().unwrap_or_else(|_| input.to_path_buf());
     let mut hash = 0xcbf29ce484222325u64;
     for byte in canonical.to_string_lossy().bytes() {
@@ -214,20 +214,14 @@ fn cache_paths(input: &Path) -> anyhow::Result<(PathBuf, PathBuf)> {
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .collect();
     let key = format!("{safe_stem}-{hash:016x}");
-    Ok((
-        onnx2webnn::cache::onnx_cache_dir()
-            .map_err(anyhow::Error::msg)?
-            .join(format!("{key}.onnx")),
-        onnx2webnn::cache::webnn_cache_dir()
-            .map_err(anyhow::Error::msg)?
-            .join(format!("{key}.webnn")),
-    ))
+    Ok(onnx2webnn::cache::webnn_cache_dir()
+        .map_err(anyhow::Error::msg)?
+        .join(format!("{key}.webnn")))
 }
 
-fn conversion_paths(input: &Path, output: Option<&Path>) -> anyhow::Result<(PathBuf, PathBuf)> {
-    let (onnx, cached_webnn) = cache_paths(input)?;
+fn conversion_path(input: &Path, output: Option<&Path>) -> anyhow::Result<PathBuf> {
     let webnn = match output {
-        None => cached_webnn,
+        None => cached_webnn_path(input)?,
         Some(path) => match path.extension() {
             Some(ext) if ext == "webnn" => {
                 anyhow::ensure!(
@@ -256,7 +250,7 @@ fn conversion_paths(input: &Path, output: Option<&Path>) -> anyhow::Result<(Path
             ),
         },
     };
-    Ok((onnx, webnn))
+    Ok(webnn)
 }
 
 fn model_settings(args: ModelSettingsArgs) -> anyhow::Result<ModelSettings> {
@@ -294,9 +288,6 @@ fn main() -> anyhow::Result<()> {
     if !matches!(cli.cmd, Command::OperatorCatalog { .. }) {
         std::env::set_var("O2W_OPERATOR_REPORT", "1");
     }
-    if common.debug {
-        std::env::set_var("RUST_LOG", "debug");
-    }
     pretty_env_logger::init();
     let validation_backend = if !matches!(cli.cmd, Command::OperatorCatalog { .. }) {
         let dynamic_inputs = matches!(
@@ -329,8 +320,7 @@ fn main() -> anyhow::Result<()> {
             ..
         } => {
             let ModelSettings { overrides, pins } = model_settings(settings)?;
-            let (onnx, graph) = conversion_paths(&model, output.as_deref())?;
-            cache_onnx_model(&model, &onnx, allow_missing_external_data)?;
+            let graph = conversion_path(&model, output.as_deref())?;
             let options = ConvertOptions {
                 free_dim_overrides: overrides,
                 optimize: constant_folding,
@@ -353,7 +343,6 @@ fn main() -> anyhow::Result<()> {
                     model.display()
                 );
             }
-            println!("✓ cached ONNX at {}", onnx.display());
             println!("✓ WebNN at {}", graph.display());
             println!("PASS {}", model.display());
         }
@@ -368,7 +357,7 @@ fn main() -> anyhow::Result<()> {
             let ModelSettings { overrides, pins } = model_settings(settings)?;
             let graph = match webnn {
                 Some(graph) => graph,
-                None => cache_paths(&onnx)?.1,
+                None => cached_webnn_path(&onnx)?,
             };
             anyhow::ensure!(
                 graph.is_file(),
@@ -396,12 +385,14 @@ fn main() -> anyhow::Result<()> {
             weights,
             manifest,
             jobs,
+            refresh_model_cache,
             ..
         } => {
             let backend = validation_backend.expect("validation backend established by preflight");
             let selection = Selection::parse(&selection).map_err(anyhow::Error::msg)?;
             let mut options = RunOptions::new(selection, weights).map_err(anyhow::Error::msg)?;
             options.jobs = jobs;
+            options.refresh_model_cache = refresh_model_cache;
             options.backend = backend;
             options.optimize = constant_folding;
             if let Some(manifest) = manifest {

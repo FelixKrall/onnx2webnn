@@ -76,8 +76,8 @@ Validation currently allocates tensors at maximum bounded sizes, so smaller conc
 with a size mismatch.
 
 Without CLI overrides, `model.dims.json` can supply dimension bindings. WebNN exports default
-to the OS cache's `onnx2webnn/webnn` directory; source ONNX copies go to `onnx2webnn/onnx`.
-Set `O2W_CACHE_DIR`, `O2W_ONNX_CACHE`, or `O2W_WEBNN_CACHE` to override locations.
+to the OS cache's `onnx2webnn/webnn` directory; set `O2W_WEBNN_CACHE` to override it.
+Source ONNX files are read in place.
 
 WebNN lacks fused `MatMulNBits`; conversion dequantizes packed q4/q8 weights before floating-point
 matmul. ORT `accuracy_level=4` can instead use Int8 activations, so numerical parity is not assured.
@@ -109,11 +109,12 @@ dynamic shapes or further specialization.
 | `--pin-input NAME=VALUE` | On `convert`, freeze an input to a boolean/integer; on `validate`, supply the same pin for the reference run (repeatable) |
 | `--allow-missing-external-data` | Zero-fill absent external tensors for structural conversion |
 | `--experimental-dynamic-inputs` | Preserve unresolved symbolic dims as dynamic metadata during conversion |
-| `--debug` | Verbose converter diagnostics (shared across modes); `RUST_LOG` controls environment logging |
 | `--backend NAME` | Optional graph-build backend; required for every numerical validation. Names: `onnx`, `coreml`, `trtx`, `litert`, `cann`, `burn-cpu`; the runtime must be compiled in and available |
 | `--webnn PATH` | On `validate`: one existing WebNN graph; omit for cache lookup |
 
-Shared `--backend` and `--debug` options must follow the mode name, for example
+Set logging with `RUST_LOG` (e.g. `info`, `debug`, or `onnx2webnn=trace`).
+
+The shared `--backend` option must follow the mode name, for example
 `onnx2webnn convert --backend onnx --model model.onnx`. Options before the mode are rejected.
 
 `convert` accepts one `--model`; `validate` accepts one `--onnx`, an optional `--webnn`, and
@@ -177,8 +178,8 @@ PR CI numerically validates the curated
 experimental; Windows does not run this check. Each entry pins a Hugging Face commit and ONNX
 SHA-256, verified on download and reuse. To add one, test both backends and record its file,
 revision, digest, dimensions, and pinned inputs in the curated file—not the generated manifest.
-Downloads use the standard Hugging Face cache unless `O2W_ONNX_CACHE` or `O2W_CACHE_DIR` overrides
-it.
+Downloads honor `HF_HUB_CACHE`, `HUGGINGFACE_HUB_CACHE`, and `HF_HOME`, falling back to
+the platform cache's `huggingface/hub` directory. Use `--refresh-model-cache` to force fresh downloads.
 
 ```bash
 target/release/onnx2webnn validate-manifest --backend onnx \

@@ -35,44 +35,19 @@ struct CachedFile {
     length: u64,
 }
 
-pub fn cache_root() -> Result<PathBuf, String> {
-    resolve_cache_root(
-        nonempty_env("O2W_ONNX_CACHE"),
-        nonempty_env("O2W_CACHE_DIR"),
-        nonempty_env("HF_HUB_CACHE"),
-        nonempty_env("HUGGINGFACE_HUB_CACHE"),
-        nonempty_env("HF_HOME"),
-        dirs::cache_dir(),
-    )
-    .ok_or_else(|| {
-        "cannot determine the Hugging Face cache directory; set O2W_ONNX_CACHE or HF_HUB_CACHE"
-            .to_string()
-    })
+// Honor HF overrides, with a platform-native cache directory as the fallback.
+fn cache_root() -> Result<PathBuf, String> {
+    let env_path = |name| std::env::var(name).ok().map(PathBuf::from);
+    env_path("HF_HUB_CACHE")
+        .or_else(|| env_path("HUGGINGFACE_HUB_CACHE"))
+        .or_else(|| env_path("HF_HOME").map(|root| root.join("hub")))
+        .or_else(|| dirs::cache_dir().map(|root| root.join("huggingface/hub")))
+        .ok_or_else(|| {
+            "cannot determine the cache directory; set HF_HUB_CACHE or HF_HOME".to_string()
+        })
 }
 
-fn resolve_cache_root(
-    o2w_onnx: Option<PathBuf>,
-    o2w_shared: Option<PathBuf>,
-    hf_hub: Option<PathBuf>,
-    legacy_hf_hub: Option<PathBuf>,
-    hf_home: Option<PathBuf>,
-    os_cache: Option<PathBuf>,
-) -> Option<PathBuf> {
-    o2w_onnx
-        .or_else(|| o2w_shared.map(|path| path.join("onnx")))
-        .or(hf_hub)
-        .or(legacy_hf_hub)
-        .or_else(|| hf_home.map(|path| path.join("hub")))
-        .or_else(|| os_cache.map(|path| path.join("huggingface").join("hub")))
-}
-
-fn nonempty_env(name: &str) -> Option<PathBuf> {
-    std::env::var_os(name)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-}
-
-pub fn cache_full_model(entry: &Entry) -> Result<PathBuf, String> {
+pub fn cache_full_model(entry: &Entry, refresh: bool) -> Result<PathBuf, String> {
     let cache_root = cache_root()?;
     fs::create_dir_all(&cache_root).map_err(|e| format!("create {}: {e}", cache_root.display()))?;
     let revision = entry.revision();
@@ -88,7 +63,6 @@ pub fn cache_full_model(entry: &Entry) -> Result<PathBuf, String> {
         .map_err(|e| format!("create blocking Hugging Face client: {e}"))?;
     let repository_client = client.model(owner, name);
     let metadata_path = metadata_path(&cache_root, entry);
-    let refresh = std::env::var_os("O2W_MODEL_CACHE_REFRESH").is_some();
 
     if !refresh {
         if let Some(model_path) = complete_cache(
@@ -387,42 +361,6 @@ fn external_locations(model: &ModelProto) -> Result<Vec<PathBuf>, String> {
 mod tests {
     use super::*;
     use crate::protos::onnx::{StringStringEntryProto, TensorProto};
-
-    #[test]
-    fn model_cache_precedence_prefers_o2w_then_hugging_face() {
-        let path = resolve_cache_root(
-            Some("/o2w-models".into()),
-            Some("/o2w".into()),
-            Some("/hf-hub".into()),
-            Some("/legacy-hf-hub".into()),
-            Some("/hf-home".into()),
-            Some("/os-cache".into()),
-        );
-        assert_eq!(path, Some(PathBuf::from("/o2w-models")));
-
-        let path = resolve_cache_root(
-            None,
-            Some("/o2w".into()),
-            Some("/hf-hub".into()),
-            None,
-            None,
-            None,
-        );
-        assert_eq!(path, Some(PathBuf::from("/o2w/onnx")));
-
-        let path = resolve_cache_root(
-            None,
-            None,
-            Some("/hf-hub".into()),
-            None,
-            Some("/hf-home".into()),
-            Some("/os-cache".into()),
-        );
-        assert_eq!(path, Some(PathBuf::from("/hf-hub")));
-
-        let path = resolve_cache_root(None, None, None, None, None, Some("/os-cache".into()));
-        assert_eq!(path, Some(PathBuf::from("/os-cache/huggingface/hub")));
-    }
 
     #[test]
     fn cache_metadata_requires_current_format_revision_and_digest() {
