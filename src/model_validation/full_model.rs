@@ -35,25 +35,20 @@ struct CachedFile {
     length: u64,
 }
 
-// Match the pinned HF client's cache layout so completion metadata stays beside its downloads.
-fn cache_root() -> PathBuf {
+// Honor HF overrides, with a platform-native cache directory as the fallback.
+fn cache_root() -> Result<PathBuf, String> {
     let env_path = |name| std::env::var(name).ok().map(PathBuf::from);
     env_path("HF_HUB_CACHE")
         .or_else(|| env_path("HUGGINGFACE_HUB_CACHE"))
-        .unwrap_or_else(|| {
-            env_path("HF_HOME")
-                .or_else(|| env_path("XDG_CACHE_HOME").map(|root| root.join("huggingface")))
-                .unwrap_or_else(|| {
-                    env_path("HOME")
-                        .unwrap_or_else(|| PathBuf::from("/tmp"))
-                        .join(".cache/huggingface")
-                })
-                .join("hub")
+        .or_else(|| env_path("HF_HOME").map(|root| root.join("hub")))
+        .or_else(|| dirs::cache_dir().map(|root| root.join("huggingface/hub")))
+        .ok_or_else(|| {
+            "cannot determine the cache directory; set HF_HUB_CACHE or HF_HOME".to_string()
         })
 }
 
 pub fn cache_full_model(entry: &Entry, refresh: bool) -> Result<PathBuf, String> {
-    let cache_root = cache_root();
+    let cache_root = cache_root()?;
     fs::create_dir_all(&cache_root).map_err(|e| format!("create {}: {e}", cache_root.display()))?;
     let revision = entry.revision();
     let (repository, repository_path) = parse_manifest_file(&entry.file)?;

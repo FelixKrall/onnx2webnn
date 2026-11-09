@@ -178,8 +178,8 @@ PR CI numerically validates the curated
 experimental; Windows does not run this check. Each entry pins a Hugging Face commit and ONNX
 SHA-256, verified on download and reuse. To add one, test both backends and record its file,
 revision, digest, dimensions, and pinned inputs in the curated file—not the generated manifest.
-Downloads use the standard Hugging Face cache (`HF_HUB_CACHE`, `HUGGINGFACE_HUB_CACHE`,
-or `HF_HOME`). Use `validate-manifest --refresh-model-cache` to force fresh downloads.
+Downloads honor `HF_HUB_CACHE`, `HUGGINGFACE_HUB_CACHE`, and `HF_HOME`, falling back to
+the platform cache's `huggingface/hub` directory. Use `--refresh-model-cache` to force fresh downloads.
 
 ```bash
 target/release/onnx2webnn validate-manifest --backend onnx \
