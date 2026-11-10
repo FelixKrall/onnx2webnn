@@ -2,7 +2,6 @@
 
 use crate::onnx::convert::{backend_context_options, OnnxError};
 use rustnn::mlcontext::{Backend, MLContext};
-use std::path::PathBuf;
 
 /// Describe compile-time support without loading native runtimes.
 pub fn backend_summary() -> String {
@@ -86,40 +85,7 @@ fn check_runtime(backend: Backend) -> Result<(), OnnxError> {
         .map_err(|error| context_creation_error(backend.as_ref(), error))
 }
 
-/// Distinguish missing compiled support from runtime or device initialization failures.
+/// Preserve RustNN's backend discovery and initialization failure details.
 pub(crate) fn context_creation_error(backend: &str, error: rustnn::error::Error) -> OnnxError {
-    if let rustnn::error::Error::NoBackendAvailableForBackendHint { backend_hint, .. } = &error {
-        let name = backend_hint.as_ref();
-        if let Err(error) = check_backend_build(*backend_hint) {
-            return error;
-        }
-        let mut detail = format!(
-            "{name} backend is compiled in, but runtime initialization or device discovery failed"
-        );
-        match backend_hint {
-            Backend::Onnx => {
-                let path = std::env::var_os("ORT_DYLIB_PATH").filter(|path| !path.is_empty());
-                let location = match path {
-                    Some(path) => format!("ORT_DYLIB_PATH={}", PathBuf::from(path).display()),
-                    None => format!(
-                        "ORT_DYLIB_PATH is unset; default library is {}onnxruntime{}",
-                        std::env::consts::DLL_PREFIX,
-                        std::env::consts::DLL_SUFFIX
-                    ),
-                };
-                detail.push_str(&format!(
-                    ". {location}. Check the ONNX Runtime shared library and its dependencies; set ORT_DYLIB_PATH to a compatible runtime library"
-                ));
-            }
-            Backend::Trtx => detail.push_str(
-                ". Check the TensorRT-RTX shared libraries, CUDA driver, and an NVIDIA GPU with compute capability >= 8.0; RustNN does not expose which initialization step failed",
-            ),
-            Backend::Litert => detail.push_str(
-                ". LiteRT reported no usable runtime environment; check the LiteRT runtime installation. RustNN does not expose the initialization cause",
-            ),
-            _ => {}
-        }
-        return OnnxError::Backend(detail);
-    }
     OnnxError::Backend(format!("{backend} context creation failed: {error}"))
 }

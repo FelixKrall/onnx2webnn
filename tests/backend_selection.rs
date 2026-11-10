@@ -76,3 +76,19 @@ fn help_includes_every_upstream_backend() {
         );
     }
 }
+
+#[test]
+fn runtime_initialization_error_retains_the_library_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing_library = dir.path().join("missing-onnxruntime");
+    let output = Command::new(env!("CARGO_BIN_EXE_onnx2webnn"))
+        .args(["convert", "--model", "missing.onnx", "--backend", "onnx"])
+        .env("ORT_DYLIB_PATH", &missing_library)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("missing-onnxruntime"), "{stderr}");
+    assert!(stderr.contains("onnx context creation failed"), "{stderr}");
+    assert!(!stderr.contains("RustNN does not expose"), "{stderr}");
+}
