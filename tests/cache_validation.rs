@@ -350,6 +350,34 @@ fn packed_uint4_matmul_round_trips_and_matches_native_ort() {
     validate_cached_model(&source, &uncompiled_webnn).expect("validate uncompiled packed fixture");
 }
 
+fn format_dtype_failure(
+    stage: &str,
+    label: &str,
+    error: &(dyn std::error::Error + 'static),
+) -> String {
+    format!(
+        "{stage} {label}:\n{}",
+        rustnn::error::format_error_chain(error)
+    )
+}
+
+#[test]
+fn integer_dtype_diagnostic_preserves_nested_backend_failure() {
+    let error = onnx2webnn::OnnxError::Context {
+        message: "default graph build failed".into(),
+        source: Box::new(rustnn::error::Error::GraphBuildError {
+            source: std::io::Error::other("CoreML does not support Identity int8 graph I/O").into(),
+        }),
+    };
+    let diagnostic = format_dtype_failure("convert", "int8", &error);
+    assert!(diagnostic.contains("CoreML"), "{diagnostic}");
+    assert!(diagnostic.contains("Identity"), "{diagnostic}");
+    assert!(
+        diagnostic.contains("default graph build failed\n"),
+        "{diagnostic}"
+    );
+}
+
 fn integer_dtype_round_trip(label: &str, elem_type: i32) -> Result<(), String> {
     let dir = tempfile::tempdir().map_err(|error| format!("temporary cache: {error}"))?;
     let source = dir.path().join(format!("{label}.onnx"));
@@ -373,9 +401,9 @@ fn integer_dtype_round_trip(label: &str, elem_type: i32) -> Result<(), String> {
             ..ConvertOptions::default()
         },
     )
-    .map_err(|error| format!("convert {label}: {error}"))?;
+    .map_err(|error| format_dtype_failure("convert", label, &error))?;
     let summary = validate_cached_model(&source, &cached_webnn)
-        .map_err(|error| format!("validate {label}: {error}"))?;
+        .map_err(|error| format_dtype_failure("validate", label, &error))?;
     if summary.input_count != 1 || summary.output_count != 1 {
         return Err(format!(
             "validate {label}: expected one input and output, got {} and {}",
@@ -1053,8 +1081,12 @@ fn validate_folding_regression(fixture: onnx2webnn::protos::onnx::ModelProto) {
             },
         )
         .unwrap();
-        validate_cached_model(&source, &webnn)
-            .unwrap_or_else(|error| panic!("folding={optimize}: {error}"));
+        validate_cached_model(&source, &webnn).unwrap_or_else(|error| {
+            panic!(
+                "folding={optimize}:\n{}",
+                rustnn::error::format_error_chain(&error)
+            )
+        });
     }
 }
 
