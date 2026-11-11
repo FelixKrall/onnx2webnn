@@ -33,7 +33,8 @@ make -C ../rustnn onnxruntime-download
 Set `ORT_DYLIB_PATH` to the downloaded shared library before ORT use; see
 [CI setup](.github/workflows/ci.yml) for platform paths.
 A compiled backend still needs its native runtime and compatible devices. Context initialization
-errors preserve RustNN's runtime-loading and device-discovery failure details.
+errors show indented causal chains, preserving RustNN's runtime-loading and device-discovery
+failure details. These are error causes, not program stack traces.
 One CLI preflight checks compiled backends, requested dynamic-input support, and runtime
 initialization before processing models, writing caches, or downloading manifest models.
 Validation also checks native ONNX Runtime. Export-only conversion and the operator catalog

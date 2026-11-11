@@ -272,7 +272,20 @@ fn validate_graph(
     Ok(summary)
 }
 
-fn main() -> anyhow::Result<()> {
+fn main() -> std::process::ExitCode {
+    match run() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!(
+                "Error: {}",
+                rustnn::error::format_error_chain(error.as_ref())
+            );
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let common = match &cli.cmd {
         Command::OperatorCatalog { common }

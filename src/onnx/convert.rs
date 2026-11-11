@@ -111,11 +111,28 @@ pub enum OnnxError {
     #[error("backend error: {0}")]
     Backend(String),
 
+    #[error("{message}")]
+    Context {
+        message: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
     #[error("WebNN export failed: {0}")]
     Export(String),
 }
 
 impl OnnxError {
+    pub(crate) fn context(
+        message: impl Into<String>,
+        source: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        Self::Context {
+            message: message.into(),
+            source: Box::new(source),
+        }
+    }
+
     /// Report a single unsupported operator/node pair.
     pub fn unsupported_op(op: impl Into<String>, node: impl Into<String>) -> Self {
         Self::UnsupportedOps(vec![UnsupportedOpEntry {
@@ -2008,7 +2025,7 @@ fn convert_model_with_context_options(
     let mut context = MLContext::create(&context_options)
         .map_err(|error| crate::capabilities::context_creation_error(backend, error))?;
     let mut ml_builder = MLGraphBuilder::new(&mut context)
-        .map_err(|e| OnnxError::Backend(format!("{backend} builder creation failed: {e}")))?;
+        .map_err(|e| OnnxError::context(format!("{backend} builder creation failed"), e))?;
     let outputs = record_and_save(&mut converter, options, &mut ml_builder)?;
     let output_refs: BTreeMap<&str, MLOperand> = outputs
         .iter()
@@ -2016,7 +2033,7 @@ fn convert_model_with_context_options(
         .collect();
     let graph = ml_builder
         .build(&output_refs)
-        .map_err(|e| OnnxError::Backend(format!("{backend} graph build failed: {e}")))?;
+        .map_err(|e| OnnxError::context(format!("{backend} graph build failed"), e))?;
     Ok(ValidatedGraph { context, graph })
 }
 

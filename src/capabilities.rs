@@ -87,5 +87,5 @@ fn check_runtime(backend: Backend) -> Result<(), OnnxError> {
 
 /// Preserve RustNN's backend discovery and initialization failure details.
 pub(crate) fn context_creation_error(backend: &str, error: rustnn::error::Error) -> OnnxError {
-    OnnxError::Backend(format!("{backend} context creation failed: {error}"))
+    OnnxError::context(format!("{backend} context creation failed"), error)
 }

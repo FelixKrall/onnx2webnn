@@ -3092,7 +3092,6 @@ dependencies = [
 [[package]]
 name = "rustnn"
 version = "0.6.0"
-source = "git+https://github.com/FelixKrall/rustnn?branch=cleanup-backend-selection#e099e9e27db935b266d8abaec2c201e46921d3e7"
 dependencies = [
  "base64 0.23.1",
  "block",

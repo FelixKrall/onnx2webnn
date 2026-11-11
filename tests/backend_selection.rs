@@ -89,6 +89,14 @@ fn runtime_initialization_error_retains_the_library_path() {
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("missing-onnxruntime"), "{stderr}");
-    assert!(stderr.contains("onnx context creation failed"), "{stderr}");
+    assert!(
+        stderr.contains("Error: onnx context creation failed\n  No backend"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("\n    Failed to create context\n      onnx runtime initialization failed"),
+        "{stderr}"
+    );
+    assert_eq!(stderr.matches("missing-onnxruntime").count(), 1, "{stderr}");
     assert!(!stderr.contains("RustNN does not expose"), "{stderr}");
 }
