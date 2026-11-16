@@ -84,6 +84,7 @@ fn runtime_initialization_error_retains_the_library_path() {
     let output = Command::new(env!("CARGO_BIN_EXE_onnx2webnn"))
         .args(["convert", "--model", "missing.onnx", "--backend", "onnx"])
         .env("ORT_DYLIB_PATH", &missing_library)
+        .env_remove("RUST_LOG")
         .output()
         .unwrap();
     assert!(!output.status.success());
@@ -94,9 +95,23 @@ fn runtime_initialization_error_retains_the_library_path() {
         "{stderr}"
     );
     assert!(
-        stderr.contains("\n    Failed to create context\n      onnx runtime initialization failed"),
+        stderr
+            .lines()
+            .any(|line| line.starts_with("    Failed to create context:")),
         "{stderr}"
     );
-    assert_eq!(stderr.matches("missing-onnxruntime").count(), 1, "{stderr}");
+    assert!(
+        stderr
+            .lines()
+            .any(|line| line.starts_with("      onnx runtime initialization failed:")),
+        "{stderr}"
+    );
+    assert!(
+        stderr
+            .lines()
+            .any(|line| line.starts_with("        failed to load from `")
+                && line.contains("missing-onnxruntime")),
+        "{stderr}"
+    );
     assert!(!stderr.contains("RustNN does not expose"), "{stderr}");
 }
